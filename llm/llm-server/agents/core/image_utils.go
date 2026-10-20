@@ -212,7 +212,8 @@ func stripDataURIPrefix(data string) string {
 // silently downgraded — and so that we don't blanket-reject an entire vendor
 // (e.g. "cohere") when only specific model families are non-vision.
 //
-// Default-allow: any model not matching these patterns is assumed vision-capable.
+// A model matching none of these is NOT assumed vision-capable — see
+// IsVisionCapableModel for the default-deny fallback.
 //
 // Tradeoff: claude-2 is matched by prefix because every real claude-2.X model
 // (claude-2.0, claude-2.1) is text-only. If Anthropic ever ships a vision
@@ -258,12 +259,18 @@ func compileVisionDenyPatterns(patterns []string) []*regexp.Regexp {
 //     Checked first so it can deny a model even if the DB says otherwise
 //     (e.g. an emergency override without touching data).
 //  2. An explicit verdict from llm_model_pricing.supports_image_input, when
-//     recorded — this is the authoritative, DB-backed source of truth.
+//     recorded — this is the authoritative, DB-backed source of truth. The
+//     account's own tenant row is consulted first, then the built-in row.
 //  3. Default-deny. Without a positive DB record, a model is NOT treated as
 //     vision-capable — absence of evidence in the deny-list is not evidence
 //     of vision support. Callers that want a model to drive image-based
 //     investigation must record supports_image_input = true for it.
-func IsVisionCapableModel(provider, model string) bool {
+func IsVisionCapableModel(accountId, provider, model string) bool {
+	return isVisionCapable(TenantForPricing(accountId), provider, model)
+}
+
+// isVisionCapable is IsVisionCapableModel with the tenant already resolved.
+func isVisionCapable(tenantId, provider, model string) bool {
 	nonVisionCSV := config.Config.GetString("llm_server_non_vision_models", "")
 
 	visionDeny.mu.Lock()
@@ -284,6 +291,11 @@ func IsVisionCapableModel(provider, model string) bool {
 		}
 	}
 
+	if tenantId != "" {
+		if supported, known := imageSupportForTenant(tenantId).lookup(provider, model); known {
+			return supported
+		}
+	}
 	if supported, known := imageSupport.lookup(provider, model); known {
 		return supported
 	}
@@ -394,11 +406,11 @@ func AppendImagesToLastHumanMessage(mcList []llms.MessageContent, images []Image
 // Prefers the lite model (cheaper/faster) when it's vision-capable; falls
 // back to the main model. ok is false if neither model supports vision —
 // callers should skip the vision call entirely in that case.
-func resolveVisionCapableTier(provider, model string) (useLite bool, ok bool) {
-	if liteModel := config.Config.LlmModelLite; liteModel != "" && IsVisionCapableModel(provider, liteModel) {
+func resolveVisionCapableTier(accountId, provider, model string) (useLite bool, ok bool) {
+	if liteModel := config.Config.LlmModelLite; liteModel != "" && IsVisionCapableModel(accountId, provider, liteModel) {
 		return true, true
 	}
-	return false, IsVisionCapableModel(provider, model)
+	return false, IsVisionCapableModel(accountId, provider, model)
 }
 
 // resolveEffectiveVisionProvider returns the provider/model that will actually
@@ -467,7 +479,7 @@ func ExtractImageContext(ctx *security.RequestContext, request NBAgentRequest) s
 
 	provider, model := resolveEffectiveVisionProvider(ctx, request.AccountId, "", request.ConversationId)
 
-	useLite, ok := resolveVisionCapableTier(provider, model)
+	useLite, ok := resolveVisionCapableTier(request.AccountId, provider, model)
 	if !ok {
 		ctx.GetLogger().Debug("image: skipping context extraction, model not vision-capable",
 			"provider", provider, "model", model)
@@ -636,7 +648,7 @@ Be factual and specific. Do not speculate beyond what is visible. Keep the descr
 func generateImageDescription(ctx *security.RequestContext, accountId, conversationId, messageId, userId string, img ImageAttachment) string {
 	provider, model := resolveEffectiveVisionProvider(ctx, accountId, "", conversationId)
 
-	useLite, ok := resolveVisionCapableTier(provider, model)
+	useLite, ok := resolveVisionCapableTier(accountId, provider, model)
 	if !ok {
 		ctx.GetLogger().Debug("image: skipping description generation, no vision-capable model available")
 		return ""

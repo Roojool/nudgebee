@@ -2,12 +2,25 @@ package common
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestQuoteCommandArgRoundTrip(t *testing.T) {
+	value := "client secret with spaces and 'quotes' $dollars"
+	stdout, stderr, err := SecureExecute(context.Background(), SecureCommandOptions{Command: "printf '%s' " + QuoteCommandArg(value)})
+	if err != nil {
+		t.Fatalf("quote round trip failed: %v (stderr: %s)", err, stderr)
+	}
+	if stdout != value {
+		t.Fatalf("quoted argument changed: got %q, want %q", stdout, value)
+	}
+}
 
 func TestSecureExecute(t *testing.T) {
 	t.Run("SimpleSuccess", func(t *testing.T) {
@@ -47,6 +60,76 @@ func TestSecureExecute(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "command timed out") {
 			t.Errorf("expected error to be about timeout, got %v", err)
+		}
+	})
+
+	t.Run("StructuredCommandError", func(t *testing.T) {
+		_, _, err := SecureExecute(context.Background(), SecureCommandOptions{
+			Command:        "sh -c 'exit 7'",
+			MaxOutputBytes: 1024,
+		})
+		var exitErr *CommandExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode != 7 {
+			t.Fatalf("expected typed exit 7, got %T %v", err, err)
+		}
+	})
+
+	t.Run("StructuredTimeout", func(t *testing.T) {
+		_, _, err := SecureExecute(context.Background(), SecureCommandOptions{
+			Command:        "sleep 1",
+			Timeout:        50 * time.Millisecond,
+			MaxOutputBytes: 1024,
+		})
+		var timeoutErr *CommandTimeoutError
+		if !errors.As(err, &timeoutErr) {
+			t.Fatalf("expected typed timeout, got %T %v", err, err)
+		}
+	})
+
+	t.Run("OutputIsCappedAndDrained", func(t *testing.T) {
+		truncated := false
+		opts := SecureCommandOptions{
+			Command:         "sh -c 'printf 1234567890; printf abcdefghij >&2'",
+			MaxOutputBytes:  5,
+			OutputTruncated: &truncated,
+		}
+		stdout, stderr, err := SecureExecute(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if stdout != "12345" || stderr != "abcde" {
+			t.Fatalf("expected capped streams, got stdout=%q stderr=%q", stdout, stderr)
+		}
+		if !truncated {
+			t.Fatal("expected output truncation to be reported")
+		}
+	})
+
+	t.Run("StructuredOutputDrainIsBounded", func(t *testing.T) {
+		stdoutReader, stdoutWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = stdoutWriter.Close() }()
+		stderrReader, stderrWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = stderrWriter.Close() }()
+
+		stdoutDone := make(chan struct{})
+		stderrDone := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(io.Discard, stdoutReader)
+			close(stdoutDone)
+		}()
+		go func() {
+			_, _ = io.Copy(io.Discard, stderrReader)
+			close(stderrDone)
+		}()
+
+		if !waitForCommandOutput(true, stdoutReader, stderrReader, stdoutDone, stderrDone, 10*time.Millisecond) {
+			t.Fatal("expected inherited pipe wait to time out")
 		}
 	})
 

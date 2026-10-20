@@ -779,6 +779,27 @@ func gp2ToGp3Match(sizeGiB float64) gp3MatchConfig {
 	return cfg
 }
 
+// ebsStoragePricePerGBMonth is the us-east-1 list price of one GB-month of EBS
+// storage for a volume type. Storage only: IOPS and throughput provisioned above
+// the free baseline (io1/io2, tuned gp3) are billed separately and not counted
+// here, so for those volumes the figure is a floor.
+func ebsStoragePricePerGBMonth(volumeType string) float64 {
+	switch volumeType {
+	case "gp3":
+		return 0.08
+	case "io1", "io2":
+		return 0.125
+	case "st1":
+		return 0.045
+	case "sc1":
+		return 0.015
+	case "standard":
+		return 0.05
+	default: // gp2, and any type not listed above
+		return 0.10
+	}
+}
+
 func (a *amazonEc2) GetRecommendations(ctx providers.CloudProviderContext, account providers.Account, filter providers.ListRecommendationsRequest, existingResources []providers.Resource) ([]providers.Recommendation, error) {
 	recommendations := []providers.Recommendation{}
 
@@ -845,11 +866,12 @@ func (a *amazonEc2) GetRecommendations(ctx providers.CloudProviderContext, accou
 			}
 
 			if state == "available" { // Only proceed if state is valid and "available"
+				volumeType, _ := resource.Meta["VolumeType"].(string)
 				recommendation := providers.Recommendation{
 					CategoryName: providers.RecommendationCategoryRightSizing,
 					RuleName:     "aws_ec2_orphaned_volume",
 					Severity:     providers.RecommendationSeverityMedium,
-					Savings:      size * 0.1,
+					Savings:      size * ebsStoragePricePerGBMonth(volumeType),
 					Data: map[string]any{
 						"volume_id":     resource.Id,
 						"volume_arn":    resource.Arn,

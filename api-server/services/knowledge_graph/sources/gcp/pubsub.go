@@ -178,3 +178,25 @@ func (s *GCPSource) pushSubscriptionEdges(r *sources.CloudResourceRow, hostConsu
 	}
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	cloudPubSubRows := resourceKind{
+		Service:      "Cloud Pub/Sub",
+		NodeType:     core.NodeTypeTopic,
+		SpecificType: "PubSubTopic",
+		Subtype:      "PubSubTopic",
+	}
+	registerKind(cloudPubSubRows)
+	registerKind(cloudPubSubRows.withTypes("pubsub.googleapis.com/topic"))
+}
+
+// Per-resource updates (see patch.go). Topics have no edges of their own:
+// subscriptions and schedulers point at them from other rows.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"PubSubTopic"},
+		Creatable:     true,
+	}, nil)
+}

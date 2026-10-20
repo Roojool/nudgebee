@@ -32,7 +32,9 @@ const costScale = 1_000_000
 // Limit is one configured quota.
 type Limit struct {
 	TenantID string  `db:"tenant_id"`
-	UserID   string  `db:"user_id"` // "" = tenant-wide
+	UserID   string  `db:"user_id"`    // "" = tenant-wide
+	APIKeyID string  `db:"api_key_id"` // "" = any key of this user/tenant
+	Model    string  `db:"model"`      // "" = any model
 	Metric   Metric  `db:"metric"`
 	Period   Period  `db:"period"`
 	Value    float64 `db:"limit_value"` // cap: request count / token count / USD
@@ -51,6 +53,8 @@ func (l Limit) intCap() int64 {
 type Scope struct {
 	TenantID string
 	UserID   string
+	APIKeyID string
+	Model    string // the model the CLIENT asked for, not the served/mapped one
 }
 
 // Exceeded describes a tripped limit (returned on rejection, for the 429 body).
@@ -116,10 +120,16 @@ func ttl(p Period) time.Duration {
 }
 
 // key builds the counter key for a limit and scope at time t.
-// rl:{tenant}:{user|-}:{metric}:{period}:{bucket}
-func key(tenant, user string, m Metric, p Period, t time.Time) string {
+// rl:{tenant}:{user|-}:{key|-}:{model|-}:{metric}:{period}:{bucket}
+func key(tenant, user, apiKey, model string, m Metric, p Period, t time.Time) string {
 	if user == "" {
 		user = "-"
 	}
-	return "rl:" + tenant + ":" + user + ":" + string(m) + ":" + string(p) + ":" + bucket(p, t)
+	if apiKey == "" {
+		apiKey = "-"
+	}
+	if model == "" {
+		model = "-"
+	}
+	return "rl:" + tenant + ":" + user + ":" + apiKey + ":" + model + ":" + string(m) + ":" + string(p) + ":" + bucket(p, t)
 }

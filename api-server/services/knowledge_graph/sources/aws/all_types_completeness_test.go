@@ -1,9 +1,9 @@
 package aws
 
 // AWS all-types NODE-coverage completeness (Tier A). Synthesizes one resource per
-// registry entry from awsResourceTypeMap/awsServiceFallbackMap, runs the real
-// converter, and asserts every NodeType the registry can emit is produced. Moved
-// here (from package sources) because it reads the unexported AWS registry maps.
+// declared resource kind, runs the real converter, and asserts every NodeType the
+// kinds can emit is produced. Lives in package aws because it reads the
+// unexported kind registry.
 // The small test helpers are local copies of the package-sources originals — the
 // package split makes them un-shareable, and duplicating ~30 lines of test glue
 // is cheaper than exporting test-only helpers.
@@ -81,17 +81,21 @@ func TestE2E_AWSAllTypesNodeCoverage(t *testing.T) {
 	var rows []sources.CloudResourceRow
 	expected := map[core.NodeType]bool{}
 	i := 0
-	for rt, svcMap := range awsResourceTypeMap {
-		for svc, nt := range svcMap {
-			rows = append(rows, allTypesRow(i, rt, svc, "AWS"))
-			expected[nt] = true
+	for _, kind := range kinds.Kinds() {
+		if kind.Suppress {
+			// The row builds no node of its own by design (IAM roles).
+			continue
+		}
+		key := kind.KindKey()
+		types := key.Types
+		if len(types) == 0 {
+			types = []string{"__fallback_type__"}
+		}
+		for _, rt := range types {
+			rows = append(rows, allTypesRow(i, rt, key.Service, "AWS"))
 			i++
 		}
-	}
-	for svc, nt := range awsServiceFallbackMap {
-		rows = append(rows, allTypesRow(i, "__fallback_type__", svc, "AWS"))
-		expected[nt] = true
-		i++
+		expected[kind.NodeType] = true
 	}
 
 	req := &core.SourceBuildRequest{TenantID: "all-types-tenant", CloudAccountID: "all-types-account"}

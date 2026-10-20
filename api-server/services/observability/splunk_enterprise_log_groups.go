@@ -5,6 +5,7 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/integrations"
 	"nudgebee/services/security"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -20,10 +21,13 @@ import (
 // matching the other providers' page size.
 const splunkEnterpriseLogGroupLimit = 100
 
-// splunkEnterpriseLogGroupTimeout is deliberately longer than a plain log search: this
-// query scans the whole window rather than stopping at the first N events, so it is the
-// most expensive read this integration issues.
-const splunkEnterpriseLogGroupTimeout = 90 * time.Second
+// splunkEnterpriseLogGroupTimeout bounds the most expensive read this integration issues
+// (it scans the whole window rather than stopping at the first N events). It must stay
+// under the log_group action's own deadline (observabilityMetadataActionTimeout, 30s):
+// when it was 90s the action timed out first, so the "narrow your filters" message this
+// timeout exists to produce never reached anyone, and the search kept running after the
+// caller had been told it failed.
+const splunkEnterpriseLogGroupTimeout = 25 * time.Second
 
 // splunkEnterpriseLogGroupFields lists, per logical role, the Splunk field names checked
 // in priority order. The first NON-NULL one wins per event, resolved by SPL's coalesce.
@@ -143,6 +147,35 @@ func splunkEnterpriseQuoteLiteralList(values []string) string {
 // hashes the message, so client-side grouping would need every raw event fetched first and
 // would give an identical answer at many times the cost. max(_time) gives each group its
 // own "Last Time"; without it every row renders at the window edge.
+// splunkEnterpriseLogGroupWorkloadCondition matches the events of one workload.
+//
+// The workload field decides whenever the event carries one: a name-prefix match on the
+// pod alone made workload "api" match every "api-server" event. Only an event with no
+// workload metadata falls back to the pod name, and then it must be the workload name
+// followed by a controller-generated suffix - a ReplicaSet hash plus pod suffix
+// (Deployment), a single 5-character suffix (DaemonSet, Job, bare ReplicaSet), or an
+// ordinal (StatefulSet). The fallback can still over-match a DaemonSet or Job whose own
+// name is the workload name plus a 6-10 character segment, which an event without
+// workload metadata gives no way to tell apart.
+func splunkEnterpriseLogGroupWorkloadCondition(workload string) string {
+	escaped := escapeSplunkString(workload)
+	exact := fmt.Sprintf(`%s="%s"`, splunkLogGroupWorkloadCol, escaped)
+	if !splunkEnterpriseKubernetesName.MatchString(workload) {
+		// Not a Kubernetes name, so no pod can be named after it; only the workload field
+		// can match, and the value never reaches a regex.
+		return exact
+	}
+	// '.' is the only regex metacharacter a DNS-1123 name can hold. `\\.` is the regex
+	// `\.` written inside an SPL string literal, where a backslash is itself escaped.
+	pattern := "^" + strings.ReplaceAll(workload, ".", `\\.`) + `-(([a-z0-9]{6,10}-)?[a-z0-9]{5}|[0-9]+)$`
+	return fmt.Sprintf(`(%s OR (%s="" AND match(%s, "%s")))`,
+		exact, splunkLogGroupWorkloadCol, splunkLogGroupPodCol, pattern)
+}
+
+// splunkEnterpriseKubernetesName is a DNS-1123 subdomain, the shape of every workload and
+// pod name.
+var splunkEnterpriseKubernetesName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
+
 func buildSplunkEnterpriseLogGroupSPL(index, selectedNamespace, selectedWorkload string, limit int) (string, error) {
 	if !integrations.IsSafeSplunkIndexName(index) {
 		return "", fmt.Errorf("invalid or unsafe index name: %q", index)
@@ -212,13 +245,7 @@ func buildSplunkEnterpriseLogGroupSPL(index, selectedNamespace, selectedWorkload
 			splunkLogGroupNamespaceCol, escapeSplunkString(selectedNamespace)))
 	}
 	if selectedWorkload != "" {
-		// Pods are named {workload}-{suffix}. like() takes SQL wildcards, so '%' is the
-		// wildcard here and escapeSplunkString's '*' handling does not interfere. The
-		// workload field is checked too, for pods a shipper labelled but didn't name.
-		escaped := escapeSplunkString(selectedWorkload)
-		conditions = append(conditions, fmt.Sprintf(
-			`(like(%s, "%s-%%") OR %s="%s")`,
-			splunkLogGroupPodCol, escaped, splunkLogGroupWorkloadCol, escaped))
+		conditions = append(conditions, splunkEnterpriseLogGroupWorkloadCondition(selectedWorkload))
 	}
 
 	groupCols := strings.Join([]string{
@@ -312,14 +339,14 @@ func convertSplunkEnterpriseLogGroups(rows []map[string]any, fallbackTimestampSe
 			PatternHash: generatePatternHash(sample),
 		}
 
-		// container_id mirrors the Prometheus format so the UI can parse namespace and
-		// workload back out of a single field.
+		// /k8s/<namespace>/<workload>, the shape Loki, Elasticsearch, Datadog and the other
+		// log-group providers emit. Not Prometheus's /k8s/<namespace>/<pod>/<container>:
+		// the UI reads a four-segment id as that format and trims a pod suffix off the
+		// third segment, which here is already the workload — so cloud-collector-server
+		// was displayed, and drilled down into, as "cloud". The container stays in its
+		// own field.
 		if group.Namespace != "" && group.Workload != "" {
-			if group.Container != "" {
-				group.ContainerID = fmt.Sprintf("/k8s/%s/%s/%s", group.Namespace, group.Workload, group.Container)
-			} else {
-				group.ContainerID = fmt.Sprintf("/k8s/%s/%s", group.Namespace, group.Workload)
-			}
+			group.ContainerID = fmt.Sprintf("/k8s/%s/%s", group.Namespace, group.Workload)
 		}
 
 		groups = append(groups, group)

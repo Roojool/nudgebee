@@ -75,7 +75,7 @@ func TestNBLogToolV2_Call_EmptyResult(t *testing.T) {
 
 		// The real backend query/provider services-server executed must still be
 		// extractable from Data even on a zero-row result — this is what
-		// FetchLogsAgentV2's executedLogQuery/providerFromLogs read to show the
+		// FetchLogsAgent's executedLogQuery/providerFromLogs read to show the
 		// real query instead of falling back to the LLM's canonical where-clause.
 		var doc struct {
 			Metadata struct {

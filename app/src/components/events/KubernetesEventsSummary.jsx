@@ -352,10 +352,11 @@ export default function KubernetesEventsSummary({ accountId }) {
           account_id: accountId,
           start_date: dateRange.startDate,
           end_date: dateRange.endDate,
-          aggregation_key: 'ApplicationAPIFailures',
+          aggregation_key: ['HighErrorCriticalLogs', 'ApplicationAPIFailures'],
+          finding_type: 'issue',
         },
-        ['tenant_id', 'account_id', 'title'],
-        ['max_created_at', 'event_count', 'subject_namespace', 'subject_owner', 'title'],
+        ['tenant_id', 'account_id', 'title', 'aggregation_key'],
+        ['max_created_at', 'event_count', 'subject_namespace', 'subject_owner', 'title', 'aggregation_key'],
         { name: 'event_count', order: 'desc' }
       )
       .then((response) => {
@@ -374,7 +375,9 @@ export default function KubernetesEventsSummary({ accountId }) {
               {
                 component: (
                   <Link
-                    href={`/kubernetes/details/${accountId}?eventTitle=${data.title}&eventAggregationKey=ApplicationAPIFailures#events/all-events`}
+                    href={`/kubernetes/details/${accountId}?eventTitle=${encodeURIComponent(
+                      data.title ?? ''
+                    )}&eventAggregationKey=${encodeURIComponent(data.aggregation_key ?? '')}#events/all-events`}
                     style={{ color: ds.blue[500], fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-medium)' }}
                   >
                     {data?.event_count}
@@ -410,9 +413,10 @@ export default function KubernetesEventsSummary({ accountId }) {
     k8sApi
       .getK8sEvents(5, 0, {
         account_id: accountId,
-        aggregation_key: 'ApplicationAPIFailures',
+        aggregation_key: ['HighErrorCriticalLogs', 'ApplicationAPIFailures'],
         start_date: dateRange.startDate,
         end_date: dateRange.endDate,
+        finding_type: 'issue',
         onlyData: true,
       })
       .then((response) => {
@@ -845,7 +849,7 @@ export default function KubernetesEventsSummary({ accountId }) {
             <Box display={'grid'} gridTemplateColumns={'1fr 1fr'} gap={ds.space[3]} mt={ds.space[3]}>
               <Box>
                 <TextWithBorder
-                  value='API Errors - By Count'
+                  value='By Count'
                   borderColor={ds.yellow[500]}
                   borderWidth='2px'
                   sx={{
@@ -865,7 +869,7 @@ export default function KubernetesEventsSummary({ accountId }) {
                 />
                 <CustomTable
                   tableData={apiErrorsByCount}
-                  headers={[{ name: 'API', width: '70%' }, { name: 'Count' }, { name: 'Last occurred' }]}
+                  headers={[{ name: 'Event', width: '70%' }, { name: 'Count' }, { name: 'Last occurred' }]}
                   showUpdatedTable
                   showEmptyStateText
                   loading={loadingData.apiErrorsByCountLoading}
@@ -873,7 +877,7 @@ export default function KubernetesEventsSummary({ accountId }) {
               </Box>
               <Box>
                 <TextWithBorder
-                  value='API Errors - Most Recent'
+                  value='Most Recent'
                   borderColor={ds.yellow[500]}
                   borderWidth='2px'
                   sx={{
@@ -893,7 +897,7 @@ export default function KubernetesEventsSummary({ accountId }) {
                 />
                 <CustomTable
                   tableData={apiErrorsRecent}
-                  headers={[{ name: 'API', width: '70%' }, 'Last occurred']}
+                  headers={[{ name: 'Event', width: '70%' }, 'Last occurred']}
                   showUpdatedTable
                   showEmptyStateText
                   loading={loadingData.apiErrorsRecentLoading}

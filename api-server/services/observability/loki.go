@@ -78,6 +78,10 @@ func validateUserRegex(pattern string) error {
 
 var LogsFilterMap = map[string]string{
 	"content": "log",
+	// The canonical spelling every producer is moving to (#39573). `log` is not a
+	// Loki stream label — buildWhere/buildLabelSelector special-case it into a line
+	// filter — so every spelling converges on the same `|=` / `|~` clause.
+	"message": "log",
 }
 
 func (s *LokiSource) BuildLokiQuery(req LogsQueryBuilderRequest) (string, error) {

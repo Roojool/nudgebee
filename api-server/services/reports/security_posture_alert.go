@@ -127,23 +127,8 @@ func SendSecurityPostureAlert(ctx *security.RequestContext) error {
 
 		recsByAccount := make(map[string][]map[string]any)
 		for _, rec := range recs {
-			// No per-finding deep link exists on the security surface; link to
-			// the account's security tab.
-			ctaURL := config.Config.BaseUrl + "/kubernetes/details/" + rec.CloudAccountID +
-				"?accountId=" + rec.CloudAccountID + "&utm=security-alert#security/image-scan"
-			recMap := map[string]any{
-				"id":                rec.ID,
-				"rule_name":         rec.RuleName,
-				"resource_name":     rec.ResourceName,
-				"finops_score":      rec.FinOpsScore,
-				"finops_band":       rec.FinOpsBand,
-				"estimated_savings": rec.EstimatedSavings,
-				"severity":          rec.Severity,
-				"category":          rec.Category,
-				"cta_url":           ctaURL,
-			}
 			accID := rec.CloudAccountID
-			recsByAccount[accID] = append(recsByAccount[accID], recMap)
+			recsByAccount[accID] = append(recsByAccount[accID], securityPostureRecMap(rec))
 			if rec.AccountName != "" && rec.AccountName != accID {
 				accountNameMap[accID] = rec.AccountName
 			}
@@ -161,6 +146,19 @@ func SendSecurityPostureAlert(ctx *security.RequestContext) error {
 			}
 		}
 
+		// Each account's own alert, so notifications can send every channel only
+		// the accounts its rules allow, with that account's counts.
+		accountRecs, err := querySecurityPostureAccountFindings(dbms.Db, t.Id)
+		if err != nil {
+			ctx.GetLogger().Error("security posture alert: error querying per-account findings", "error", err, "tenant", t.Id)
+			continue
+		}
+		accountCounts, err := querySecurityPostureCountsByAccount(dbms.Db, t.Id)
+		if err != nil {
+			ctx.GetLogger().Error("security posture alert: error counting per-account findings", "error", err, "tenant", t.Id)
+			continue
+		}
+
 		message := map[string]any{
 			"kind":      "notification",
 			"type":      "security_posture_alert",
@@ -173,6 +171,7 @@ func SendSecurityPostureAlert(ctx *security.RequestContext) error {
 				"high_count":                 highCount,
 				"recommendations_by_account": recommendationsByAccount,
 				"base_url":                   config.Config.BaseUrl,
+				"accounts":                   buildSecurityPostureAccountSections(accountRecs, accountCounts, accountNameMap),
 			},
 		}
 
@@ -182,10 +181,7 @@ func SendSecurityPostureAlert(ctx *security.RequestContext) error {
 			continue
 		}
 
-		recIDs := make([]string, len(recs))
-		for i, rec := range recs {
-			recIDs[i] = rec.ID
-		}
+		recIDs := digestRecommendationIDs(recs, accountRecs)
 		_, err = dbms.Db.Exec(`UPDATE recommendation SET last_nudged_at = now() WHERE id = ANY($1::uuid[])`, pq.Array(recIDs))
 		if err != nil {
 			ctx.GetLogger().Error("security posture alert: error updating last_nudged_at", "error", err, "tenant", t.Id)

@@ -301,20 +301,24 @@ func TestShellTool_InferToolRequestType_AzureAndGcpMutationsFailClosed(t *testin
 			"gcloud compute instances list --project prod && gcloud compute instances stop vm-prod --project prod --zone us-central1-a",
 			core.ToolRequestTypeUpdate,
 		},
-		"bigquery query job": {
-			"bq query --use_legacy_sql=false 'SELECT 1'",
+		"bigquery query job with destination table": {
+			"bq query --destination_table=my_ds.out --use_legacy_sql=false 'SELECT 1'",
 			core.ToolRequestTypeUpdate,
 		},
 		"bigquery query job with assigned global flags": {
-			"bq --project_id=my-project --location=US query --use_legacy_sql=false 'SELECT 1'",
+			"bq --project_id=my-project --location=US query --destination_table=my_ds.out --use_legacy_sql=false 'SELECT 1'",
 			core.ToolRequestTypeUpdate,
 		},
 		"bigquery query job with space-separated global flags": {
-			"bq --project_id my-project --location US query --use_legacy_sql=false 'SELECT 1'",
+			"bq --project_id my-project --location US query --destination_table=my_ds.out --use_legacy_sql=false 'SELECT 1'",
 			core.ToolRequestTypeUpdate,
 		},
 		"bigquery query job after boolean global flag": {
-			"bq --nosync query --use_legacy_sql=false 'SELECT 1'",
+			"bq --nosync query --destination_table=my_ds.out --use_legacy_sql=false 'SELECT 1'",
+			core.ToolRequestTypeUpdate,
+		},
+		"bigquery insert query": {
+			"bq query 'INSERT INTO my_ds.tbl VALUES (1)'",
 			core.ToolRequestTypeUpdate,
 		},
 	}
@@ -330,6 +334,23 @@ func TestShellTool_InferToolRequestType_AzureAndGcpMutationsFailClosed(t *testin
 			got, err := tool.InferToolRequestType(nil, "shell_execute", tc.input)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestShellTool_InferToolRequestType_BigQueryReadQueriesAreRead(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	tests := map[string]string{
+		"bigquery select": "bq query --use_legacy_sql=false 'SELECT 1'",
+		"bigquery select with assigned global flags": "bq --project_id=my-project --location=US query --use_legacy_sql=false 'SELECT 1'",
+		"bigquery select with space global flags":    "bq --project_id my-project --location US query --use_legacy_sql=false 'SELECT 1'",
+		"bigquery select after boolean global flag":  "bq --nosync query --use_legacy_sql=false 'SELECT 1'",
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Equal(t, core.ToolRequestTypeRead, got)
 		})
 	}
 }

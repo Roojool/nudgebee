@@ -65,6 +65,7 @@ func (a *awsLambda) GetResources(ctx providers.CloudProviderContext, account pro
 		ctx.GetLogger().Error("failed to create aws session", "error", err, "accountNumber", account.AccountNumber, "region", region)
 		return []providers.Resource{}, err
 	}
+	cfg.Region = region
 	svc := lambda.NewFromConfig(cfg)
 	ec2Svc := ec2.NewFromConfig(cfg) // Create EC2 client once for ENI fetching
 	resources := []providers.Resource{}

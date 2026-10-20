@@ -284,7 +284,22 @@ func TestDynamicReActAgent_Interface(t *testing.T) {
 
 	prompt := agent.GetSystemPrompt(nil, core.NBAgentRequest{})
 	assert.Contains(t, prompt.Instructions[0], "Investigate connection pool exhaustion")
-	assert.Len(t, prompt.Constraints, 4)
+	assert.Len(t, prompt.Constraints, 5)
+}
+
+func TestDynamicReActAgent_SystemPromptPreservesScopeAcrossAgentTools(t *testing.T) {
+	agent := &dynamicReActAgent{
+		name:          DelegateAgentToolName,
+		prompt:        "Fetch ELB logs from aws-prod in us-east-1",
+		tools:         []toolcore.NBTool{&mockTool{name: "aws_observability"}},
+		maxIterations: 3,
+	}
+
+	prompt := agent.GetSystemPrompt(nil, core.NBAgentRequest{})
+	joined := strings.Join(prompt.Constraints, "\n")
+	assert.Contains(t, joined, "copy every explicit execution scope")
+	assert.Contains(t, joined, "account")
+	assert.Contains(t, joined, "Never omit a named scope")
 }
 
 // TestDynamicReActAgent_SystemPromptIncludesBudgetAndTools verifies the system prompt

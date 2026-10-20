@@ -93,7 +93,10 @@ func searchDocumentation(nbRequestContext core.NbToolContext, query string) (str
 	// in rag-server, so this one call covers every searchable source. Falls
 	// back to live Confluence below when the index has zero hits.
 	var refs []string
-	document := core.QueryRAG(nbRequestContext.UserId, nbRequestContext.AccountId, query, "knowledge_base", 3, nbRequestContext.ConversationId, nbRequestContext.MessageId, nbRequestContext.ParentAgentId, true)
+	searchCtx, traceID := core.WithRetrievalTraceID(nbRequestContext.Ctx.GetContext())
+	document := core.QueryRAGCollection(searchCtx, nbRequestContext.UserId, nbRequestContext.AccountId, "", query, "knowledge_base", "", 3, nbRequestContext.ConversationId, nbRequestContext.MessageId, nbRequestContext.ParentAgentId, true)
+	document = core.JudgeKBResults(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.UserId,
+		nbRequestContext.ConversationId, nbRequestContext.MessageId, query, document, traceID)
 	if len(document) > 0 {
 		for _, doc := range document {
 			matchingDocs = append(matchingDocs, schema.Document{

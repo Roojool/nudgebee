@@ -161,7 +161,7 @@ export class RCAFormatLocators extends CommonLocators {
   // The readiness signal for the sub-tab itself, before any account is picked.
   // Asserted outermost-first — parent tab, then sub-tab, then body — so a hash
   // that resolved to the wrong level names the level that went wrong. The
-  // picker cannot lead: Agents, Tools & MCP and Functions each mount their own
+  // picker cannot lead: Agents and Tools & MCP each mount their own
   // AdminAccountFilter, and Access & Users' Ownership tab renders an
   // AccountSelect too, so a visible #account-select is not on its own evidence
   // that this is the right tab.
@@ -206,9 +206,6 @@ export class RCAFormatLocators extends CommonLocators {
   // share one cloud provider renders a flat list with nothing to expand — hence
   // the branch rather than an assumption either way.
   async openAccountOptions(): Promise<void> {
-    await this.accountSelect.click();
-    await this.optionList.waitFor({ state: "visible", timeout: 30000 });
-
     const headers = this.optionList.locator('[role="button"]');
     const options = this.optionList.locator('[role="option"]');
 
@@ -217,12 +214,17 @@ export class RCAFormatLocators extends CommonLocators {
     // skeleton rows and neither headers nor options exist. Waiting for either to
     // appear is what separates "still loading" from "flat list", which reading
     // the header count alone cannot do.
-    await expect
-      .poll(async () => (await headers.count()) + (await options.count()), {
-        timeout: 60000,
-        message: "the account picker listed neither a group header nor an account",
-      })
-      .toBeGreaterThan(0);
+    // The popover can also close itself when that fetch lands after a reload, so an empty or closed picker is reopened.
+    await expect(async () => {
+      if (!(await this.optionList.isVisible())) await this.accountSelect.click();
+      await this.optionList.waitFor({ state: "visible", timeout: 10000 });
+      await expect
+        .poll(async () => (await headers.count()) + (await options.count()), {
+          timeout: 15000,
+          message: "the account picker listed neither a group header nor an account",
+        })
+        .toBeGreaterThan(0);
+    }).toPass({ timeout: 90000, intervals: [1000, 2000, 3000] });
 
     if ((await headers.count()) === 0) {
       await options.first().waitFor({ state: "visible", timeout: 30000 });

@@ -31,6 +31,9 @@ type KubernetesExecutor struct {
 	Namespace string
 }
 
+const scriptPodWorkloadLabel = "nudgebee.io/workload"
+const scriptPodWorkloadValue = "workflow-script"
+
 func NewKubernetesExecutor() (*KubernetesExecutor, error) {
 	// Use client-go's standard way to load config, mimicking kubectl's behavior.
 	// This will try KUBECONFIG env var, ~/.kube/config, and then in-cluster config.
@@ -253,7 +256,7 @@ func (e *KubernetesExecutor) Execute(taskCtx taskTypes.TaskContext, executionCon
 
 	// Security Context
 	nonRoot := int64(1000)
-	allowPrivEscalation := false
+	falseValue := false
 	readOnlyRoot := true
 
 	// Calculate ActiveDeadlineSeconds from Context Deadline
@@ -273,14 +276,23 @@ func (e *KubernetesExecutor) Execute(taskCtx taskTypes.TaskContext, executionCon
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: namespaceName,
+			Labels:    map[string]string{scriptPodWorkloadLabel: scriptPodWorkloadValue},
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            func(i int32) *int32 { return &i }(0), // No retries
 			ActiveDeadlineSeconds:   activeDeadlineSeconds,
 			TTLSecondsAfterFinished: &ttlSeconds,
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{scriptPodWorkloadLabel: scriptPodWorkloadValue},
+				},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					RestartPolicy:                corev1.RestartPolicyNever,
+					AutomountServiceAccountToken: &falseValue,
+					EnableServiceLinks:           &falseValue,
+					HostNetwork:                  false,
+					HostPID:                      false,
+					HostIPC:                      false,
 					Containers: []corev1.Container{
 						{
 							Name:       "script",
@@ -301,6 +313,10 @@ func (e *KubernetesExecutor) Execute(taskCtx taskTypes.TaskContext, executionCon
 									Name:  "HOME",
 									Value: "/tmp",
 								},
+								{
+									Name:  "AWS_EC2_METADATA_DISABLED",
+									Value: "true",
+								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
@@ -316,7 +332,7 @@ func (e *KubernetesExecutor) Execute(taskCtx taskTypes.TaskContext, executionCon
 							},
 							SecurityContext: &corev1.SecurityContext{
 								RunAsUser:                &nonRoot,
-								AllowPrivilegeEscalation: &allowPrivEscalation,
+								AllowPrivilegeEscalation: &falseValue,
 								ReadOnlyRootFilesystem:   &readOnlyRoot,
 								Capabilities: &corev1.Capabilities{
 									Drop: []corev1.Capability{"ALL"},

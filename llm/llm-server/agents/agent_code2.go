@@ -73,6 +73,14 @@ const codeAgentFailuresCacheNS = "code_agent_conv_failures"
 // present, so no diff and no PR were produced. It is a SUCCESS, not a failure.
 const codeAnalysisNoOpStatus = "no_op"
 
+// A no-op carries the reason it happened. Mirrors NoOpBasisKey in
+// llm/code-analysis (orchestrator_agent.go): only a specialist verdict is a
+// finding about the file, so only it may be read back as "already present".
+const (
+	CodeAnalysisNoOpBasisKey        = "no_op_basis"
+	CodeAnalysisNoOpBasisSpecialist = "specialist_verdict"
+)
+
 // noopGuardPrefix tags a cached no-op terminal answer in codeAgentFailuresCacheNS,
 // distinguishing it from a failure-guard entry. A re-dispatch within the same
 // message replays this answer as a success instead of re-running the analysis,
@@ -163,13 +171,13 @@ Each call runs a full (expensive) analysis — decide the intended outcome first
 	codeAnalyzerFactory := func(accountId string) (core.NBAgent, error) {
 		return newCodeAgent(accountId), nil
 	}
-	core.RegisterNBAgentFactoryAndTool(AgentCodeAnalyzer, codeAnalyzerFactory, toolDescription, toolInput, toolOutput)
 	// Back-compat: keep the pre-rename "agent_code_2" name resolving as an agent.
 	// getSystemAgent does a direct registry lookup and does not honor
 	// GetNameAliases, so the legacy name must be a real factory key. Registered
-	// agent-only (not as a tool) so it is never re-offered to the model as a
-	// second tool — new tool callers use AgentCodeAnalyzer.
-	core.RegisterNBAgentFactory(agentCodeAnalyzerLegacyName, codeAnalyzerFactory)
+	// as an alias so it is never re-offered to the model as a second tool and
+	// ListAgents does not show it as a second picker entry — new tool callers
+	// use AgentCodeAnalyzer.
+	core.RegisterNBAgentFactoryAndToolWithAliases(AgentCodeAnalyzer, codeAnalyzerFactory, toolDescription, toolInput, toolOutput, agentCodeAnalyzerLegacyName)
 }
 
 func forwardedLLMConfigToMap(c *core.ForwardedLLMConfig) map[string]any {
@@ -1307,6 +1315,33 @@ type CodeAgent2Request struct {
 	AddressedComments json.RawMessage `json:"addressed_comments,omitempty"`
 }
 
+// repoFromQueryConfig returns the repo a conversation has already settled on: one
+// the user picked from a followup, else the git_repo stored on the message config,
+// which a later message inherits from the one before it. Empty when there is none.
+func repoFromQueryConfig(cfg toolcore.NBQueryConfig) string {
+	if repo := cfg.ToolConfigs["git_repo"]; repo != "" {
+		return repo
+	}
+	return cfg.GitRepo
+}
+
+// rememberConversationRepo records the repo on the message's stored config so
+// later turns keep working on it instead of detecting one again and possibly
+// landing elsewhere. Best effort: a failed write only costs the next turn a
+// fresh detection.
+func rememberConversationRepo(ctx *security.RequestContext, messageId, repo string) {
+	if repo == "" {
+		return
+	}
+	dao := core.GetConversationDao()
+	if dao == nil {
+		return
+	}
+	if err := dao.UpdateConversationMessageGitRepo(messageId, repo); err != nil {
+		ctx.GetLogger().Warn("code: unable to remember git_repo for the conversation", "error", err, "repo", repo)
+	}
+}
+
 func (l CodeAgent2) GetPlannerType() core.AgentPlannerType {
 	return core.AgentPlannerTypeCustom
 }
@@ -1386,18 +1421,13 @@ func (l CodeAgent2) Execute(ctx *security.RequestContext, query core.NBAgentRequ
 	// pure exploration question ("what is the default Postgres connection
 	// limit?") got promoted to fix-mode and produced a spurious PR.
 
-	// Check if user selected a repo via followup response
-	if codeAgentRequest.GitRepo == "" && query.QueryConfig.ToolConfigs != nil {
-		if selectedRepo, ok := query.QueryConfig.ToolConfigs["git_repo"]; ok && selectedRepo != "" {
-			codeAgentRequest.GitRepo = selectedRepo
-			ctx.GetLogger().Info("code: using git_repo from followup selection", "repo", selectedRepo)
+	// Reuse the repo the conversation already settled on (a followup selection, or
+	// the one stored on the message config) before auto-detecting one.
+	if codeAgentRequest.GitRepo == "" {
+		if repo := repoFromQueryConfig(query.QueryConfig); repo != "" {
+			codeAgentRequest.GitRepo = repo
+			ctx.GetLogger().Info("code: using git_repo from request config", "repo", repo)
 		}
-	}
-
-	// Check Config for explicit git_repo before auto-detecting
-	if codeAgentRequest.GitRepo == "" && query.QueryConfig.GitRepo != "" {
-		codeAgentRequest.GitRepo = query.QueryConfig.GitRepo
-		ctx.GetLogger().Info("code: using git_repo from request config", "repo", query.QueryConfig.GitRepo)
 	}
 
 	// When input is plain text, try to extract a git URL embedded in the text
@@ -1663,6 +1693,8 @@ func (l CodeAgent2) Execute(ctx *security.RequestContext, query core.NBAgentRequ
 
 	ctx.GetLogger().Info("code: using git provider", "provider", provider, "repo", repoUrl)
 
+	rememberConversationRepo(ctx, query.MessageId, codeAgentRequest.GitRepo)
+
 	// A second fix request in the same conversation is a retry, not a new bug.
 	// Amend the PR we already opened instead of cutting another branch and
 	// opening a duplicate. Routed through the followup path, which checks out
@@ -1686,14 +1718,27 @@ func (l CodeAgent2) Execute(ctx *security.RequestContext, query core.NBAgentRequ
 	latency := time.Since(startTime).Seconds()
 	if err != nil {
 		ctx.GetLogger().Error("code: failed to execute via workspace", "error", err.Error())
-		// Write the message-scoped guard on failure too. A poll timeout here
-		// usually means the analysis is STILL RUNNING server-side (the workspace
-		// pod does not cancel it when polling stops) — without the guard, the
-		// planner's natural "tool errored, retry" reaction dispatches a second
-		// /analyze and two full analyses run for one message.
-		if guardKey, ok := codeAgentGuardKey(query.ConversationId, query.MessageId); ok {
-			_ = common.CacheSet(codeAgentFailuresCacheNS, guardKey,
-				[]byte(fmt.Sprintf("previous attempt failed and may still be running server-side: %v", err)))
+		// Write the message-scoped guard on failure too. An ordinary poll
+		// timeout here usually means the analysis is STILL RUNNING
+		// server-side (the workspace pod does not cancel it when polling
+		// stops) — without the guard, the planner's natural "tool errored,
+		// retry" reaction dispatches a second /analyze and two full analyses
+		// run for one message.
+		//
+		// ErrWorkspaceRunLost is the one case where that assumption is known
+		// to be false: the pod that owned the analysis is confirmed gone
+		// (terminal k8s phase, or a fresh pod 404s the analysis id), so
+		// there is nothing left for a retry to collide with. Skipping the
+		// guard here lets the planner's existing, already-bounded retry
+		// redispatch against the replacement pod instead of the run being
+		// silently lost until the caller gives up on the whole message
+		// (#38994) — 80% of code-agent failures on 2026-09-21 were this
+		// exact case.
+		if !shouldSkipRetryGuard(err) {
+			if guardKey, ok := codeAgentGuardKey(query.ConversationId, query.MessageId); ok {
+				_ = common.CacheSet(codeAgentFailuresCacheNS, guardKey,
+					[]byte(fmt.Sprintf("previous attempt failed and may still be running server-side: %v", err)))
+			}
 		}
 		return core.NBAgentResponse{}, err
 	}
@@ -1768,6 +1813,18 @@ func handleAnalysisResult(ctx *security.RequestContext, conversationId, messageI
 	return responseStr
 }
 
+// shouldSkipRetryGuard reports whether a workspace failure should NOT set the
+// message-scoped "may still be running" guard. Normally a poll failure is
+// ambiguous — the workspace pod could still be working on it — so the guard
+// blocks the planner from redispatching. workspace.ErrWorkspaceRunLost is the
+// one signal that removes the ambiguity: it is only returned when the pod
+// that owned the run is confirmed gone (terminal k8s phase, or a fresh pod
+// 404s the run's id), so a redispatch has nothing left to collide with
+// (#38994).
+func shouldSkipRetryGuard(err error) bool {
+	return errors.Is(err, workspace.ErrWorkspaceRunLost)
+}
+
 // codeAgentGuardKey builds the message-scoped guard cache key and reports whether
 // it is usable. Both identifiers must be non-empty — otherwise the key would
 // collapse to ":" and collide across unrelated sessions.
@@ -1808,7 +1865,14 @@ func noOpTerminalAnswer(responseStr string) (string, bool) {
 	// silent skip. Never hardcode a specific case — use the agent's own fields.
 	detail := firstNonEmptyField(resp, "pr_creation_reason", "description", "root_cause_analysis", "execution_summary")
 	var b strings.Builder
-	b.WriteString("No pull request was created — the requested change is already present in the repository, so no modifications were needed.")
+	// Say the change is already there only when the agent actually checked and
+	// said so. Otherwise the run simply proposed nothing, which tells the reader
+	// nothing about the file and must not read as if it did.
+	if basis, _ := resp[CodeAnalysisNoOpBasisKey].(string); basis == CodeAnalysisNoOpBasisSpecialist {
+		b.WriteString("No pull request was created — the requested change is already present in the repository, so no modifications were needed.")
+	} else {
+		b.WriteString("No pull request was created — the analysis finished without proposing a change. This does not mean the change is already present: the requested values were not confirmed against the target file.")
+	}
 	if detail != "" {
 		b.WriteString("\n\n")
 		b.WriteString(detail)

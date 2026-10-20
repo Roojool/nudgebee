@@ -162,7 +162,7 @@ class PrometheusMetricsService(MetricsService):
         period: timedelta,
         *,
         step: timedelta = timedelta(minutes=30),
-    ) -> PodsTimeData:
+    ) -> Dict[str, PodsTimeData]:
         """
         Gathers data from Prometheus for a specified object and resource.
 
@@ -202,65 +202,6 @@ class PrometheusMetricsService(MetricsService):
                 *[self._gather_data(object, loader, period, step) for loader in metric_loaders]
             )
             return {loader.__name__: result for loader, result in zip(metric_loaders, results)}
-
-    async def query_and_validate(self, prom_query) -> Any:
-        result = await self.query(prom_query)
-        if len(result) == 0:
-            logger.debug("No results from Prometheus query (cluster summary)")
-            return None
-
-        if len(result) > 1:
-            logger.debug(f"Multiple results ({len(result)}) from Prometheus query, using first")
-
-        result_value = result[0].get("value")
-
-        # Verify that the "value" list has exactly two elements (timestamp and value)
-        if not result_value:
-            logger.debug("Missing value in Prometheus result (cluster summary)")
-            return None
-
-        if len(result_value) != 2:
-            logger.debug(f"Prometheus result values unexpected size: {len(result_value)}")
-            return None
-
-        return result_value[1]
-
-    async def get_cluster_summary(self) -> Dict[str, Any]:
-        cluster_label = self.get_prometheus_cluster_label()
-
-        # use this for queries with no labels. turn ', cluster="xxx"' to 'cluster="xxx"'
-        single_cluster_label = cluster_label.replace(",", "")
-        memory_query = f"""
-            sum(max by (instance) (machine_memory_bytes{{ {single_cluster_label} }}))
-            or sum(max by (instance) (node_resources_memory_total_bytes{{ endpoint=\"http\", {cluster_label} }}))
-        """
-        cpu_query = f"""
-            sum(max by (instance) (machine_cpu_cores{{ {single_cluster_label} }}))
-            or sum(max by (instance)(node_resources_cpu_logical_cores{{endpoint=\"http\", {cluster_label} }}))
-        """
-        kube_system_requests_mem = f"""
-        sum(max(kube_pod_container_resource_requests{{ namespace='kube-system', resource='memory', {cluster_label} }})
-            by (job, pod, container) )
-        """
-        kube_system_requests_cpu = f"""
-            sum(max(kube_pod_container_resource_requests{{ namespace='kube-system', resource='cpu', {cluster_label} }})
-            by (job, pod, container) )
-        """
-        try:
-            cluster_memory_result = await self.query_and_validate(memory_query)
-            cluster_cpu_result = await self.query_and_validate(cpu_query)
-            kube_system_mem_result = await self.query_and_validate(kube_system_requests_mem)
-            kube_system_cpu_result = await self.query_and_validate(kube_system_requests_cpu)
-            return {
-                "cluster_memory": float(cluster_memory_result) if cluster_memory_result else 0,
-                "cluster_cpu": float(cluster_cpu_result) if cluster_cpu_result else 0,
-                "kube_system_mem_req": float(kube_system_mem_result) if kube_system_mem_result else 0,
-                "kube_system_cpu_req": float(kube_system_cpu_result) if kube_system_cpu_result else 0,
-            }
-
-        except Exception as e:
-            logger.error(f"Exception occurred while getting cluster summary: {e}")
-            return {}
 
     async def load_pods(self, object: K8sObjectData, period: timedelta) -> list[PodData]:
         """

@@ -28,35 +28,6 @@ logger = logging.getLogger(__name__)
 # HTTP status codes that warrant retrying an outbound request.
 RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 
-default_health_check_endpoints = [
-    "/actuator/health",
-    "/healthcheck",
-    "/health",
-    "/status",
-    "/health/live",
-    "/health/ready",
-    "/ping",
-    "/check",
-    "/alive",
-    "/readiness",
-    "/probe",
-    "/heartbeat",
-    "/statuscheck",
-    "/diagnostics",
-    "/isalive",
-    "/isready",
-    "/probe/health",
-    "/probe/liveness",
-    "/probe/readiness",
-    "/probe/heartbeat",
-    "/probe/status",
-    "/probe/alive",
-    "/probe/check",
-    "/api/health",
-    "/healthz",
-    "/livez",
-]
-
 
 def handle_df_for_nan(df: pd.DataFrame) -> pd.DataFrame:
     df.fillna(0, inplace=True)
@@ -71,16 +42,30 @@ def get_model_path(account_id: str, tenant_id: str, namespace: str, deployment_n
     return f"{tenant_id}/{account_id}/{namespace}/{deployment_name}/"
 
 
-def get_http_session_with_retry(retry_attempts: int = 3, backoff_factor: float = 1) -> requests.Session:
-    # Configure retry settings for HTTP requests
-    retry_strategy = None
-    if retry_attempts > 0:
-        retry_strategy = Retry(
-            total=retry_attempts,  # Total number of retries
-            status_forcelist=RETRY_STATUS_CODES,  # Retry on these HTTP status codes
-            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],  # Only retry on these HTTP methods
-            backoff_factor=backoff_factor,  # Backoff factor for delay between retries
-        )
+def get_http_session_with_retry(
+    retry_attempts: int = 3,
+    backoff_factor: float = 1,
+    retry_strategy: Optional[Retry] = None,
+) -> requests.Session:
+    """A session whose retry policy is the one asked for.
+
+    ``retry_strategy`` takes a ready-made policy for a caller that needs something the
+    two knobs cannot express -- retrying the connect phase but not the read phase, say.
+    """
+    if retry_strategy is None:
+        if retry_attempts > 0:
+            retry_strategy = Retry(
+                total=retry_attempts,  # Total number of retries
+                status_forcelist=RETRY_STATUS_CODES,  # Retry on these HTTP status codes
+                allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],  # Only retry on these HTTP methods
+                backoff_factor=backoff_factor,  # Backoff factor for delay between retries
+            )
+        else:
+            # Explicitly Retry(0), never None: requests maps ``max_retries=None`` onto
+            # Retry.DEFAULT, which is Retry(3). A POST caller was unaffected -- POST is
+            # absent from urllib3's default allowed_methods, so nothing was retried --
+            # but a GET/PUT/DELETE caller asking for no retries silently got three.
+            retry_strategy = Retry(0, read=False)
     # Create a session with the retry strategy
     session = requests.Session()
     session.mount("https://", HTTPAdapter(max_retries=retry_strategy))
@@ -229,11 +214,6 @@ class MetricsServerConfigs:
     secret = os.environ.get("RELAY_SERVER_SECRET_KEY", "")
     if not secret:
         raise ValueError("RELAY_SERVER_SECRET_KEY environment variable not set")
-    __health_checks = os.getenv("APP_HEALTH_ENDPOINTS", None)
-    if __health_checks:
-        additional_endpoints = __health_checks.split(",")
-        default_health_check_endpoints.extend(additional_endpoints)
-    health_check_endpoints = list(set(default_health_check_endpoints))
 
 
 class ApiServerMetricsConfigs:
@@ -257,6 +237,24 @@ class ApiServerMetricsConfigs:
     # Under api-server's own 180s cap (handle_actions_metrics_timeout.go), so a slow
     # query surfaces here as a timeout naming the query rather than as a bare 400.
     timeout = int(os.environ.get("ML_METRICS_HTTP_TIMEOUT", 170))
+    # Datadog and Elasticsearch rightsizing queries go the same way, so their
+    # credentials stay in api-server instead of travelling in the trigger request.
+    # Set to "false" to send them straight to the provider again, which needs the
+    # credentials back in the request and is the rollback for one release.
+    via_api_server = os.environ.get("ML_METRICS_VIA_API_SERVER", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+    )
+    # Rightsizing asks api-server for metric KEYS instead of writing each provider's
+    # query language here. Default off for its first release: it changes where every
+    # number in a recommendation comes from, and the numbers are the product. Turning
+    # it off is the rollback, and needs no deploy of anything but this service.
+    rightsizing_via_utilisation = os.environ.get("ML_RIGHTSIZING_VIA_UTILISATION", "false").strip().lower() in (
+        "true",
+        "1",
+        "yes",
+    )
 
 
 class OTELConfig:

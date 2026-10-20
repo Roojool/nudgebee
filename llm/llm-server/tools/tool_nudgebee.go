@@ -36,7 +36,7 @@ type nudgebeeProviderErrorClassification struct {
 }
 
 var (
-	queryNudgebeeDocs                    = core.QueryRAG
+	queryNudgebeeDocs                    = core.QueryRAGCollection
 	nudgebeeNow                          = time.Now
 	nudgebeeHTMLTags                     = regexp.MustCompile(`(?i)</?[a-z](?:[^'">]|"[^"]*"|'[^']*')*?>`)
 	nudgebeeHTTPStatusCode               = regexp.MustCompile(`(?i)\b(?:http(?: status)?|status(?: code)?|response|returned|googleapi: error)\s*[:=]?\s*(401|403|502|503)\b`)
@@ -558,6 +558,14 @@ func nudgebeeStringProperty(description string) core.ToolSchemaProperty {
 	return core.ToolSchemaProperty{Type: core.ToolSchemaTypeString, Description: description}
 }
 
+func nudgebeeStringArrayProperty(description string) core.ToolSchemaProperty {
+	return core.ToolSchemaProperty{
+		Type:        core.ToolSchemaTypeArray,
+		Description: description,
+		Items:       map[string]any{"type": "string"},
+	}
+}
+
 func nudgebeeLimitProperty() core.ToolSchemaProperty {
 	return core.ToolSchemaProperty{
 		Type:        core.ToolSchemaTypeInteger,
@@ -573,8 +581,98 @@ func nudgebeeStringArg(input core.NBToolCallRequest, key string) string {
 	return strings.TrimSpace(stringArg(input, key))
 }
 
-func nudgebeeLimit(input core.NBToolCallRequest) int {
-	limit := 20
+func nudgebeeStringSliceArg(input core.NBToolCallRequest, key string) []string {
+	val, ok := input.Arguments[key]
+	if !ok || val == nil {
+		return nil
+	}
+	switch v := val.(type) {
+	case []string:
+		var result []string
+		for _, s := range v {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		return result
+	case []any:
+		var result []string
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					result = append(result, trimmed)
+				}
+			}
+		}
+		return result
+	case string:
+		var result []string
+		for _, part := range strings.Split(v, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+func normalizeIntegrationCategory(category string) string {
+	c := strings.ToLower(strings.TrimSpace(category))
+	switch c {
+	case "databases":
+		return "database"
+	case "queues", "messaging_queue", "messaging_queues", "queue":
+		return "messaging_queue"
+	case "cicd", "ci-cd":
+		return "ci_cd"
+	case "logs":
+		return "log"
+	case "traces":
+		return "trace"
+	case "observability", "observability_platforms", "observabilityplatform":
+		return "observability_platform"
+	default:
+		return c
+	}
+}
+
+func nudgebeeBuildIntegrationTypeFilters(input core.NBToolCallRequest) (map[string]any, error) {
+	exactType := nudgebeeStringArg(input, "type")
+	types := nudgebeeStringSliceArg(input, "types")
+	category := strings.TrimSpace(nudgebeeStringArg(input, "category"))
+
+	selectorsProvided := 0
+	if exactType != "" {
+		selectorsProvided++
+	}
+	if len(types) > 0 {
+		selectorsProvided++
+	}
+	if category != "" {
+		selectorsProvided++
+	}
+	if selectorsProvided > 1 {
+		return nil, errors.New("nudgebee: specify at most one of 'category', 'type', or 'types' to filter integrations")
+	}
+
+	filters := map[string]any{}
+	if category != "" {
+		filters["category"] = map[string]any{"_eq": normalizeIntegrationCategory(category)}
+	} else if len(types) > 0 {
+		filters["type"] = map[string]any{"_in": types}
+	} else if exactType != "" {
+		filters["type"] = map[string]any{"_eq": exactType}
+	}
+	return filters, nil
+}
+
+func nudgebeeLimit(input core.NBToolCallRequest, defaultLimit int) int {
+	limit := defaultLimit
+	if limit < 1 {
+		limit = 20
+	}
 	switch value := input.Arguments["limit"].(type) {
 	case float64:
 		limit = int(value)
@@ -582,7 +680,7 @@ func nudgebeeLimit(input core.NBToolCallRequest) int {
 		limit = value
 	}
 	if limit < 1 {
-		return 20
+		return defaultLimit
 	}
 	if limit > 100 {
 		return 100
@@ -594,7 +692,8 @@ func nudgebeeLimit(input core.NBToolCallRequest) int {
 // api-server treats a tenant id without a user id as an internal tenant-admin
 // call, which is valid for background jobs but would silently elevate an
 // interactive Nubi request. Self-awareness tools therefore require a real
-// requesting user before crossing the service boundary.
+// requesting user (or the authorized system user sentinel for automated
+// background triage) before crossing the service boundary.
 func doNudgebeeQueryRequest(nbCtx core.NbToolContext, action string, input map[string]any) (string, error) {
 	if err := requireNudgebeeUser(nbCtx); err != nil {
 		return "", err
@@ -606,7 +705,13 @@ func requireNudgebeeUser(nbCtx core.NbToolContext) error {
 	if nbCtx.Ctx == nil || nbCtx.Ctx.GetSecurityContext() == nil {
 		return errors.New("nudgebee: authenticated user context is required")
 	}
-	if strings.TrimSpace(nbCtx.Ctx.GetSecurityContext().EffectiveUserIdForRPC()) == "" {
+	sc := nbCtx.Ctx.GetSecurityContext()
+	// Allow automated background triage / event-analysis flows executing under the system-user sentinel.
+	if sc.GetUserId() == security.GetSystemUserId() {
+		return nil
+	}
+	// For interactive requests, require a real user ID so an unauthenticated call cannot elevate to tenant-admin.
+	if strings.TrimSpace(sc.GetUserId()) == "" || strings.TrimSpace(sc.EffectiveUserIdForRPC()) == "" {
 		return errors.New("nudgebee: requesting user is required; refusing tenant-admin fallback")
 	}
 	return nil
@@ -658,7 +763,7 @@ func (t NudgebeeAccountsListTool) Call(nbCtx core.NbToolContext, input core.NBTo
 	return nudgebeeToolResponse(nbCtx, t.Name(), "accounts_list", map[string]any{
 		"columns": nudgebeeAccountColumns,
 		"where":   where,
-		"limit":   nudgebeeLimit(input),
+		"limit":   nudgebeeLimit(input, 20),
 		"order_by": []map[string]any{
 			{"column": "account_name", "order": "asc"},
 		},
@@ -737,34 +842,79 @@ func (NudgebeeIntegrationsListTool) InferToolRequestType(ctx *security.RequestCo
 	return nudgebeeReadRequestType(ctx, input, conversation)
 }
 func (NudgebeeIntegrationsListTool) Description() string {
-	return "List configured Nudgebee integrations visible to the requesting user. Apply every status, type and name constraint from the question in this first call; do not fetch an unfiltered list first. Includes type and current recorded status. Read-only."
+	return "List configured Nudgebee integrations visible to the requesting user. Supports filtering by category (e.g., 'database', 'messaging', 'ticketing', 'observability_platform'), exact type, multiple types, status, or name substring. Defaults to 20 results (100 for category queries, max 100). If the response indicates truncation, use limit or narrow your filter. Read-only."
 }
 func (NudgebeeIntegrationsListTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{Type: core.ToolSchemaTypeObject, Properties: map[string]core.ToolSchemaProperty{
-		"status": nudgebeeStringProperty("Optional exact integration status."),
-		"type":   nudgebeeStringProperty("Optional exact integration type."),
-		"name":   nudgebeeStringProperty("Optional case-insensitive integration-name substring."),
-		"limit":  nudgebeeLimitProperty(),
+		"category": nudgebeeStringProperty("Optional integration category (e.g., 'database', 'messaging', 'ticketing', 'observability_platform', 'ci_cd', 'messaging_queue'). Filter matching integrations in the authoritative registry."),
+		"type":     nudgebeeStringProperty("Optional exact integration type (e.g., 'postgresql', 'github', 'ES')."),
+		"types":    nudgebeeStringArrayProperty("Optional list of integration types to filter by."),
+		"status":   nudgebeeStringProperty("Optional exact integration status."),
+		"name":     nudgebeeStringProperty("Optional case-insensitive integration-name substring."),
+		"limit":    nudgebeeLimitProperty(),
 	}, Required: []string{}}
 }
 func (t NudgebeeIntegrationsListTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
 	where := map[string]any{}
-	for _, key := range []string{"status", "type"} {
-		if value := nudgebeeStringArg(input, key); value != "" {
-			where[key] = map[string]any{"_eq": value}
-		}
+	if value := nudgebeeStringArg(input, "status"); value != "" {
+		where["status"] = map[string]any{"_eq": value}
+	}
+	typeFilters, err := nudgebeeBuildIntegrationTypeFilters(input)
+	if err != nil {
+		return triageErrorResponse(err), nil
+	}
+	for k, v := range typeFilters {
+		where[k] = v
 	}
 	if value := nudgebeeStringArg(input, "name"); value != "" {
 		where["name"] = map[string]any{"_ilike": "%" + value + "%"}
 	}
-	return nudgebeeToolResponse(nbCtx, t.Name(), "integrations_list", map[string]any{
+
+	defaultLimit := 20
+	if _, ok := where["category"]; ok {
+		defaultLimit = 100
+	}
+	limit := nudgebeeLimit(input, defaultLimit)
+
+	data, err := doNudgebeeQueryRequest(nbCtx, "integrations_list", map[string]any{
 		"columns": nudgebeeIntegrationColumns,
 		"where":   where,
-		"limit":   nudgebeeLimit(input),
+		"limit":   limit + 1,
 		"order_by": []map[string]any{
 			{"column": "name", "order": "asc"},
 		},
 	})
+	if err != nil {
+		if nbCtx.Ctx != nil {
+			nbCtx.Ctx.GetLogger().Warn("nudgebee: read tool failed", "tool", t.Name(), "action", "integrations_list", "error", err)
+		}
+		return triageErrorResponse(err), nil
+	}
+	if nbCtx.Ctx != nil {
+		nbCtx.Ctx.GetLogger().Info("nudgebee: read tool completed", "tool", t.Name(), "action", "integrations_list")
+	}
+
+	// Probe with limit+1 so truncation is established by presence of the extra row rather than ambiguous count.
+	var parsed struct {
+		Rows []any `json:"rows"`
+	}
+	if json.Unmarshal([]byte(data), &parsed) == nil {
+		truncated := len(parsed.Rows) > limit
+		if truncated {
+			parsed.Rows = parsed.Rows[:limit]
+		}
+		var wrapped map[string]any
+		if json.Unmarshal([]byte(data), &wrapped) == nil {
+			wrapped["rows"] = parsed.Rows
+			wrapped["truncated"] = truncated
+			wrapped["limit"] = limit
+			wrapped["total_returned"] = len(parsed.Rows)
+			if b, mErr := json.Marshal(wrapped); mErr == nil {
+				data = string(b)
+			}
+		}
+	}
+	return triageResponse(data), nil
 }
 
 type NudgebeeIntegrationsCountTool struct{}
@@ -775,13 +925,15 @@ func (NudgebeeIntegrationsCountTool) InferToolRequestType(ctx *security.RequestC
 	return nudgebeeReadRequestType(ctx, input, conversation)
 }
 func (NudgebeeIntegrationsCountTool) Description() string {
-	return "Count configured Nudgebee integrations visible to the requesting user. Use status/type filters for a specific subset; use group_by only when the user asks for a breakdown. Do not list integrations to calculate a count. Read-only."
+	return "Count configured Nudgebee integrations visible to the requesting user. Supports filtering by category (e.g., 'database', 'messaging', 'ticketing', 'observability_platform'), exact type, multiple types, or status. Use group_by only when the user asks for a breakdown. Do not list integrations to calculate a count. Read-only."
 }
 func (NudgebeeIntegrationsCountTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{Type: core.ToolSchemaTypeObject, Properties: map[string]core.ToolSchemaProperty{
-		"status":   nudgebeeStringProperty("Optional exact integration status."),
+		"category": nudgebeeStringProperty("Optional integration category (e.g., 'database', 'messaging', 'ticketing', 'observability_platform', 'ci_cd', 'messaging_queue')."),
 		"type":     nudgebeeStringProperty("Optional exact integration type, for example github, datadog, or slack."),
-		"group_by": nudgebeeStringProperty("Optional grouping: status or type. Do not group when filtering for one type."),
+		"types":    nudgebeeStringArrayProperty("Optional list of integration types to count."),
+		"status":   nudgebeeStringProperty("Optional exact integration status."),
+		"group_by": nudgebeeStringProperty("Optional grouping: status or type. Do not group when filtering for one type or category."),
 	}, Required: []string{}}
 }
 func (t NudgebeeIntegrationsCountTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
@@ -789,8 +941,12 @@ func (t NudgebeeIntegrationsCountTool) Call(nbCtx core.NbToolContext, input core
 	if value := nudgebeeStringArg(input, "status"); value != "" {
 		where["status"] = map[string]any{"_eq": value}
 	}
-	if value := nudgebeeStringArg(input, "type"); value != "" {
-		where["type"] = map[string]any{"_eq": value}
+	typeFilters, err := nudgebeeBuildIntegrationTypeFilters(input)
+	if err != nil {
+		return triageErrorResponse(err), nil
+	}
+	for k, v := range typeFilters {
+		where[k] = v
 	}
 	query := map[string]any{"columns": []string{"count"}, "where": where}
 	if groupBy := nudgebeeStringArg(input, "group_by"); groupBy == "status" || groupBy == "type" {
@@ -896,11 +1052,13 @@ func (NudgebeeDocsSearchTool) Call(nbCtx core.NbToolContext, input core.NBToolCa
 
 	started := time.Now()
 	userID := nbCtx.Ctx.GetSecurityContext().EffectiveUserIdForRPC()
+	searchCtx, traceID := core.WithRetrievalTraceID(nbCtx.Ctx.GetContext())
 	results := queryNudgebeeDocs(
-		userID, nbCtx.AccountId, input.Command, nudgebeeDocsModule,
+		searchCtx, userID, nbCtx.AccountId, "", input.Command, nudgebeeDocsModule, "",
 		nudgebeeDocsResultLimit, nbCtx.ConversationId, nbCtx.MessageId,
 		nbCtx.ParentAgentId, true, map[string]any{"source": nudgebeeDocsSource},
 	)
+	results = core.JudgeKBResults(nbCtx.Ctx, nbCtx.AccountId, userID, nbCtx.ConversationId, nbCtx.MessageId, input.Command, results, traceID)
 	data, references, selected, truncated := formatNudgebeeDocsResults(results)
 	if nbCtx.Ctx != nil {
 		nbCtx.Ctx.GetLogger().Info("nudgebee: product docs search completed",

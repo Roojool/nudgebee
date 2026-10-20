@@ -654,7 +654,7 @@ const investigationsTour: TourDef = {
  *   #kg-canvas              → the graph canvas (graphWrapperRef Box). Note it also
  *                             hosts the "Graph Too Large to Render" state, so the
  *                             step is safe even when the graph won't draw.
- *   #kg-filter-panel        → the left filter sidebar (WidgetCard)
+ *   #kg-filter-panel        → the left filter sidebar (ds/Card)
  *   #auto-complete-kg-filter-{account,node-type,node,level}
  *                           → the four filter dropdowns. FilterDropdown re-emits
  *                             its `id` as `auto-complete-<kebab(id)>`; the explicit
@@ -1358,7 +1358,7 @@ const automationFromScratchTour: TourDef = {
  *                          in filterOptions (pages/optimise/index.jsx) when their
  *                          UI_ENABLE_* toggle is on AND hasReadAccess passes, so
  *                          both steps are `optional` and silently skip otherwise
- *   #optimize-card-savings → the "Total Savings" WidgetCard
+ *   #optimize-card-savings → the "Total Savings" ds/Card
  *   #optimize-card-all     → the "All Recommendations" card — the category
  *                            stat-cards double as tabs (the category chips and
  *                            the Top Issues band were folded into the cards +

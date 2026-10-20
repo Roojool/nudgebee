@@ -458,7 +458,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// secret already surfaced on an earlier message isn't recounted against
 	// this message when the planner re-sends that history on every LLM call.
 	// Reporting-only: block / redact still scan the full outbound payload.
-	ctx.SetContext(egressfilter.WithReportBaseline(ctx.GetContext(), historyStr))
+	ctx.SetContext(egressfilter.EnsureReportBaseline(ctx.GetContext(), historyStr, request.Query))
 	// saving the agent to Db
 	var agentId uuid.UUID
 	var previousAgentState string
@@ -540,7 +540,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	imagesUnsupportedByModel := false
 	if len(request.Images) > 0 {
 		provider, model := resolveEffectiveVisionProvider(ctx, request.AccountId, agent.GetName(), request.ConversationId)
-		if _, ok := resolveVisionCapableTier(provider, model); !ok {
+		if _, ok := resolveVisionCapableTier(request.AccountId, provider, model); !ok {
 			imagesUnsupportedByModel = true
 		}
 	}
@@ -1179,6 +1179,9 @@ func refineAgentQuestionAndHandleFollowups(ctx *security.RequestContext, request
 }
 
 func getExistingHistory(request NBAgentRequest, ctx *security.RequestContext) ([]prompts.MessageFormatter, error) {
+	if request.QueryConfig.SkipConversationHistory {
+		return []prompts.MessageFormatter{}, nil
+	}
 	chatHistory, err := GetConversationDao().LoadConversationMessages(request.AccountId, request.ConversationId, "", "", config.Config.ConversationHistoryWindowSize)
 	if err != nil {
 		ctx.GetLogger().Error("agentexecutor: unable to load chat history", "error", err)
@@ -1267,6 +1270,15 @@ type NBClassificationAgent interface {
 	GetOptions() []string
 }
 
+// NBMultiOptionClassificationAgent is a classification agent whose answer may name
+// more than one option (comma-separated). Optional: a classification agent that does
+// not implement it stays single-select, which is the safe default — an agent whose
+// caller can only consume one answer must keep rejecting a multi-option one.
+type NBMultiOptionClassificationAgent interface {
+	NBClassificationAgent
+	AllowsMultipleOptions() bool
+}
+
 // resolveEffectivePlannerType maps an agent's *declared* planner type to the
 // planner that actually runs it. Orchestrating and ReAct agents both execute
 // via the ReAct3 planner (see createAgentPlanner), so they resolve to
@@ -1296,7 +1308,11 @@ func useReAct4Engine(ctx *security.RequestContext, agent NBAgent, request NBAgen
 	if p, ok := agent.(NBAgentReAct4Provider); ok {
 		forced = p.PrefersReAct4()
 	}
-	if !config.Config.LlmServerReAct4Enabled && !forced {
+	engine := config.Config.LlmServerPlannerEngine
+	if engine == "" {
+		engine = PlannerEngineAuto
+	}
+	if strings.EqualFold(engine, PlannerEngineReAct3) && !forced {
 		return false
 	}
 	declared := agent.GetPlannerType()
@@ -1305,7 +1321,7 @@ func useReAct4Engine(ctx *security.RequestContext, agent NBAgent, request NBAgen
 	}
 	provider := GetLLMProvider(ctx, request.AccountId, agent.GetName(), true, request.ConversationId)
 	model := GetLLMModelName(ctx, request.AccountId, provider, agent.GetName(), true, request.ConversationId)
-	return shouldUseReAct4(declared, config.Config.LlmServerReAct4Enabled, forced, provider, model)
+	return shouldUseReAct4(declared, engine, forced, provider, model)
 }
 
 func createAgentPlanner(ctx *security.RequestContext, agent NBAgent, request NBAgentRequest, systemMessage string, messageHistoryFomatter []prompts.MessageFormatter, initialNotebook string) (NBAgentPlanner, error) {
@@ -1316,9 +1332,9 @@ func createAgentPlanner(ctx *security.RequestContext, agent NBAgent, request NBA
 		nbAgentPlanner, err = NewPromptAgent(ctx, request, agent, systemMessage, messageHistoryFomatter)
 	} else if agent.GetPlannerType() == AgentPlannerTypeReAct || agent.GetPlannerType() == AgentPlannerTypeReAct3 || agent.GetPlannerType() == AgentPlannerTypeOrchestrating {
 		// Orchestrating, ReAct and ReAct3 execute as react_3 by default, or as
-		// react_4 (provider-native tool calling) when LlmServerReAct4Enabled is
-		// set AND the resolved provider/model supports native tools
-		// (useReAct4Engine). An explicit false override rolls back to ReAct3.
+		// react_4 (provider-native tool calling) when LlmServerPlannerEngine is
+		// auto/react4 AND the resolved provider/model supports native tools
+		// (useReAct4Engine). An explicit "react3" override forces ReAct3.
 		// See docs/planner_react_4.md.
 		//
 		// react_4 receives the react_3-style agent systemMessage (built via the
@@ -1339,7 +1355,11 @@ func createAgentPlanner(ctx *security.RequestContext, agent NBAgent, request NBA
 		if !ok {
 			return nil, errors.New("agent is not of type NBClassificationAgent for classification planner")
 		}
-		nbAgentPlanner, err = NewClassificationPlanner(ctx, request, agent, systemMessage, classificationAgent.GetOptions())
+		multi := false
+		if multiAgent, ok := agent.(NBMultiOptionClassificationAgent); ok {
+			multi = multiAgent.AllowsMultipleOptions()
+		}
+		nbAgentPlanner, err = NewClassificationPlanner(ctx, request, agent, systemMessage, classificationAgent.GetOptions(), multi)
 	} else if agent.GetPlannerType() == AgentPlannerTypeCustom {
 		customAgent, ok := agent.(NBCustomAgent)
 		if !ok {

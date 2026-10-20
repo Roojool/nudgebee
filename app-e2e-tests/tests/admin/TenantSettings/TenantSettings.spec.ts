@@ -1,7 +1,14 @@
 // Not for OSS
 
-import { test, expect } from "@playwright/test";
-import { discardUnsavedEdits, ensureSelfOnboardingChecked, openTenantSettings, requiredTenantName, toast } from "./tenantSettingsHelper";
+import { test, expect, Page, Locator } from "@playwright/test";
+import { TenantSettingsLocators } from "./tenantSettingsLocators";
+import {
+  discardUnsavedEdits,
+  ensureSelfOnboardingChecked,
+  openTenantSettings,
+  requiredTenantName,
+  toast,
+} from "./tenantSettingsHelper";
 import {
   ERROR_EMPTY_DOMAINS,
   ERROR_INVALID_ROLE,
@@ -53,7 +60,7 @@ test(
     // landing tab without anything being clicked.
     await ts.expectTabSelected(ts.generalTab);
     await expect(ts.tenantNameInput).toBeVisible();
-  },
+  }
 );
 
 test(
@@ -64,7 +71,9 @@ test(
 
     // Tenant Name is hydrated from listUserTenants, matched against the session
     // tenant — so it is the run's own tenant, not whatever happens to be first.
-    await expect(ts.tenantNameInput).toHaveValue(requiredTenantName(), { timeout: 60000 });
+    await expect(ts.tenantNameInput).toHaveValue(requiredTenantName(), {
+      timeout: 60000,
+    });
 
     // Allowed Domains and Default Auth Role are disabled unless the checkbox is
     // on (`disabled={!canEdit || !checkboxEnabled}`), which is the coupling this
@@ -77,11 +86,11 @@ test(
       await expect(ts.allowedDomainsInput).toBeDisabled();
       await expect(ts.defaultAuthRoleInput).toBeDisabled();
     }
-  },
+  }
 );
 
 test(
-  "Tenant Settings - open General, save the form unmodified, verify the saved-successfully toast and that the tenant name and log label mappings still hold their values after a reload",
+  "Tenant Settings - open General, save the untouched form and verify the tenant name and log label mappings survive a reload, or that Save stays disabled when a build gates it on changes",
   { tag: ["@dev", "@regression", "@functional", "@snackbar", "@crud"] },
   async ({ page }) => {
     const ts = await openTenantSettings(page);
@@ -101,24 +110,42 @@ test(
     await expect(ts.logsSubTab).toBeVisible();
     // Read in parallel: these are independent property reads that drive no UI,
     // so serialising them only costs round-trips to the browser.
-    const logValuesBefore = await Promise.all(LOG_LABEL_TESTIDS.map((testId) => ts.mapperField(testId).inputValue()));
+    const logValuesBefore = await Promise.all(
+      LOG_LABEL_TESTIDS.map((testId) => ts.mapperField(testId).inputValue())
+    );
 
     await ts.openTab(ts.generalTab);
-    await ts.saveButton().click();
-    await expect(toast(page, SAVE_SUCCESS_TEXT)).toBeVisible({ timeout: 60000 });
+
+    // Both shapes of the build: one gates Save on a real change, so an untouched form keeps it
+    // disabled -- there is nothing to round-trip and that disabled state is the whole assertion.
+    // The currently-deployed build leaves Save enabled, where saving the untouched form is what
+    // proves the values survive the write.
+    const save = ts.saveButton();
+    if (await save.isDisabled()) {
+      await expect(save).toBeDisabled();
+      return;
+    }
+    await save.click();
+    await expect(toast(page, SAVE_SUCCESS_TEXT)).toBeVisible({
+      timeout: 60000,
+    });
 
     // The toast alone proves nothing persisted — handleSaveSettings writes
     // log_labels, trace_labels and default_log_provider on every save, so a
     // reload is what shows the round trip actually landed.
     const reloaded = await discardUnsavedEdits(page);
-    await expect(reloaded.tenantNameInput).toHaveValue(nameBefore, { timeout: 60000 });
+    await expect(reloaded.tenantNameInput).toHaveValue(nameBefore, {
+      timeout: 60000,
+    });
 
     await reloaded.openTab(reloaded.labelMappingTab);
     await expect(reloaded.logsSubTab).toBeVisible();
     for (let i = 0; i < LOG_LABEL_TESTIDS.length; i++) {
-      await expect(reloaded.mapperField(LOG_LABEL_TESTIDS[i])).toHaveValue(logValuesBefore[i]);
+      await expect(reloaded.mapperField(LOG_LABEL_TESTIDS[i])).toHaveValue(
+        logValuesBefore[i]
+      );
     }
-  },
+  }
 );
 
 test(
@@ -138,7 +165,9 @@ test(
     await expect(ts.allowedDomainsInput).toHaveValue("");
 
     await ts.saveButton().click();
-    await expect(toast(page, ERROR_EMPTY_DOMAINS)).toBeVisible({ timeout: 60000 });
+    await expect(toast(page, ERROR_EMPTY_DOMAINS)).toBeVisible({
+      timeout: 60000,
+    });
 
     // This guard returns before upsertTenantAttributes, so nothing reached the
     // backend — a reload showing the checkbox back where it started is what
@@ -149,7 +178,7 @@ test(
     } else {
       await expect(reloaded.selfOnboardingCheckbox).toBeChecked();
     }
-  },
+  }
 );
 
 test(
@@ -172,10 +201,12 @@ test(
     await expect(ts.defaultAuthRoleInput).toHaveValue(INVALID_AUTH_ROLE);
 
     await ts.saveButton().click();
-    await expect(toast(page, ERROR_INVALID_ROLE)).toBeVisible({ timeout: 60000 });
+    await expect(toast(page, ERROR_INVALID_ROLE)).toBeVisible({
+      timeout: 60000,
+    });
 
     await discardUnsavedEdits(page);
-  },
+  }
 );
 
 test(
@@ -196,7 +227,7 @@ test(
     await ts.openTab(ts.generalTab);
     await expect(ts.tenantNameInput).toBeVisible();
     await expect(ts.mapperField(LOG_LABEL_TESTIDS[0])).toHaveCount(0);
-  },
+  }
 );
 
 test(
@@ -216,21 +247,30 @@ test(
     // (hasAdvancedValue in TenantAccountCommonSettings), so which half of the
     // toggle is showing depends on the tenant's stored mapping, not on the code
     // under test. The button's own label is what says which state it is in.
-    const advancedAlreadyOpen = (await ts.traceAdvancedToggle.textContent())?.includes(TRACE_ADVANCED_HIDE_TEXT) ?? false;
+    const advancedAlreadyOpen =
+      (await ts.traceAdvancedToggle.textContent())?.includes(
+        TRACE_ADVANCED_HIDE_TEXT
+      ) ?? false;
     if (!advancedAlreadyOpen) {
-      await expect(ts.traceAdvancedToggle).toContainText(TRACE_ADVANCED_SHOW_TEXT);
+      await expect(ts.traceAdvancedToggle).toContainText(
+        TRACE_ADVANCED_SHOW_TEXT
+      );
       await ts.traceAdvancedToggle.click();
     }
 
     await expect(ts.traceAdvancedPanel).toBeVisible();
     await expect(ts.mapperField(TRACE_ADVANCED_FIRST_TESTID)).toBeVisible();
-    await expect(ts.traceAdvancedToggle).toContainText(TRACE_ADVANCED_HIDE_TEXT);
+    await expect(ts.traceAdvancedToggle).toContainText(
+      TRACE_ADVANCED_HIDE_TEXT
+    );
 
     await ts.traceAdvancedToggle.click();
     await expect(ts.traceAdvancedPanel).toHaveCount(0);
     await expect(ts.mapperField(TRACE_ADVANCED_FIRST_TESTID)).toHaveCount(0);
-    await expect(ts.traceAdvancedToggle).toContainText(TRACE_ADVANCED_SHOW_TEXT);
-  },
+    await expect(ts.traceAdvancedToggle).toContainText(
+      TRACE_ADVANCED_SHOW_TEXT
+    );
+  }
 );
 
 test(
@@ -249,7 +289,7 @@ test(
     // The Logs mapper belongs to a sibling sub-tab, so its absence is what shows
     // the body swapped rather than stacked.
     await expect(ts.mapperField(LOG_LABEL_TESTIDS[0])).toHaveCount(0);
-  },
+  }
 );
 
 test(
@@ -262,7 +302,9 @@ test(
     await expect(ts.featuresTable).toBeVisible({ timeout: 60000 });
 
     for (const header of FEATURE_TABLE_HEADERS) {
-      await expect(ts.featuresTable.locator("th", { hasText: header }).first()).toBeVisible();
+      await expect(
+        ts.featuresTable.locator("th", { hasText: header }).first()
+      ).toBeVisible();
     }
 
     // Located by position, not by accessible name. Each feature-group tab renders
@@ -273,7 +315,10 @@ test(
     // then the catalog's categories. The text assertion below is what keeps that
     // positional assumption honest if the order ever changes.
     const groupTabs = ts.featureGroupTabList.getByRole("tab");
-    expect(await groupTabs.count(), "the feature catalog rendered no category tabs beyond All").toBeGreaterThan(1);
+    expect(
+      await groupTabs.count(),
+      "the feature catalog rendered no category tabs beyond All"
+    ).toBeGreaterThan(1);
 
     const allTab = groupTabs.first();
     await expect(allTab).toContainText(FEATURES_ALL_TAB);
@@ -287,18 +332,46 @@ test(
     // strip filters rather than just re-rendering the full list.
     const categoryTab = groupTabs.nth(1);
     const badge = ((await categoryTab.textContent()) ?? "").match(/\d+/);
-    expect(badge, "the first category tab rendered no count badge to compare rows against").not.toBeNull();
+    expect(
+      badge,
+      "the first category tab rendered no count badge to compare rows against"
+    ).not.toBeNull();
 
     const expectedRows = Number(badge?.[0]);
     await categoryTab.click();
     await ts.expectTabSelected(categoryTab);
     await expect(ts.featureRows).toHaveCount(expectedRows);
     expect(expectedRows).toBeLessThanOrEqual(allRows);
-  },
+  }
 );
 
+// Flips one feature toggle and lands the change, coping with both shapes of the
+// Features tab: the build under this PR applies each toggle on change (no Save
+// button), while the currently-deployed build still gates the write behind Save.
+// The suite runs against the deployed app, so it must green on either -- probe for
+// the Save button and take the branch that is actually present.
+async function flipFeatureAndLand(
+  page: Page,
+  ts: TenantSettingsLocators,
+  toggle: Locator
+): Promise<void> {
+  const before = await toggle.isChecked();
+  await toggle.click();
+  await expect(toggle).toBeChecked({ checked: !before });
+  const save = ts.saveButton();
+  if ((await save.count()) > 0) {
+    await save.click();
+    await expect(toast(page, SAVE_SUCCESS_TEXT)).toBeVisible({
+      timeout: 60000,
+    });
+  } else {
+    // Immediate-apply: the switch disables while its write is in flight and re-enables once it settles.
+    await expect(toggle).toBeEnabled({ timeout: 30000 });
+  }
+}
+
 test(
-  "Tenant Settings - open Features, flip a feature switch without saving, reload, verify the switch is back to the state it was found in",
+  "Tenant Settings - open Features, toggle a flag and verify the change lands and survives a reload, then restore it",
   { tag: ["@dev", "@regression", "@functional"] },
   async ({ page }) => {
     const ts = await openTenantSettings(page);
@@ -318,21 +391,36 @@ test(
     // The flag's identity, so the same row is re-read after the reload rather
     // than whichever row sorts first the second time.
     const featureName = (await firstToggle.getAttribute("aria-label")) ?? "";
-    expect(featureName, "the first feature row's switch carries no aria-label to re-find it by").not.toEqual("");
+    expect(
+      featureName,
+      "the first feature row's switch carries no aria-label to re-find it by"
+    ).not.toEqual("");
     const wasChecked = await firstToggle.isChecked();
 
-    await firstToggle.click();
-    await expect(firstToggle).toBeChecked({ checked: !wasChecked });
+    await flipFeatureAndLand(page, ts, firstToggle);
 
-    // Nothing is saved: this tab has no Cancel, and navigating away is how the
-    // component discards pending edits (the tab body remounts on ErrorBoundary's
-    // key). A reload is the same discard, and the flag coming back unchanged is
-    // what proves the flip never reached the tenant.
+    // A reload proves the change reached the tenant, not just the local switch.
     const reloaded = await discardUnsavedEdits(page);
     await reloaded.openTab(reloaded.featuresTab);
     await expect(reloaded.featuresTable).toBeVisible({ timeout: 60000 });
-    await expect(reloaded.featureToggle(featureName)).toBeChecked({ checked: wasChecked });
-  },
+    await expect(reloaded.featureToggle(featureName)).toBeChecked({
+      checked: !wasChecked,
+    });
+
+    // Restore the flag to the state the test found it in, so the run leaves the
+    // shared tenant unchanged.
+    await flipFeatureAndLand(
+      page,
+      reloaded,
+      reloaded.featureToggle(featureName)
+    );
+    const restored = await discardUnsavedEdits(page);
+    await restored.openTab(restored.featuresTab);
+    await expect(restored.featuresTable).toBeVisible({ timeout: 60000 });
+    await expect(restored.featureToggle(featureName)).toBeChecked({
+      checked: wasChecked,
+    });
+  }
 );
 
 test(
@@ -345,16 +433,27 @@ test(
     await expect(ts.featuresTable).toBeVisible({ timeout: 60000 });
 
     // showFlagIds starts false, so the control opens as "Show flag ids".
-    await expect(ts.flagIdsToggle).toHaveAttribute("aria-label", "Show flag ids");
+    await expect(ts.flagIdsToggle).toHaveAttribute(
+      "aria-label",
+      "Show flag ids"
+    );
     await ts.flagIdsToggle.click();
-    await expect(ts.flagIdsToggle).toHaveAttribute("aria-label", "Hide flag ids");
+    await expect(ts.flagIdsToggle).toHaveAttribute(
+      "aria-label",
+      "Hide flag ids"
+    );
 
     // Flag ids are the catalog's SCREAMING_SNAKE values, rendered only for rows
     // that also have a display name — so at least one has to appear, and the
     // pattern is what distinguishes them from the human-readable column.
-    await expect(ts.featuresTable.getByText(/^[A-Z][A-Z0-9_]{4,}$/).first()).toBeVisible({ timeout: 30000 });
+    await expect(
+      ts.featuresTable.getByText(/^[A-Z][A-Z0-9_]{4,}$/).first()
+    ).toBeVisible({ timeout: 30000 });
 
     await ts.flagIdsToggle.click();
-    await expect(ts.flagIdsToggle).toHaveAttribute("aria-label", "Show flag ids");
-  },
+    await expect(ts.flagIdsToggle).toHaveAttribute(
+      "aria-label",
+      "Show flag ids"
+    );
+  }
 );

@@ -28,7 +28,11 @@ const FetchLogsAgentName = "fetch_logs"
 
 // FetchLogsAgent dispatches an NL log question to the configured backend:
 //
-//	loki / signoz / es / elasticsearch  → JSON-where → logs_execute
+//	any services-server-backed provider (loki/es/signoz/…) → canonical
+//	  `{"where": {...}}` → logs_execute_v2 → services-server FetchLogs, which
+//	  resolves canonical→provider labels and builds the native query
+//	  server-side. When that path errors or returns no logs, it falls back to
+//	  kubectl (kubectlFallback).
 //	datadog                             → DD facet syntax → datadog_log_execute
 //	empty / k8s-only                    → kubectlLogQuery → kubectl_execute
 type FetchLogsAgent struct {
@@ -49,11 +53,7 @@ func init() {
 	toolOutput := "JSON envelope: {\"query\": \"<rendered backend query>\", \"logs\": \"<raw lines or preview>\", \"file_ref\": \"<workspace file path or empty>\", \"provider\": \"<loki|es|datadog|kubectl>\", \"bundle_signal\": \"<category-tagged crash-bundle sweep against file_ref, computed server-side when the query wording asked for error content (error/fail/crash/timeout/oom/…); empty when it didn't fire>\", \"fallback_note\": \"<present only when the configured backend's query matched zero rows and the agent retried via kubectl — explains that this answer came from kubectl instead of the configured provider, so a zero-row backend result isn't mistaken for 'no logs exist'; absent otherwise>\"}"
 
 	core.RegisterNBAgentFactoryAsTool(FetchLogsAgentName, func(accountId string) (core.NBAgent, error) {
-		// Always construct v2. It embeds v1 and gates the canonical path on the
-		// LLM_SERVER_LOG_AGENT_V2_ENABLED env var (FetchLogsAgentV2.Execute); when
-		// the gate is off it delegates to the embedded v1 agent, so behaviour is
-		// identical to v1.
-		return newFetchLogsAgentV2(accountId), nil
+		return newFetchLogsAgent(accountId), nil
 	}, toolDescription, toolInput, toolOutput)
 }
 
@@ -101,19 +101,6 @@ func (a *FetchLogsAgent) GetPlannerType() core.AgentPlannerType {
 
 func (a *FetchLogsAgent) GetKnowledgeMode() core.AgentKnowledgeMode {
 	return core.AgentKnowledgeAutoChunks
-}
-
-func (a *FetchLogsAgent) Execute(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
-	provider := a.effectiveProvider(request)
-
-	switch strings.ToLower(provider.Provider) {
-	case "datadog":
-		return a.generateDatadogLogQueryAndExecute(ctx, request)
-	case "loki", "signoz", "es", "elasticsearch":
-		return a.generateLogQueryAndExecute(ctx, request, provider)
-	default:
-		return a.generateKubeCtlLogQueryAndExecute(ctx, request)
-	}
 }
 
 func (a *FetchLogsAgent) generateKubeCtlLogQueryAndExecute(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
@@ -338,36 +325,12 @@ func formatDiscoveryHint(candidates []string) string {
 	)
 }
 
-func (a *FetchLogsAgent) generateLogQueryAndExecute(ctx *security.RequestContext, request core.NBAgentRequest, provider services_server.ObservabilityProvider) (core.NBAgentResponse, error) {
-	fields, indices := fetchLabelsAndIndices(a.accountId, provider)
-	jsonQuery, err := generateLogQuery(ctx, request, provider.Provider, fields, indices, provider.DefaultIndex)
-	if err != nil {
-		return errorResponse(a.GetName(), fmt.Errorf("loki/es query extraction: %w", err)), nil
-	}
-	logs, toolRefs, err := callTool(ctx, a.accountId, request, tools.ToolLogsExecute, jsonQuery)
-	if err != nil {
-		return errorResponse(a.GetName(), fmt.Errorf("logs_execute: %w", err)), nil
-	}
-	if matched, reason := looksLikeFetchError(provider.Provider, logs); matched {
-		return errorResponse(a.GetName(), fmt.Errorf("%s fetch failed: %s", provider.Provider, reason)), nil
-	}
-	if strings.EqualFold(provider.Provider, "loki") {
-		logs = unwrapLokiInnerTimestamps(ctx, logs)
-	}
-	fileRef, flattened, fileRefs := saveLogsToWorkspace(ctx, a.accountId, request.ConversationId, provider.Provider, logs)
-	bundleSignal, err := runAutoDiagnosticBundle(ctx, a.accountId, request, fileRef)
-	if err != nil {
-		return core.NBAgentResponse{}, err
-	}
-	return makeFetchResponse(a.GetName(), jsonQuery, logs, flattened, fileRef, bundleSignal, mergeRefs(toolRefs, fileRefs)), nil
-}
-
 func (a *FetchLogsAgent) generateDatadogLogQueryAndExecute(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
 	ddQuery, err := generateDatadogLogQuery(ctx, request)
 	if err != nil {
 		return errorResponse(a.GetName(), fmt.Errorf("datadog query extraction: %w", err)), nil
 	}
-	// logs_execute does not handle Datadog — Datadog has its own executor.
+	// logs_execute_v2 does not handle Datadog — Datadog has its own executor.
 	logs, toolRefs, err := callTool(ctx, a.accountId, request, tools.ToolDatadogLogExecute, ddQuery)
 	if err != nil {
 		return errorResponse(a.GetName(), fmt.Errorf("datadog_log_execute: %w", err)), nil
@@ -390,7 +353,7 @@ func (a *FetchLogsAgent) generateDatadogLogQueryAndExecute(ctx *security.Request
 // LLM call, on the critical path of every fetch. Discovery costs an HTTP
 // round-trip to services-server, which in turn queries the backend's own label
 // API. The previous per-instance sync.Once memo never helped: FetchLogsAgent is
-// reconstructed on every invocation (GetNBAgent → newFetchLogsAgentV2), so two
+// reconstructed on every invocation (GetNBAgent → newFetchLogsAgent), so two
 // fetches in one investigation meant two full discoveries.
 const logLabelsCacheNS = "llm_log_labels"
 
@@ -495,8 +458,8 @@ func fetchLabelsAndIndices(accountId string, provider services_server.Observabil
 // ToolConfig is resolved — without it, kubectl_execute and similar tools fail
 // their ToolConfig.Name precondition.
 // callTool runs an underlying *_execute tool and returns both its data and its
-// UI references. The references must be propagated: tools like logs_execute /
-// loki_execute build the canonical "#monitoring/logs" source link (with the
+// UI references. The references must be propagated: tools like logs_execute_v2
+// build the canonical "#monitoring/logs" source link (with the
 // rendered query pre-filled); dropping them here is why fetch_logs answers
 // historically had no clickable source. saveLogsToWorkspace's file reference is
 // merged on top by the callers.
@@ -660,7 +623,7 @@ func matchFetchErrorSignals(raw string) (bool, string) {
 var relayWrapperRE = regexp.MustCompile(`\bServer returned \d{3}:`)
 
 // mergeRefs combines the underlying tool's UI references (e.g. the
-// "#monitoring/logs" source link from logs_execute) with saveLogsToWorkspace's
+// "#monitoring/logs" source link from logs_execute_v2) with saveLogsToWorkspace's
 // file reference, de-duplicating by URL. The tool's navigation reference is
 // ordered first so it surfaces as the primary source; the workspace file ref
 // follows as a downloadable artifact. Either side may be nil.
@@ -692,6 +655,83 @@ func mergeRefs(toolRefs, fileRefs []toolcore.NBToolResponseReference) []toolcore
 // a preview — inlining the full logs (often 50k-200k tokens) alongside the
 // file_ref duplicated the payload and dominated prompt size.
 const logInlinePreviewBytes = 4096
+
+// logMode is the deterministic intent bucket the Go classifier emits. The
+// logs agent's prompt then has a single authoritative MODE flag instead of
+// asking the LLM to classify routine vs investigation vs enumeration on the
+// fly. The LLM frequently treats a parent's paraphrased "Get logs for X" as
+// routine even when OriginalQuery is "Were there issues" — the classifier in
+// Go fixes this deterministically.
+type logMode int
+
+const (
+	logModeRoutine logMode = iota
+	logModeInvestigation
+	logModeEnumeration
+)
+
+func logModeName(m logMode) string {
+	switch m {
+	case logModeInvestigation:
+		return "INVESTIGATION"
+	case logModeEnumeration:
+		return "ENUMERATION"
+	default:
+		return "ROUTINE"
+	}
+}
+
+// Classifier patterns. Investigation has two tiers so precedence against
+// enumeration can differ by strength of signal:
+//
+//   - Enumeration:        "show / list / summarise / enumerate" verb
+//     co-occurring with an error/symptom noun within
+//     ~30 chars, plus "what kinds of errors" and
+//     "distinct errors" idioms. The noun list includes
+//     symptom words (failing/broken/crash*), not just
+//     "error"-family nouns, so "list the pods that are
+//     failing" matches here rather than falling through
+//     to the weak investigation tier below.
+//   - strongInvestigationRE: causal verbs/phrases (why / root cause /
+//     diagnose / troubleshoot / debug / investigate,
+//     plus inflections; "what caused/happened/went
+//     wrong/broke", "were there"). These checked BEFORE
+//     enumeration — a query naming both a causal ask and
+//     a listing verb ("show me the errors and explain why
+//     it broke") is an investigation that happens to
+//     mention "show", not an enumeration.
+//   - weakSymptomRE:        bare "broken" / "failing" / "crash*" with no
+//     causal verb and no enumeration match — checked
+//     AFTER enumeration, so a plain listing request
+//     ("list failing pods") isn't misrouted into the
+//     heavier investigation workflow just because it
+//     names a symptom instead of the word "error".
+var (
+	strongInvestigationRE = regexp.MustCompile(`(?i)\bwhy\b|\broot\s+cause\b|\bdiagnos\w*\b|\btroubleshoot\w*\b|\bdebug\w*\b|\binvestigat\w*\b|\bwhat\s+(caused|happened|went\s+wrong|broke|broken)\b|\bwere\s+there\b`)
+	enumerationVerbsRE    = regexp.MustCompile(`(?i)\b(show|list|summari[sz]e|categori[sz]e|enumerate)\b.{0,30}\b(errors?|fail\w*|exceptions?|issues?|broken|crash\w*)\b|what\s+(kinds?\s+of\s+)?errors|\bdistinct\s+errors?\b`)
+	weakSymptomRE         = regexp.MustCompile(`(?i)\bbroken\b|\bfail\w*\b|\bcrash\w*\b`)
+)
+
+// classifyLogMode buckets the user's intent. The verbatim user question
+// (OriginalQuery) wins over per-step paraphrases from a parent planner —
+// "Get logs for X" emitted by a parent does not erase the user's "why is X
+// broken" intent. When OriginalQuery is empty we fall back to Query.
+func classifyLogMode(query, originalQuery string) logMode {
+	q := strings.TrimSpace(originalQuery)
+	if q == "" {
+		q = strings.TrimSpace(query)
+	}
+	if strongInvestigationRE.MatchString(q) {
+		return logModeInvestigation
+	}
+	if enumerationVerbsRE.MatchString(q) {
+		return logModeEnumeration
+	}
+	if weakSymptomRE.MatchString(q) {
+		return logModeInvestigation
+	}
+	return logModeRoutine
+}
 
 // autoBundleQueryRE keeps the routine-mode fallback: fire the bundle even
 // on a "get logs" request when the wording explicitly names error content
@@ -1256,134 +1296,6 @@ a specific symptom is already known — when it is set, tail SHOULD be 10000 so 
 	return intent, nil
 }
 
-// defaultProviderLogFields is the field list advertised to the query-generator
-// LLM when the backend's label discovery (QueryLabels) fails or returns empty.
-// The where-clause keys are passed to the backend verbatim (no canonical
-// mapping), so the fallback must use each backend's REAL field names: Signoz
-// stores logs under OTel attribute names — the generic `_body`/`namespace`/
-// `pod` set matches no Signoz attribute and every query silently returns zero
-// rows.
-//
-// Signoz is special-cased because it has ONE fixed schema (OTel), so a
-// universally-correct fallback exists. Do NOT add hardcoded fallbacks for
-// schema-less backends like Elasticsearch: their field names depend entirely
-// on the customer's log shipper (filebeat `message`/`kubernetes.*`, OTel
-// `body`/`k8s.*`, custom pipelines), and any guessed list silently returns
-// zero rows for the setups it doesn't match — the exact failure mode this
-// function exists to fix. Those backends must rely on label/index discovery
-// and the account GlobalContext (propagated by buildLogIntentMessages).
-func defaultProviderLogFields(provider string) []string {
-	if strings.EqualFold(provider, "signoz") {
-		return []string{"body", "service.name", "k8s.cluster.name", "k8s.namespace.name", "k8s.pod.name", "trace_id"}
-	}
-	return []string{"_body", "namespace", "pod"}
-}
-
-// generateLogQuery returns the JSON-where envelope logs_execute consumes.
-// defaultIndex is the backend's account-default index (from get_default_provider);
-// empty for backends with no index concept (e.g. Loki).
-func generateLogQuery(ctx *security.RequestContext, request core.NBAgentRequest, provider string, fields []string, indices map[string]string, defaultIndex string) (string, error) {
-	supportedOperators := []string{"_eq", "_neq", "_gt", "_gte", "_lt", "_lte", "_in", "_nin", "_like", "_ilike", "_nlike", "_is_null", "_or", "_and"}
-
-	fieldsProvided := len(fields) > 0
-	if !fieldsProvided {
-		fields = defaultProviderLogFields(provider)
-	}
-
-	var b strings.Builder
-	b.WriteString("**GOAL:** Only Generate Query, Cannot Execute Query.\n")
-	b.WriteString("You are an expert in generating JSON queries from natural language.\n")
-	b.WriteString("Your goal is to create a valid JSON query based on the user's question.\n")
-	b.WriteString("Follow this JSON schema:\n")
-	b.WriteString(`{"where": {"<field>": {"<operator>": "<value>"}}, "_or": [ ... ], "_and": [ ... ]}, "limit": <number>, "time_range": "<string>", "start_time": "<string>", "index": "<string>", "direction": "<forward|backward> (Loki only)"}` + "\n")
-	b.WriteString("The `where` clause is for filtering. For `_and` or `_or` operators, the value is an array of filter objects.\n")
-	b.WriteString("The `index` field is optional. Use it to target a specific Elasticsearch index or pattern when the user's query implies a particular log source.\n")
-	b.WriteString("Do not use anything other than the provided fields and operators.\n")
-	b.WriteString("Prefer ilike operator for regex matches.\n")
-	b.WriteString("Prefer ilike operator for text matches over eq operator.\n")
-	b.WriteString("AVAILABLE FIELDS AND OPERATORS for query building\n")
-	fmt.Fprintf(&b, "  - **Fields**: %s\n", strings.Join(fields, ", "))
-	fmt.Fprintf(&b, "  - **Operators**: %s\n", strings.Join(supportedOperators, ", "))
-
-	if len(indices) > 0 {
-		keys := make([]string, 0, len(indices))
-		for k := range indices {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		indexList := make([]string, 0, len(indices))
-		for _, name := range keys {
-			indexList = append(indexList, fmt.Sprintf("%s (%s)", name, indices[name]))
-		}
-		b.WriteString("AVAILABLE ELASTICSEARCH INDICES:\n")
-		fmt.Fprintf(&b, "  %s\n", strings.Join(indexList, ", "))
-		if defaultIndex != "" {
-			fmt.Fprintf(&b, "  Account default index (used when `index` is omitted): %s\n", defaultIndex)
-		}
-		b.WriteString("Pick the most relevant index based on the user's question. If unsure or the request is general, omit the index field to use the account default.\n")
-	} else if defaultIndex != "" {
-		fmt.Fprintf(&b, "Account default log index (used when `index` is omitted): %s. Omit the `index` field unless the user's question implies a different source.\n", defaultIndex)
-	}
-
-	b.WriteString("\n**Constraints:**\n")
-	if fieldsProvided {
-		// Loki labels (`app`, `namespace`, ...) lose to the model's stronger
-		// OTel/Datadog prior (`service_name`) without an explicit prohibition.
-		b.WriteString("- MUST use ONLY the labels/fields listed in the Fields section above. Do not invent labels.\n")
-		b.WriteString("- NEVER emit labels that are not in the Fields list. Do not fall back to generic OTel/Datadog conventions (e.g. `service_name`, `service.name`, `kubernetes.*`) unless they are explicitly present in the Fields list. If the equivalent appears in the Fields list under a different name (e.g. `app`, `namespace`, `pod`), use that name verbatim.\n")
-		b.WriteString("- When the user's natural-language question uses generic words like 'service X', 'pod X', or 'app X', map them to the matching label from the Fields list. The choice of label name is dictated by the Fields list, not by the user's wording.\n")
-	}
-	b.WriteString("- Do not answer questions without generating a query.\n")
-	b.WriteString("- Ensure the generated JSON is a valid query.\n")
-	b.WriteString("- Return only the JSON query object enclosed in triple backticks.\n")
-
-	if strings.EqualFold(provider, "loki") {
-		b.WriteString("\n**Loki direction (Loki backend only):**\n")
-		b.WriteString("- Default: omit `direction` (Loki defaults to backward — newest first). This is correct for both routine fetches AND the FIRST pass of an investigation, because:\n")
-		b.WriteString("  - For routine queries (\"show me recent errors\", \"tail logs\"), newest-first is what the user expects.\n")
-		b.WriteString("  - For investigations (\"why did X fail\", \"diagnose\", \"root cause\"), errors are typically scattered across history; newest-first guarantees the most recent error window is in the response, which is usually what the user is asking about. The orchestrator may then issue a SECOND, narrower forward fetch around the first error timestamp to pull antecedent context (config reload, deploy, secret rotation) — but that is a follow-up call, not the default.\n")
-		b.WriteString("- Use `\"direction\": \"forward\"` ONLY for that targeted second-pass: a narrow `start_time`/`end_time` window (e.g. 5-15 min) immediately preceding a known error timestamp. Forward + a wide window is almost always wrong because `limit` will truncate before reaching the error window.\n")
-	}
-
-	b.WriteString("\n**Strategy is the caller's responsibility, not yours:**\n")
-	b.WriteString("Translate the natural-language question into a query that reflects exactly what was asked. ")
-	b.WriteString("Do NOT add an error-pattern body filter (e.g. `{\"_body\": {\"_ilike\": \"%error%\"}}`) unless the question explicitly asks for errors/warnings/failures. ")
-	b.WriteString("If the caller asks for \"all logs\" or \"recent logs\" with no error keyword, emit a query with NO body filter — even if the broader context looks investigative. ")
-	b.WriteString("The orchestrator above you decides whether to filter for errors or pull a broad chronological window; your job is to honour that decision faithfully.\n")
-
-	b.WriteString("\n**Always emit `time_range` and `limit` (mandatory):**\n")
-	b.WriteString("- A query without `time_range` falls back to a narrow 1h window centred on `now`. For pods that emit historical/burst data at startup (cron schedulers, replay-style fixtures, jobs that backfill), a 1h window misses errors that happened earlier in the pod's lifetime.\n")
-	b.WriteString("- If the caller's question explicitly mentions a window (\"last 30m\", \"last 6h\", \"between 10:00 and 11:00\"), honour it verbatim.\n")
-	b.WriteString("- Otherwise, choose `time_range` and `limit` from the caller's intent:\n")
-	b.WriteString("    * **Investigation intent** (\"why is X broken\", \"diagnose\", \"what caused\", \"were there issues\", \"what went wrong\", \"root cause\", \"troubleshoot\", \"failing\", \"crash\"): emit `\"time_range\": \"24h\"`, `\"limit\": 5000`. Errors can be hours old; a narrow window will miss them.\n")
-	b.WriteString("    * **Routine intent** (\"show me logs\", \"recent logs\", \"tail\", \"any errors right now\"): emit `\"time_range\": \"1h\"`, `\"limit\": 1000`. Routine viewing favours a recent slice but still needs enough volume to surface scattered errors.\n")
-	b.WriteString("- Read the caller's ORIGINAL user question (when provided) to classify intent — a parent planner often paraphrases an investigative question into a routine-looking sub-step (\"Get recent logs for X\"). The original question carries the true intent.\n")
-	b.WriteString("- These are defaults, not caps. If the caller specifies `last 7d` or `limit 10000`, use those.\n")
-
-	b.WriteString("\n**Examples:**\n")
-	examples := providerSpecificQueryExamples(provider)
-	if len(examples) == 0 {
-		examples = defaultQueryExamples()
-	}
-	for i, ex := range examples {
-		fmt.Fprintf(&b, "Example %d:\n  Question: %s\n  Answer: %s\n", i+1, ex.Question, ex.Answer)
-		if ex.Explanation != "" {
-			fmt.Fprintf(&b, "  Explanation: %s\n", ex.Explanation)
-		}
-	}
-
-	messages := buildLogIntentMessages(b.String(), request)
-
-	res, err := core.GenerateAndTrackLLMContent(ctx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, request.AgentId, false, messages, true)
-	if err != nil {
-		return "", err
-	}
-	if len(res.Choices) == 0 {
-		return "", fmt.Errorf("empty LLM response")
-	}
-	return strings.TrimSpace(res.Choices[0].Content), nil
-}
-
 // generateDatadogLogQuery returns a Datadog facet-syntax query (e.g. "service:my-api status:error").
 func generateDatadogLogQuery(ctx *security.RequestContext, request core.NBAgentRequest) (string, error) {
 	systemPrompt := `**Role:** an SRE expert in Datadog log queries.
@@ -1509,52 +1421,6 @@ func buildKubectlLogCommand(intent kubectlLogQuery) string {
 
 func escapeShellSingleQuoted(s string) string {
 	return strings.ReplaceAll(s, "'", `'\''`)
-}
-
-// defaultQueryExamples is the fallback example set for unrecognised providers.
-func defaultQueryExamples() []core.NBAgentPromptExample {
-	return []core.NBAgentPromptExample{
-		{
-			Question:    "show me recent 504 failures for services abc?",
-			Answer:      `{"where":{"http.status_code": {"_eq": 504}, "service_name": {"_eq": "abc"}}}`,
-			Explanation: "Available Labels - http.status_code, service_name",
-		},
-		{
-			Question:    "How many apis are taking more than 10seconds for service abc?",
-			Answer:      `{"where": {"duration_ns": {"_gt": 10000000000}, "service_name": {"_eq": "abc"}}}`,
-			Explanation: "Available Labels - duration_ns, service_name",
-		},
-		{
-			Question:    "Get Recent Api Failures on services-server?",
-			Answer:      `{"where": {"service_name": {"_eq": "services-server"}, "http.status_code": {"_gte": 500}}}`,
-			Explanation: "Available Labels - service_name, http.status_code",
-		},
-		{
-			Question:    "Show me traces from the last 2 hours for ml-k8s-server",
-			Answer:      `{"where": {"service_name": {"_eq": "ml-k8s-server"}}, "time_range": "2h"}`,
-			Explanation: "Available Labels - service_name, time_range",
-		},
-		{
-			Question:    "get traces of llm server",
-			Answer:      `{"where": {"service_name": {"_eq": "llm-server"}}}`,
-			Explanation: "Available Labels - service_name",
-		},
-		{
-			Question:    "get traces of llm server after 2025-01-01",
-			Answer:      `{"where": {"service_name": {"_eq": "llm-server"}}, "start_time": "2025-01-01T00:00:00Z"}`,
-			Explanation: "Available Labels - service_name, start_time",
-		},
-		{
-			Question:    "get 10 error logs of services-server",
-			Answer:      `{"where": {"service_name": {"_eq": "services-server"}, "body": {"_ilike": "%error%"}}, "limit":10}`,
-			Explanation: "Available Labels - service_name, body",
-		},
-		{
-			Question:    "Get me recent logs of app metrics-server in kube-system namespace",
-			Answer:      `{"where": {"service_name": {"_eq": "metrics-server"}}, "limit":10}`,
-			Explanation: "Available Labels - service_name",
-		},
-	}
 }
 
 // providerSpecificQueryExamples returns few-shot examples tuned to each

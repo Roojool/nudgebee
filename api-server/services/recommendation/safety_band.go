@@ -26,6 +26,49 @@ const (
 	SafetyBandUnknown SafetyBand = "unknown"
 )
 
+// destructiveWording is how a destructive verdict names its action. The band
+// grades a volume delete and a scale-down to zero alike — both floor at risky —
+// but only the first is irreversible, and the reason line should say which.
+type destructiveWording struct {
+	// change opens a reason that names the action: "<change> with 2 dependent(s)".
+	change string
+	// emptyNeighbourhood is the whole reason when nothing depends on the resource.
+	emptyNeighbourhood string
+}
+
+var removalWording = destructiveWording{
+	change:             "irreversible change",
+	emptyNeighbourhood: "nothing attached, hosted, or depending on this resource — but the change is irreversible; verify before removing",
+}
+
+var stopWording = destructiveWording{
+	change:             "scale-down to zero replicas",
+	emptyNeighbourhood: "nothing attached, hosted, or depending on this workload — the pods stop and the manifest stays; verify nothing needs it before scaling down",
+}
+
+// stopRules are destructive-class rules whose action stops the resource and
+// keeps its definition rather than removing it.
+var stopRules = map[string]bool{
+	"abandoned_resource": true,
+}
+
+func destructiveWordingFor(ruleName string) destructiveWording {
+	if stopRules[ruleName] {
+		return stopWording
+	}
+	return removalWording
+}
+
+// DeriveSafetyBandForRule is DeriveSafetyBand with the reason worded for the
+// rule's action, so a scale-down reads as a stop rather than a removal. The
+// band itself is identical.
+func DeriveSafetyBandForRule(ruleName string, impact *core.ImpactSummary, class ChangeClass) (SafetyBand, string) {
+	if class == ChangeClassDestructive && impact != nil && impact.CoverageConfidence != core.CoverageNone {
+		return deriveDestructiveBand(impact, destructiveWordingFor(ruleName))
+	}
+	return DeriveSafetyBand(impact, class)
+}
+
 // DeriveSafetyBand maps a knowledge-graph ImpactSummary plus the
 // recommendation's change class to a safety band: the verdict grades what the
 // change does (additive / reductive / destructive), who relies on the resource,
@@ -57,7 +100,7 @@ func DeriveSafetyBand(impact *core.ImpactSummary, class ChangeClass) (SafetyBand
 
 	switch class {
 	case ChangeClassDestructive:
-		return deriveDestructiveBand(impact)
+		return deriveDestructiveBand(impact, removalWording)
 	case ChangeClassAdditive:
 		return deriveAdditiveBand(impact)
 	default:
@@ -106,30 +149,30 @@ func deriveAdditiveBand(impact *core.ImpactSummary) (SafetyBand, string) {
 // DependentCount — they are not callers — but an irreversible action on a
 // resource that still has anything hanging off it in any direction must stay
 // red. Decision logged in docs/architecture-decisions.md.
-func deriveDestructiveBand(impact *core.ImpactSummary) (SafetyBand, string) {
+func deriveDestructiveBand(impact *core.ImpactSummary, w destructiveWording) (SafetyBand, string) {
 	wellObserved := impact.CoverageConfidence == core.CoverageHigh || impact.CoverageConfidence == core.CoverageObserved
 	neighborhoodEmpty := impact.DependentCount == 0 &&
 		impact.InfrastructureCount == 0 &&
 		impact.HostedWorkloadCount == 0 &&
 		impact.DownstreamCount == 0
 	if neighborhoodEmpty && !impact.Truncated && wellObserved {
-		return SafetyBandReview, "nothing attached, hosted, or depending on this resource — but the change is irreversible; verify before removing"
+		return SafetyBandReview, w.emptyNeighbourhood
 	}
 	switch {
 	case impact.ProductionDependents > 0:
-		return SafetyBandRisky, fmt.Sprintf("irreversible change with %d production dependent(s)", impact.ProductionDependents)
+		return SafetyBandRisky, fmt.Sprintf("%s with %d production dependent(s)", w.change, impact.ProductionDependents)
 	case impact.Truncated:
-		return SafetyBandRisky, "irreversible change with a very large blast radius"
+		return SafetyBandRisky, w.change + " with a very large blast radius"
 	case impact.DependentCount > 0:
-		return SafetyBandRisky, fmt.Sprintf("irreversible change with %d dependent(s)", impact.DependentCount)
+		return SafetyBandRisky, fmt.Sprintf("%s with %d dependent(s)", w.change, impact.DependentCount)
 	case impact.HostedWorkloadCount > 0:
-		return SafetyBandRisky, fmt.Sprintf("irreversible change on a node hosting %d workload(s)", impact.HostedWorkloadCount)
+		return SafetyBandRisky, fmt.Sprintf("%s on a node hosting %d workload(s)", w.change, impact.HostedWorkloadCount)
 	case impact.InfrastructureCount > 0:
-		return SafetyBandRisky, fmt.Sprintf("irreversible change with %d attached infrastructure resource(s)", impact.InfrastructureCount)
+		return SafetyBandRisky, fmt.Sprintf("%s with %d attached infrastructure resource(s)", w.change, impact.InfrastructureCount)
 	case impact.DownstreamCount > 0:
-		return SafetyBandRisky, fmt.Sprintf("irreversible change on a resource still fronting or serving %d target(s)", impact.DownstreamCount)
+		return SafetyBandRisky, fmt.Sprintf("%s on a resource still fronting or serving %d target(s)", w.change, impact.DownstreamCount)
 	default:
-		return SafetyBandRisky, "irreversible change and graph coverage is too limited to confirm nothing depends on it"
+		return SafetyBandRisky, w.change + " and graph coverage is too limited to confirm nothing depends on it"
 	}
 }
 

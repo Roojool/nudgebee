@@ -182,7 +182,7 @@ const TierRow = ({ item, color, goTo, showRarity, isChange, folded, seedName }) 
               height: 17,
               px: 0.75,
               fontSize: 10.5,
-              fontWeight: 600,
+              fontWeight: 'var(--ds-font-weight-semibold)',
               color: badge.fg,
               bgcolor: badge.bg,
               borderRadius: 'var(--ds-radius-pill)',
@@ -592,7 +592,7 @@ const ImpactPanel = ({ eventId, prefetched }) => {
             }}
           >
             <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 0.75, mb: 0.25 }}>
-              <Typography sx={{ fontWeight: 600, fontSize: 13.5 }}>{s.name}</Typography>
+              <Typography sx={{ fontWeight: 'var(--ds-font-weight-semibold)', fontSize: 13.5 }}>{s.name}</Typography>
               <MetaChip label={s.node_type} />
               <MetaChip label={`${s.hops_away}-hop`} />
               <MetaChip label={`via ${s.relationship}`} />

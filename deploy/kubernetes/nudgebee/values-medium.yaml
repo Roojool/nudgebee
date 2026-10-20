@@ -1,0 +1,193 @@
+# Medium tier — for estates up to ~25 monitored clusters / 900 nodes / 100,000
+# pods / 550 cloud accounts.
+#
+#   helm upgrade --install nudgebee ./nudgebee -f values-medium.yaml
+#
+# Anchored on a real deployment of this size measured over 7 days: 24 connected
+# clusters, 851 nodes, 93,921 pods, 530 cloud accounts, 46 tenants. That
+# deployment consumed 11.3 GiB average / 27.6 GiB peak memory and 0.80 cores
+# average / 10.12 cores peak across all services.
+#
+# What actually changes between Small and Medium:
+#   - Replicas go to 2 on the request-serving and ingest paths (app, API,
+#     collectors, workflow, LLM). This is for availability during upgrades as much
+#     as for capacity — at Small a single replica means a rolling update is an
+#     outage.
+#   - Memory limits rise on the four services whose footprint genuinely tracks
+#     estate size: services-server, ml-k8s-server, k8s-collector-worker,
+#     temporal-history. Everything else is flat and only gets a modest bump.
+#   - CPU requests roughly double. They are still set from measured p95, not from
+#     the limit — see docs/sizing-and-tiers.md for why that distinction matters.
+
+global:
+  sizingProfile: medium
+
+app:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 750m, memory: 1Gi }
+    requests: { cpu: 150m, memory: 500Mi }
+
+services-server:
+  replicaCount: 2
+  resources:
+    # The 6-hourly finops-score recompute is the sizing driver here, not steady
+    # state. It ran to 1.0Gi on Small estates and 7.9Gi on the largest; the
+    # recompute cost tracks the size of the recommendation set, so budget 6Gi at
+    # Medium. A 4Gi ceiling was below the limit this container has already been
+    # observed to OOM against (2.5Gi on a mid-sized estate) plus the headroom that
+    # a >2x estate implies.
+    # Memory request from p95 (1788Mi on the busiest Medium install), not the
+    # 129-183Mi average. The recompute keeps this container above any
+    # average-derived request for a large share of the day, which is exactly when
+    # a low request makes it the first pod evicted under node pressure. Note the
+    # spread within this tier is wide — a quieter Medium install measures 285Mi
+    # p95 — so an operator sizing a small Medium estate can tune this down.
+    limits: { cpu: 1500m, memory: 6Gi }
+    requests: { cpu: 250m, memory: 2Gi }
+
+k8s-collector:
+  resources:
+    limits: { cpu: 1500m, memory: 2Gi }
+    requests: { cpu: 400m, memory: 500Mi }
+  dualMode:
+    worker:
+      replicaCount: 2
+      resources:
+        # Containment budget for the known worker leak (~87Mi/day/pod), not a
+        # measurement of what the worker needs. See docs/sizing-and-tiers.md.
+        limits: { cpu: 1500m, memory: 2Gi }
+        requests: { cpu: 250m, memory: 750Mi }
+
+relay-server:
+  replicaCount: 2
+  resources:
+    # 1.5Gi, matching Small: the failure here is a sub-scrape-interval allocation
+    # spike on the large-payload reply path, not estate growth. Dev sat at 35Mi
+    # average and still OOM-killed 7 pods against a 1000Mi limit.
+    # Memory request from p95 (263Mi on the busiest Medium install), not the
+    # 24-36Mi average. relay-server is the spikiest service in the chart by ratio
+    # — p95 is 7.5x its average — because large payloads cross this process twice
+    # on the reply path. A 250Mi request sat just below that p95.
+    limits: { cpu: 750m, memory: 1.5Gi }
+    requests: { cpu: 100m, memory: 500Mi }
+
+cloud-collector-server:
+  resources:
+    # No CPU limit on purpose — cloud discovery is bursty and throttling it only
+    # stretches the sync window.
+    # Memory request from p95 (854Mi on the busiest Medium install), not the
+    # 130-478Mi average: the daily usage-report job holds one account's whole
+    # monthly billing report, so the pod sits well above any average-derived
+    # request for the duration of that job. See issue #38972.
+    limits: { memory: 4Gi }
+    requests: { cpu: 300m, memory: 1Gi }
+
+ml-k8s-server:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 2500m, memory: 5Gi }
+    requests: { cpu: 400m, memory: 1.5Gi }
+
+llm-server:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 1500m, memory: 3Gi }
+    requests: { cpu: 100m, memory: 500Mi }
+
+llm-gateway:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 750m, memory: 1Gi }
+    requests: { cpu: 100m, memory: 100Mi }
+
+rag-server:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 2500m, memory: 4Gi }
+    requests: { cpu: 300m, memory: 1.5Gi }
+
+nudgebee-qdrant-server:
+  resources:
+    # Tracks knowledge-base content, not estate size. Single replica by design.
+    limits: { cpu: 1500m, memory: 2.5Gi }
+    requests: { cpu: 150m, memory: 750Mi }
+
+notifications:
+  resources:
+    limits: { cpu: 1000m, memory: 1Gi }
+    requests: { cpu: 200m, memory: 250Mi }
+
+cost-server:
+  resources:
+    limits: { cpu: 750m, memory: 2Gi }
+    requests: { cpu: 100m, memory: 250Mi }
+
+ticket-server:
+  resources:
+    limits: { cpu: 300m, memory: 250Mi }
+    requests: { cpu: 50m, memory: 100Mi }
+
+workflow-server:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 750m, memory: 750Mi }
+    requests: { cpu: 100m, memory: 250Mi }
+
+# Bundled dependencies. Only applies if you are running the in-chart database;
+# installs on RDS/CloudSQL set postgresql.enabled=false and skip this.
+postgresql:
+  primary:
+    # 8Gi, matching Small and Large. The chart default was re-measured up to 8Gi
+    # (5749Mi peak on a small install) after this file was written, which left
+    # Medium as the only tier with a *lower* database ceiling than Small — the one
+    # inversion we cannot afford, since Postgres does not degrade at a cgroup
+    # ceiling, it gets OOM-killed mid-transaction.
+    limits: { cpu: 3000m, memory: 8Gi }
+    requests: { cpu: 500m, memory: 2Gi }
+
+rabbitmq:
+  # Flat regardless of estate size — queue depth stays near zero.
+  resources:
+    limits: { cpu: 750m, memory: 750Mi }
+    requests: { cpu: 100m, memory: 250Mi }
+
+temporal:
+  server:
+    frontend:
+      replicaCount: 2
+      resources:
+        limits: { cpu: 750m, memory: 750Mi }
+        requests: { cpu: 100m, memory: 250Mi }
+      additionalEnv:
+        # 90% of the 750Mi limit above.
+        - name: GOMEMLIMIT
+          value: '675MiB'
+    matching:
+      replicaCount: 2
+      resources:
+        limits: { cpu: 750m, memory: 750Mi }
+        requests: { cpu: 100m, memory: 250Mi }
+      additionalEnv:
+        # 90% of the 750Mi limit above.
+        - name: GOMEMLIMIT
+          value: '675MiB'
+    worker:
+      replicaCount: 2
+      resources:
+        limits: { cpu: 750m, memory: 750Mi }
+        requests: { cpu: 100m, memory: 250Mi }
+      additionalEnv:
+        # 90% of the 750Mi limit above.
+        - name: GOMEMLIMIT
+          value: '675MiB'
+    history:
+      # Single replica on purpose at this tier: history is a stateful shard owner
+      # and adding replicas rebalances shards. Give it memory instead.
+      resources:
+        limits: { cpu: 1500m, memory: 4Gi }
+        requests: { cpu: 150m, memory: 2Gi }
+      additionalEnv:
+        # 90% of the 4Gi limit above.
+        - name: GOMEMLIMIT
+          value: '3686MiB'

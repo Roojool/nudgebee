@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { Typography, Box } from '@mui/material';
 import { Checkbox } from '@ui/Checkbox';
+import { CodeBlock } from '@ui/CodeBlock';
 import { Input } from '@ui/Input';
 import { Button } from '@ui/Button';
 import { Modal } from '@ui/Modal';
+import { ds } from '@utils/colors';
 
 interface TriggerWorkflowModalProps {
   open: boolean;
@@ -289,7 +291,7 @@ const TriggerWorkflowModal: React.FC<TriggerWorkflowModalProps> = ({
                           fontSize: 'var(--ds-text-body)',
                           fontWeight: 'var(--ds-font-weight-semibold)',
                           color: 'var(--ds-brand-500)',
-                          fontFamily: 'monospace',
+                          fontFamily: ds.font.mono,
                         }}
                       >
                         {input.id}
@@ -323,7 +325,7 @@ const TriggerWorkflowModal: React.FC<TriggerWorkflowModalProps> = ({
                     sx={{
                       fontSize: 'var(--ds-text-caption)',
                       color: 'var(--ds-gray-600)',
-                      fontFamily: 'monospace',
+                      fontFamily: ds.font.mono,
                       backgroundColor: 'var(--ds-background-300)',
                       px: 1,
                       py: 0.5,
@@ -444,13 +446,13 @@ const TriggerWorkflowModal: React.FC<TriggerWorkflowModalProps> = ({
               fontSize: 'var(--ds-text-small)',
               color: 'var(--ds-gray-400)',
               lineHeight: 1.5,
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
             }}
             component='div'
           >
-            • Simple parameters: <code>{`{"env": "test", "debug": true}`}</code>
-            <br />• Complex data: <code>{`{"user": {"id": 123, "name": "test"}, "config": {"timeout": 30}}`}</code>
-            <br />• Empty inputs: <code>{`{}`}</code>
+            • Simple parameters: <CodeBlock inline code={`{"env": "test", "debug": true}`} />
+            <br />• Complex data: <CodeBlock inline code={`{"user": {"id": 123, "name": "test"}, "config": {"timeout": 30}}`} />
+            <br />• Empty inputs: <CodeBlock inline code='{}' />
           </Typography>
         </Box>
       </Box>

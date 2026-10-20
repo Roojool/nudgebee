@@ -84,6 +84,8 @@ const VerticalAutopPilotForm = ({
   isDisable = false,
   reviewAutoOptimize,
   containerName = '',
+  currentMemoryExtra,
+  recommendedMemoryExtra,
   showKeepPreviousCpuLimit = false,
   showKeepPreviousMemLimit = false,
 }: VerticalAutopPilotFormProps) => {
@@ -330,8 +332,9 @@ const VerticalAutopPilotForm = ({
             {currentData?.memory ? (
               <Box sx={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 'calc(var(--ds-space-0) * 5)' }}>
                 <Box>
-                  <AutoOptimizeInfoCard title='Current' border={'1px solid var(--ds-gray-200)'}>
+                  <AutoOptimizeInfoCard title='Current' border={'1px solid var(--ds-gray-200)'} height={currentMemoryExtra ? 'auto' : undefined}>
                     <InfoCard data={currentData.memory} type='memory' />
+                    {currentMemoryExtra}
                   </AutoOptimizeInfoCard>
                 </Box>
                 <Box
@@ -421,6 +424,7 @@ const VerticalAutopPilotForm = ({
                       />
                     )}
                   </Box>
+                  {recommendedMemoryExtra}
                 </AutoOptimizeInfoCard>
               </Box>
             ) : (

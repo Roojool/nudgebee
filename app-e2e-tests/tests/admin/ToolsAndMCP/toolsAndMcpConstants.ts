@@ -93,7 +93,7 @@ export const MCP_BANNER_TEXT = "This view is read-only.";
 export const MCP_BANNER_ACTION = "Manage in Integrations";
 
 // AdminAccountFilter -> AccountSelect passes id='account-select' and, without
-// `required`, prepends a real "All accounts" entry rather than a placeholder.
+// `required`, shows "All accounts" as the empty filter's placeholder (not an option).
 export const ACCOUNT_SELECT_ID = "account-select";
 export const ALL_ACCOUNTS_LABEL = "All accounts";
 

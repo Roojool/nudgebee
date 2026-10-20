@@ -61,6 +61,10 @@ const (
 	PriorityDirectionTooLow  = "too_low"
 )
 
+// ReasonCodeMuted is the reason code of the classification recorded for a firing a
+// Mute suppressed. System-only: users cannot pick it.
+const ReasonCodeMuted = "muted"
+
 // Reason codes for each classification type
 var ValidReasonCodes = map[string][]string{
 	ClassificationTruePositive: {
@@ -320,6 +324,9 @@ type TriageRuleResult struct {
 type SuppressionResult struct {
 	Action    string `json:"action"` // suppress or drop
 	NewStatus string `json:"new_status"`
+	// Muted: the winning rule was created by Mute, not by someone marking the
+	// alert as noise.
+	Muted bool `json:"muted,omitempty"`
 }
 
 // ScoreAdjustment holds scoring rule result

@@ -5,7 +5,7 @@ import DataObjectIcon from '@mui/icons-material/DataObject';
 import { Modal } from '@ui/Modal';
 import { Select, type SelectOption } from '@ui/Select';
 import Text from '@shared/format/Text';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { workflowAddIcon, workflowAiIcon, workflowTemplateIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { useTenantBranding } from '@hooks/useTenantBranding';
@@ -75,9 +75,11 @@ const CreateWorkflowOptionsModal: React.FC<CreateWorkflowOptionsModalProps> = ({
           gap: 'var(--ds-space-4)',
         }}
       >
-        <WidgetCard
+        {/* flat: these tiles sit on the modal surface, so no resting shadow; the hover below still lifts them. */}
+        <Card
+          interactive={accountChosen}
+          elevation='flat'
           sx={{
-            mt: 0,
             cursor: accountChosen ? 'pointer' : 'default',
             padding: 'var(--ds-space-4)',
             height: '240px',
@@ -141,13 +143,14 @@ const CreateWorkflowOptionsModal: React.FC<CreateWorkflowOptionsModalProps> = ({
               }}
             />
           </Box>
-        </WidgetCard>
+        </Card>
 
         <Tooltip title={!accountChosen ? 'Select an account first' : ''} arrow placement='top'>
           <Box>
-            <WidgetCard
+            <Card
+              interactive={accountChosen}
+              elevation='flat'
               sx={{
-                mt: 0,
                 cursor: accountChosen ? 'pointer' : 'default',
                 padding: 'var(--ds-space-4)',
                 height: '240px',
@@ -211,15 +214,16 @@ const CreateWorkflowOptionsModal: React.FC<CreateWorkflowOptionsModalProps> = ({
                   }}
                 />
               </Box>
-            </WidgetCard>
+            </Card>
           </Box>
         </Tooltip>
 
         <Tooltip title={!accountChosen ? 'Select an account first' : ''} arrow placement='top'>
           <Box>
-            <WidgetCard
+            <Card
+              interactive={accountChosen}
+              elevation='flat'
               sx={{
-                mt: 0,
                 cursor: accountChosen ? 'pointer' : 'default',
                 padding: 'var(--ds-space-4)',
                 height: '240px',
@@ -299,13 +303,14 @@ const CreateWorkflowOptionsModal: React.FC<CreateWorkflowOptionsModalProps> = ({
                   }}
                 />
               </Box>
-            </WidgetCard>
+            </Card>
           </Box>
         </Tooltip>
 
-        <WidgetCard
+        <Card
+          interactive={accountChosen}
+          elevation='flat'
           sx={{
-            mt: 0,
             cursor: accountChosen ? 'pointer' : 'default',
             padding: 'var(--ds-space-4)',
             height: '240px',
@@ -370,7 +375,7 @@ const CreateWorkflowOptionsModal: React.FC<CreateWorkflowOptionsModalProps> = ({
               }}
             />
           </Box>
-        </WidgetCard>
+        </Card>
       </Box>
     </Modal>
   );

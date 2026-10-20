@@ -72,6 +72,24 @@ class TestSlackMarkdownToGenericMarkdown:
     def test_none_input_returns_none(self):
         assert Transformer.slack_markdown_to_generic_markdown(None) is None
 
+    def test_closing_fence_glued_to_content_gets_its_own_line(self):
+        # Slack's mrkdwn parser tolerates "}```" (no newline before the closing
+        # fence), but CommonMark renderers require the fence alone on its own
+        # line, otherwise it renders as literal backticks instead of closing
+        # the code block.
+        result = Transformer.slack_markdown_to_generic_markdown('```{\n  "a": 1\n}```')
+        assert result == '```{\n  "a": 1\n}\n```'
+
+    def test_correctly_placed_fences_are_unchanged(self):
+        result = Transformer.slack_markdown_to_generic_markdown("```\ncode\n```")
+        assert result == "```\ncode\n```"
+
+    def test_four_backtick_run_is_not_corrupted(self):
+        # A closing ``` preceded by another backtick (i.e. a run of 4+) must
+        # not have a newline spliced into the middle of that run.
+        result = Transformer.slack_markdown_to_generic_markdown("text````")
+        assert result == "text\n````"
+
 
 class TestSmartTruncateJson:
     def test_primitive_value(self):

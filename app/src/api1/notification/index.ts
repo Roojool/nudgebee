@@ -1,5 +1,6 @@
 import { gqlStringify, queryGraphQL, unwrapGraphQL } from '@lib/HttpService';
 import apiIntegrations from '@api1/integrations';
+import { safeJSONParse } from 'src/utils/common';
 
 export const LIST_INSTALLED_NOTIFICATION_TOOLS = `query ListInstalledNotificationTools {
     messagingplatforms_list {
@@ -15,6 +16,13 @@ export const LIST_NOTIFICATION_RULES = `query ListNotificationRules($limit: Int,
   notifications_list_rules(limit: $limit, offset: $offset,where:__WHERE__, order_by: [{column: "created_at", order: desc}]) {
     rows {
       account_id
+      scope_mode
+      account_ids
+      exceptions
+      source_mode
+      sources
+      is_active
+      event_types
       id
       source
       created_at
@@ -39,6 +47,54 @@ export const LIST_NOTIFICATION_RULES = `query ListNotificationRules($limit: Int,
     rows {
       count
     }
+  }
+}
+`;
+
+// Only automation rules carry event types, and those rules exist only where the
+// server knows the column, so this is fetched per rule rather than in the list.
+export const GET_NOTIFICATION_RULE_EVENT_TYPES = `query GetNotificationRuleEventTypes {
+  notifications_list_rules(limit: 1, offset: 0, where:__WHERE__) {
+    rows {
+      id
+      event_types
+    }
+  }
+}
+`;
+
+export const LIST_NOTIFICATION_DEFAULT_POLICIES = `query ListNotificationDefaultPolicies {
+  notifications_list_default_policies {
+    policies {
+      source
+      action
+      mappings
+    }
+    error
+  }
+}
+`;
+
+export const UPSERT_NOTIFICATION_DEFAULT_POLICY = `
+mutation UpsertNotificationDefaultPolicy($request: notification_default_policy_input!) {
+  notifications_upsert_default_policy(request: $request) {
+    source
+    action
+    mappings
+    error
+  }
+}
+`;
+
+export const CHECK_NOTIFICATION_ROUTE = `query CheckNotificationRoute($request: notification_route_check_input!) {
+  notifications_check_route(request: $request) {
+    result
+    reason
+    stopped_by
+    rules
+    channels
+    default_channels
+    error
   }
 }
 `;
@@ -144,6 +200,37 @@ function unwrapWatchAction(response: any, action: string) {
   return { error: { message: message || 'Request failed' } };
 }
 
+// What happens to notifications of a type that no rule matches. "all" is the
+// setting every type follows unless it has its own; "inherit" removes a type's own.
+export type NotificationDefaultAction = 'deliver_defaults' | 'deliver_channels' | 'drop' | 'inherit';
+export interface NotificationDefaultPolicy {
+  source: string;
+  action: NotificationDefaultAction;
+  mappings?: { platform: string; channels: any }[];
+}
+
+export interface NotificationRouteCheckRequest {
+  source: string;
+  event?: string | null;
+  account_id?: string | null;
+  namespace?: string | null;
+  workload?: string | null;
+  aggregation_key?: string | null;
+  severity?: string | null;
+}
+
+export interface NotificationRouteCheck {
+  result: 'sent' | 'not_sent' | 'held' | 'paused';
+  reason: 'rule' | 'default_policy' | 'severity';
+  stopped_by: { id: string; name?: string } | null;
+  rules: { id: string; name?: string }[];
+  channels: { platform: string; channels: any; rule_id: string | null }[];
+  default_channels: boolean;
+}
+
+const firstError = (response: any, action: string) =>
+  response?.data?.data?.[action]?.error || response?.data?.errors?.[0]?.message || response?.data?.error?.message;
+
 const apiNotifications = {
   async getInstalledTools() {
     try {
@@ -174,7 +261,8 @@ const apiNotifications = {
       }
       const queryParams: any = {};
       if (query.accountId) {
-        queryParams['account_id'] = { _eq: query.accountId };
+        // A rule matches when the account is any one of its accounts.
+        queryParams['account_ids'] = { _contains: JSON.stringify([query.accountId]) };
       } else if (query.isAccountNull) {
         queryParams['account_id'] = { _is_null: true };
       }
@@ -191,10 +279,94 @@ const apiNotifications = {
       }
       const constructedQuery = LIST_NOTIFICATION_RULES.replaceAll('__WHERE__', gqlStringify(queryParams));
       const response = await queryGraphQL(constructedQuery, 'ListNotificationRules', { limit: limit, offset: offset });
+      const errors = response?.data?.errors;
+      if (errors?.length) {
+        return { error: errors[0]?.message || 'Failed to load notification rules' };
+      }
       return { data: response?.data.data };
     } catch (error) {
       console.log(error);
-      return error;
+      return { error: 'Failed to load notification rules' };
+    }
+  },
+  async getNotificationRuleEventTypes(ruleId: string): Promise<string[]> {
+    try {
+      const constructedQuery = GET_NOTIFICATION_RULE_EVENT_TYPES.replaceAll('__WHERE__', gqlStringify({ id: { _eq: ruleId } }));
+      const response = await queryGraphQL(constructedQuery, 'GetNotificationRuleEventTypes', {});
+      const raw = response?.data?.data?.notifications_list_rules?.rows?.[0]?.event_types;
+      // The rules list returns json columns as encoded strings.
+      const eventTypes = typeof raw === 'string' ? safeJSONParse(raw) : raw;
+      return Array.isArray(eventTypes) ? eventTypes.filter((e: unknown): e is string => typeof e === 'string') : [];
+    } catch (error) {
+      console.log(error);
+      return [];
+    }
+  },
+  // Every rule but the AI cost report's (managed on the Cost Report tab).
+  async listRules(): Promise<{ rows?: any[]; error?: string }> {
+    const res: any = await apiNotifications.getNotificationRules({ excludeSource: 'ai_cost' }, 1000, 0);
+    if (res?.error) return { error: res.error };
+    return { rows: res?.data?.notifications_list_rules?.rows || [] };
+  },
+  async upsertRule(object: Record<string, any>): Promise<{ id?: string; error?: string }> {
+    try {
+      const response = await queryGraphQL(INSERT_NOTIFICATION_RULE, 'InsertNotificationRule', { object });
+      const error = firstError(response, 'notifications_upsert_rule');
+      if (error) {
+        return {
+          error: String(error).toLowerCase().includes('unique constraint') ? 'A notification rule with this name already exists.' : String(error),
+        };
+      }
+      return { id: response?.data?.data?.notifications_upsert_rule?.id };
+    } catch (error) {
+      console.log(error);
+      return { error: 'Couldn’t save the rule. Try again in a minute.' };
+    }
+  },
+  async getDefaultPolicies(): Promise<{ policies?: NotificationDefaultPolicy[]; error?: string }> {
+    try {
+      const response = await queryGraphQL(LIST_NOTIFICATION_DEFAULT_POLICIES, 'ListNotificationDefaultPolicies', {});
+      const error = firstError(response, 'notifications_list_default_policies');
+      if (error) return { error };
+      const policies = response?.data?.data?.notifications_list_default_policies?.policies || [];
+      return {
+        policies: policies.map((p: any) => ({ ...p, mappings: typeof p.mappings === 'string' ? safeJSONParse(p.mappings) || [] : p.mappings || [] })),
+      };
+    } catch (error) {
+      console.log(error);
+      return { error: 'Couldn’t load what happens when no rule matches.' };
+    }
+  },
+  async upsertDefaultPolicy(request: NotificationDefaultPolicy): Promise<{ error?: string }> {
+    try {
+      const response = await queryGraphQL(UPSERT_NOTIFICATION_DEFAULT_POLICY, 'UpsertNotificationDefaultPolicy', { request });
+      const error = firstError(response, 'notifications_upsert_default_policy');
+      return error ? { error } : {};
+    } catch (error) {
+      console.log(error);
+      return { error: 'Couldn’t save what happens when no rule matches.' };
+    }
+  },
+  async checkRoute(request: NotificationRouteCheckRequest): Promise<{ answer?: NotificationRouteCheck; error?: string }> {
+    try {
+      const response = await queryGraphQL(CHECK_NOTIFICATION_ROUTE, 'CheckNotificationRoute', { request });
+      const error = firstError(response, 'notifications_check_route');
+      if (error) return { error };
+      const raw = response?.data?.data?.notifications_check_route || {};
+      const parse = (value: any) => (typeof value === 'string' ? safeJSONParse(value) : value);
+      return {
+        answer: {
+          result: raw.result,
+          reason: raw.reason,
+          stopped_by: parse(raw.stopped_by) || null,
+          rules: parse(raw.rules) || [],
+          channels: parse(raw.channels) || [],
+          default_channels: raw.default_channels === true || raw.default_channels === 'true',
+        },
+      };
+    } catch (error) {
+      console.log(error);
+      return { error: 'Couldn’t check where it would go. Try again in a minute.' };
     }
   },
   async insertNotificationRule(query: any) {
@@ -208,9 +380,6 @@ const apiNotifications = {
         };
       }
       const mappingObject: any = {};
-      if (query.cluster) {
-        mappingObject.cluster = query.cluster;
-      }
       if (query.ruleName) {
         mappingObject.name = query.ruleName;
       }
@@ -245,8 +414,8 @@ const apiNotifications = {
       if (query.id) {
         mappingObject.id = query.id;
       }
-      if (query.accountId) {
-        mappingObject.account_id = query.accountId;
+      if (Array.isArray(query.accountIds)) {
+        mappingObject.account_ids = query.accountIds;
       }
       if (query.description) {
         mappingObject.description = query.description;
@@ -259,6 +428,9 @@ const apiNotifications = {
       }
       if (query.frequency) {
         mappingObject.frequency = query.frequency;
+      }
+      if (Array.isArray(query.event_types)) {
+        mappingObject.event_types = query.event_types;
       }
 
       const response = await queryGraphQL(INSERT_NOTIFICATION_RULE, 'InsertNotificationRule', { object: mappingObject });

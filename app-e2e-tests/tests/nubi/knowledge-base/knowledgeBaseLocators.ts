@@ -260,6 +260,20 @@ export class KnowledgeBaseLocators {
       .first();
   }
 
+  // KbStatusLabel shows status 'active' as "Ready" (or "Ready with gaps"), never the raw value.
+  kbReadyStatus(name: string): Locator {
+    return this.getKBCardByName(name).getByText(/^Ready( with gaps)?$/).first();
+  }
+
+  // Pre-step retrieval labels the row "User KB"; load_skills/search_skills sends no kb_type, so it reads "Knowledge Base".
+  contextsKbRow(kbName: string, subjectText: string): Locator {
+    return this.page
+      .locator("tr")
+      .filter({ has: this.page.getByText(/^(User KB|Knowledge Base)$/) })
+      .filter({ hasText: new RegExp(`${kbName}|${subjectText}`) })
+      .first();
+  }
+
   async clickEditForCard(name: string): Promise<void> {
     const card = this.getKBCardByName(name);
     // The row's pencil carries aria-label "Edit knowledge base"; the loose name

@@ -4,6 +4,7 @@ import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
 	"nudgebee/services/knowledge_graph/sources/model"
+	"nudgebee/services/security"
 )
 
 // ec2InstanceSchema is the fixed concrete per-specific_type property schema for the
@@ -112,6 +113,78 @@ var ssmManagedInstanceSchema = core.SpecificTypeSchema{
 }
 
 func init() { core.RegisterSpecificTypeSchema(ssmManagedInstanceSchema) }
+
+// terminalInstanceStates are the EC2 lifecycle states after which AWS stops
+// reporting the instance's VpcId. On dev this is exact: all 21770 `terminated`
+// rows and 117 of 132 `shutting-down` rows carry "VpcId": null, while every one
+// of the 417 running, 23 stopped and 2 pending rows carries a VPC.
+//
+// The VPC is the hierarchy segment of a ComputeInstance's unique key, so an
+// instance that terminates keys differently from the running instance it used
+// to be. The account build then INSERTS a second node
+// (aws:acct:region:ComputeInstance::i-abc) instead of updating the first
+// (aws:acct:region:ComputeInstance:vpc-123:i-abc), and the original is
+// tombstoned separately by the sync-version sweep — two rows, briefly both
+// active, for one machine. Re-keying on resource_id is not the way out, for the
+// reason collapseComputeInstanceDuplicates gives below: node IDs are a UUIDv5
+// of the unique key.
+//
+// A terminated instance is not part of the infrastructure graph, so it is
+// simply not built. The node it already has is then tombstoned by the sweep
+// under its own identity, exactly as for any resource that leaves inventory.
+var terminalInstanceStates = map[string]bool{
+	"terminated":    true,
+	"shutting-down": true,
+}
+
+// dropTerminatedInstances removes the nodes of instances that have reached a
+// state where AWS no longer reports the VPC their key is built from. See
+// terminalInstanceStates.
+//
+// It drops every ComputeInstance node of a terminated instance, not only the
+// EC2-described one. Systems Manager reports the same machine as a second row
+// that carries no instance_state and no VPC, and it is normally folded away by
+// collapseComputeInstanceDuplicates. Dropping only the EC2 node would leave the
+// SSM node behind to be collapsed with nothing — and it keys as
+// aws:acct:region:ComputeInstance::i-abc, which is the very duplicate this
+// function exists to prevent. So terminal state is resolved per instance, by
+// resource_id, and applies to all of that instance's nodes.
+//
+// An instance SSM manages but EC2 describe does not report (hybrid and on-prem
+// activations) has no EC2 row to be terminated, so it keeps its node.
+func dropTerminatedInstances(nodes []*core.DbNode) []*core.DbNode {
+	terminated := make(map[string]bool)
+	for _, node := range nodes {
+		if node == nil || node.NodeType != core.NodeTypeComputeInstance {
+			continue
+		}
+		state, _ := core.GetNodePropertyString(node, "instance_state")
+		if !terminalInstanceStates[state] {
+			continue
+		}
+		if resourceID, _ := core.GetNodePropertyString(node, "resource_id"); resourceID != "" {
+			terminated[resourceID] = true
+		}
+	}
+
+	kept := make([]*core.DbNode, 0, len(nodes))
+	for _, node := range nodes {
+		if node != nil && node.NodeType == core.NodeTypeComputeInstance {
+			resourceID, _ := core.GetNodePropertyString(node, "resource_id")
+			if resourceID != "" && terminated[resourceID] {
+				continue
+			}
+			// A node with no resource_id cannot be matched to its siblings, so
+			// it is judged on its own state.
+			state, _ := core.GetNodePropertyString(node, "instance_state")
+			if terminalInstanceStates[state] {
+				continue
+			}
+		}
+		kept = append(kept, node)
+	}
+	return kept
+}
 
 // collapseComputeInstanceDuplicates folds the several inventory rows AWS reports for
 // one physical instance onto a single ComputeInstance node.
@@ -417,4 +490,60 @@ func (s *AWSSource) createEC2EdgesViaEngine(nodes []*core.DbNode, lookup *source
 	edges := model.BuildEdges(nodes, awsEC2Rels, lookup, awsEdgeFactory(req))
 	edges = append(edges, s.createEC2EKSEdges(nodes, lookup, req)...)
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	eC2Rows := resourceKind{
+		Service:      "AmazonEC2",
+		NodeType:     core.NodeTypeComputeInstance,
+		SpecificType: "EC2Instance",
+		Extract:      (*AWSSource).extractComputeMetadata,
+	}
+	registerKind(resourceKind{
+		Service:  "AWSSystemsManager",
+		NodeType: core.NodeTypeCloudResource,
+	})
+	registerKind(eC2Rows)
+	registerKind(eC2Rows.withTypes("compute-instance"))
+	registerKind(resourceKind{
+		Service:      "AWSSystemsManager",
+		Types:        []string{"managedinstance"},
+		NodeType:     core.NodeTypeComputeInstance,
+		SpecificType: "SSMManagedInstance",
+		// collapseComputeInstanceDuplicates folds this into the EC2 node of the
+		// same instance, which is how an EC2 instance is marked SSM-managed.
+		Props:   map[string]interface{}{"managed": true},
+		Extract: (*AWSSource).extractComputeMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Declarative-engine path. Byte-identical to createEC2Edges; see the
+	// fidelity test.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeComputeInstance, Name: "ec2",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createEC2EdgesViaEngine(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). An instance's own edges (VPC, subnet,
+// security groups, EKS cluster) are rebuilt on update. A new instance still
+// rebuilds the account: load balancer targets, EBS attachments, ENIs, K8s nodes
+// and instance-profile roles all point at it from other resources.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"EC2Instance", "SSMManagedInstance"},
+		Context:       []core.NodeType{core.NodeTypeVPC, core.NodeTypeSubnet, core.NodeTypeSecurityGroup, core.NodeTypeManagedCluster},
+		Signature: signature(
+			edgeKind(core.RelationshipHostedOn, "vpc"),
+			edgeKind(core.RelationshipHostedOn, "subnet"),
+			edgeKind(core.RelationshipHostedOn, "security_group"),
+			edgeKind(core.RelationshipRunsOn, "eks_node"),
+		),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createEC2EdgesViaEngine([]*core.DbNode{node}, lookup, req), nil
+	})
 }

@@ -513,22 +513,50 @@ func (p *GoogleAICacheProvider) ApplyCache(ctx context.Context, req *CacheReques
 				logger.Warn("Google AI cache: failed to delete stale pointer on content_changed",
 					"error", delErr, "cacheKey", cacheKey, "conversationId", req.ConversationId)
 			}
-			// Explicitly delete the old Google AI cache.
-			if helper, helperErr := googleai.NewCachingHelper(ctx, googleAICacheOpts(req.ApiKey, req.Endpoint)...); helperErr == nil {
-				if delErr := helper.DeleteCachedContent(ctx, cacheInfo.CacheName); delErr != nil {
-					logger.Warn("Google AI cache: failed to delete orphaned content_changed cache",
-						"error", delErr,
-						"cacheName", cacheInfo.CacheName,
-						"conversationId", req.ConversationId)
-				} else {
-					recordCacheLifecycleInvalidation(cacheInfo.CacheName)
-					common.MetricsLLMCacheInvalidations(req.Provider, req.Model, invalidationScope(req.Scope), "content_changed")
+			// Asynchronously delete the old Google AI cache so the request is not blocked.
+			go func(cacheName, apiKey, endpoint string, scope CacheScope, provider, model, conversationId string) {
+				bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				defer cancel()
+
+				var logger *slog.Logger
+				if bgCtx != nil {
+					logger = common.TraceLogger(bgCtx)
 				}
-			} else {
-				logger.Warn("Google AI cache: failed to init helper for orphan deletion",
-					"error", helperErr,
-					"conversationId", req.ConversationId)
-			}
+
+				defer func() {
+					if r := recover(); r != nil {
+						log := logger
+						if log == nil {
+							log = slog.Default()
+						}
+						log.Error("Google AI cache: panic recovered in async orphan deletion", "panic", r, "cacheName", cacheName)
+					}
+				}()
+
+				if helper, helperErr := googleai.NewCachingHelper(bgCtx, googleAICacheOpts(apiKey, endpoint)...); helperErr == nil {
+					if delErr := helper.DeleteCachedContent(bgCtx, cacheName); delErr != nil {
+						log := logger
+						if log == nil {
+							log = slog.Default()
+						}
+						log.Warn("Google AI cache: failed to delete orphaned content_changed cache",
+							"error", delErr,
+							"cacheName", cacheName,
+							"conversationId", conversationId)
+					} else {
+						recordCacheLifecycleInvalidation(cacheName)
+						common.MetricsLLMCacheInvalidations(provider, model, invalidationScope(scope), "content_changed")
+					}
+				} else {
+					log := logger
+					if log == nil {
+						log = slog.Default()
+					}
+					log.Warn("Google AI cache: failed to init helper for orphan deletion",
+						"error", helperErr,
+						"conversationId", conversationId)
+				}
+			}(cacheInfo.CacheName, req.ApiKey, req.Endpoint, req.Scope, req.Provider, req.Model, req.ConversationId)
 		}
 	}
 

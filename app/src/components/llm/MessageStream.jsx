@@ -17,7 +17,7 @@ import { actionableTasks } from './utils/taskClassification';
 
 const taskKey = (task) => task?.id ?? task?.tool_id ?? task?.originalIndex ?? null;
 
-const MessageStream = ({ messages, isProcessing, collapsedObj, setCollapsedObj, showFullText, setShowFullText, itemProps }) => {
+const MessageStream = ({ messages, isProcessing = false, isBusy, collapsedObj, setCollapsedObj, showFullText, setShowFullText, itemProps }) => {
   // Primary right drawer — Tasks list, Contexts table, Memories, or (for inline rows) Tool Details.
   // `kind` drives which content renderer runs so the panel re-renders when `secondary` changes
   // (we can't store JSX directly because the active-task highlight needs to update live).
@@ -71,6 +71,17 @@ const MessageStream = ({ messages, isProcessing, collapsedObj, setCollapsedObj, 
   // Once the conversation is settled AND all watches are in a terminal state, stop
   // polling — otherwise the network tab fills with `ListWatchesByConversation`
   // calls forever for chats with no live watches at all.
+  // "System is still working" for the poller — NOT `isProcessing`, which is the
+  // parent's IN_PROGRESS-only flag and stays false while a turn sits in WAITING
+  // on a tool confirmation. Since the poll below stands down for good on a
+  // settled chat with no live watch and re-arms only on a dep change, that left
+  // a watch registered during the confirmation invisible until the next mount —
+  // the user had to refresh to see the chip (#38881). `isBusy` is the parent's
+  // `isSystemBusy`, which counts WAITING.
+  //
+  // A separate prop rather than widening `isProcessing`, which also drives
+  // loader/in-progress rendering below.
+  const isWatchPollActive = isBusy ?? isProcessing;
   const [watchCount, setWatchCount] = useState(0);
   // Gate all watch polling on the per-env feature flag (LLM_SERVER_WATCH_ENABLED,
   // surfaced via /api/public/app_config). When off, llm-server never mounts the
@@ -173,7 +184,7 @@ const MessageStream = ({ messages, isProcessing, collapsedObj, setCollapsedObj, 
           lastKnownHasLiveWatch = hasLiveWatch;
           // Keep polling as long as the chat is processing or there's still a live watch.
           // A settled chat with all-terminal watches → stop scheduling further fetches.
-          if (isProcessing || hasLiveWatch || awaitingFollowup) {
+          if (isWatchPollActive || hasLiveWatch || awaitingFollowup) {
             timer = setTimeout(tick, 5000);
           }
         })
@@ -188,7 +199,7 @@ const MessageStream = ({ messages, isProcessing, collapsedObj, setCollapsedObj, 
           // Re-read the deadlines rather than reusing the last successful
           // tick's flag: while the endpoint is failing nothing refreshes them,
           // and a stale `true` would keep retrying long past the budget.
-          if (isProcessing || lastKnownHasLiveWatch || countAwaitingFollowups(pendingFollowupsRef.current, Date.now()) > 0) {
+          if (isWatchPollActive || lastKnownHasLiveWatch || countAwaitingFollowups(pendingFollowupsRef.current, Date.now()) > 0) {
             timer = setTimeout(tick, errorBackoffMs);
             errorBackoffMs = Math.min(errorBackoffMs * 2, MAX_BACKOFF_MS);
           }
@@ -201,7 +212,7 @@ const MessageStream = ({ messages, isProcessing, collapsedObj, setCollapsedObj, 
         clearTimeout(timer);
       }
     };
-  }, [itemProps.conversationId, isProcessing, watchFeatureEnabled]);
+  }, [itemProps.conversationId, isWatchPollActive, watchFeatureEnabled]);
 
   const handleCardClick = useCallback(
     (index) => {
@@ -588,6 +599,8 @@ const renderDrawerContent = ({ drawer, secondary, itemProps, onOpenToolDetails }
 MessageStream.propTypes = {
   messages: PropTypes.array.isRequired,
   isProcessing: PropTypes.bool,
+  // Parent's isSystemBusy — counts WAITING, unlike isProcessing. Poller only.
+  isBusy: PropTypes.bool,
   collapsedObj: PropTypes.object,
   setCollapsedObj: PropTypes.func.isRequired,
   showFullText: PropTypes.object,

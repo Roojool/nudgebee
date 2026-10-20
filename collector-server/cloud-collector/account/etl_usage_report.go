@@ -1,24 +1,20 @@
 package account
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"nudgebee/collector/cloud/common"
 	"nudgebee/collector/cloud/config"
+	"nudgebee/collector/cloud/kgnotify"
 	"nudgebee/collector/cloud/providers"
 	"nudgebee/collector/cloud/security"
 	"runtime/debug"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
-	"github.com/samber/lo"
 )
 
 type CloudAccountCostReportJob struct {
@@ -425,8 +421,35 @@ func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month
 		}
 	}()
 
-	usageReport, account1, err := getUsageDataInternal(ctx, accountId, month, year)
-	account = account1
+	dbms, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		ctx.GetLogger().Error("usagereport: unable to get dbms", "error", err)
+		usageReportResponse = StoreUsageReportResponse{
+			Count:    0,
+			Duration: time.Since(t0),
+		}
+		return usageReportResponse, err
+	}
+
+	// Stream the report into cloud_account_usage_report a batch at a time; the
+	// rest of the sync reads it back in SQL (see usage_report_derive.go).
+	var sink *usageReportSink
+	account, cloudProvider, err := resolveUsageProvider(ctx, accountId)
+	if err == nil {
+		sink = newUsageReportSink(ctx, dbms, accountId, account, month, year)
+		err = streamUsageReport(ctx, cloudProvider, account, month, year, sink.write)
+		if err != nil {
+			sink.discard()
+		}
+	}
+	if err != nil && sink != nil && sink.err != nil {
+		ctx.GetLogger().Error("usagereport: unable to insert usage report", "error", err)
+		usageReportResponse = StoreUsageReportResponse{
+			Count:    0,
+			Duration: time.Since(t0),
+		}
+		return usageReportResponse, err
+	}
 	if err != nil {
 		// Two benign cases the queue must not retry or dead-letter:
 		//   ErrUnsupported       — the provider has no billing concept at all.
@@ -469,65 +492,51 @@ func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month
 	// If no billing data found, publish post-report job and return early.
 	// Post-report (resource discovery, recommendations, metrics) still runs for accounts
 	// with no billing (free tier, new accounts, disabled billing APIs).
-	if len(usageReport.Items) == 0 {
+	if sink.count() == 0 {
 		shouldPublishPostReport = true
 		return StoreUsageReportResponse{}, nil
 	}
+	ctx.GetLogger().Info("usagereport: stored usage report", "time", time.Since(t0).String(), "count", sink.count())
 
-	dbms, err := common.GetDatabaseManager(common.Metastore)
+	err = sink.replacePreviousRuns()
 	if err != nil {
-		ctx.GetLogger().Error("usagereport: unable to get dbms", "error", err)
 		usageReportResponse = StoreUsageReportResponse{
 			Count:    0,
 			Duration: time.Since(t0),
 		}
 		return usageReportResponse, err
 	}
-	ctx.GetLogger().Info("usagereport: pulled usage report", "time", time.Since(t0).String(), "count", len(usageReport.Items))
-
-	err = storeUsageReport(ctx, dbms, accountId, usageReport, month, year)
-	if err != nil {
-		ctx.GetLogger().Error("usagereport: unable to insert usage report", "error", err)
-		usageReportResponse = StoreUsageReportResponse{
-			Count:    0,
-			Duration: time.Since(t0),
-		}
-		return usageReportResponse, err
-	}
-	ctx.GetLogger().Info("usagereport: stored usage report", "time", time.Since(t0).String(), "count", len(usageReport.Items))
 
 	// update resources
 	resourceCnt := 0
 	if month == currentMonth && year == currentYear {
-		resourceCnt, err = updateResourcesFromUsageReport(ctx, dbms, accountId, account, usageReport)
+		resourceCnt, err = deriveBillingResources(ctx, dbms, accountId, account, sink)
 		if err != nil {
-			ctx.GetLogger().Error("usagereport: unable to update resources", "error", err)
 			usageReportResponse = StoreUsageReportResponse{
 				Count:    0,
 				Duration: time.Since(t0),
 			}
 			return usageReportResponse, err
 		}
-		ctx.GetLogger().Info("usagereport: updated resources from usage report", "time", time.Since(t0).String(), "count", len(usageReport.Items))
+		ctx.GetLogger().Info("usagereport: updated resources from usage report", "time", time.Since(t0).String(), "count", resourceCnt)
 	}
 
 	// trigger notifications
-	err = sendDailySpendNotification(ctx, accountId, account.AccountName, usageReport)
+	err = sendDailySpendNotification(ctx, dbms, accountId, account.AccountName, sink)
 	if err != nil {
 		ctx.GetLogger().Error("usagereport: unable to send notification", "error", err)
 	}
 
 	// update spends
-	spendCount, err := updateSpendsFromUsageReport(ctx, dbms, accountId, account, usageReport)
+	spendCount, err := deriveSpends(ctx, dbms, accountId, sink)
 	if err != nil {
-		ctx.GetLogger().Error("usagereport: unable to update spends", "error", err)
 		usageReportResponse = StoreUsageReportResponse{
 			Count:    0,
 			Duration: time.Since(t0),
 		}
 		return usageReportResponse, err
 	}
-	ctx.GetLogger().Info("usagereport: updated spends from usage report", "time", time.Since(t0).String(), "count", len(usageReport.Items))
+	ctx.GetLogger().Info("usagereport: updated spends from usage report", "time", time.Since(t0).String(), "count", spendCount)
 
 	// Publish post-report job AFTER all DB writes (resources + spends) are complete.
 	// The post-report job UPSERTs cloud_resourses, and the spends INSERT takes KEY SHARE
@@ -543,7 +552,7 @@ func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month
 	shouldPublishPostReport = true
 
 	usageReportResponse = StoreUsageReportResponse{
-		Count:         len(usageReport.Items),
+		Count:         sink.count(),
 		ResourceCount: resourceCnt,
 		SpendCount:    spendCount,
 		Duration:      time.Since(t0),
@@ -575,93 +584,26 @@ func publishPostReportJob(ctx *security.RequestContext, accountId string, month 
 }
 
 // dailySpendSummary holds the aggregated figures sendDailySpendNotification reports.
-type dailySpendSummary struct {
-	totalDay        float64
-	totalMonth      float64
-	monthlyServices map[string]float64
-	todayItems      []providers.UsageReportItem
-	currency        string
-	mixedCurrencies bool
-}
-
-// summarizeDailySpend aggregates usage-report items into the daily and month-to-date
-// figures shown in the cost notification, anchored on yesterdayDate (the latest day for
-// which billing data exists). Credit/Refund line items carry negative costs; they are
-// excluded so the reported spend is gross rather than net-of-credits — matching the
-// exclude_aggregate filter applied everywhere spends are aggregated for display (see
-// buildSpendMap). Without this, accounts whose credits meet or exceed usage show zero or
-// negative totals (issue #29455).
-func summarizeDailySpend(items []providers.UsageReportItem, yesterdayDate time.Time) dailySpendSummary {
-	summary := dailySpendSummary{
-		monthlyServices: map[string]float64{},
-		todayItems:      make([]providers.UsageReportItem, 0, 100),
-	}
-	for _, r := range items {
-		if r.CostCategory == "Credit" || r.CostCategory == "Refund" {
-			continue
-		}
-		// Determine the account's currency from the report items.
-		// A single cloud account uses one currency; detect mismatches defensively.
-		if r.CostCurrency != "" {
-			if summary.currency == "" {
-				summary.currency = r.CostCurrency
-			} else if r.CostCurrency != summary.currency {
-				summary.mixedCurrencies = true
-			}
-		}
-		if r.EndDate.Day() == yesterdayDate.Day() && r.EndDate.Month() == yesterdayDate.Month() && r.EndDate.Year() == yesterdayDate.Year() {
-			summary.todayItems = append(summary.todayItems, r)
-			summary.totalDay += r.Cost
-		}
-		if r.EndDate.Month() == yesterdayDate.Month() && r.EndDate.Year() == yesterdayDate.Year() {
-			summary.totalMonth += r.Cost
-			summary.monthlyServices[r.ProductCode] += r.Cost
-		}
-	}
-	return summary
-}
-
-func sendDailySpendNotification(ctx *security.RequestContext, accountId, accountName string, usageReportResponse providers.GetUsageReportResponse) error {
+func sendDailySpendNotification(ctx *security.RequestContext, dbms *common.DatabaseManager, accountId, accountName string, sink *usageReportSink) error {
 	// its for previous day as we get data for last date.
-	// Anchor in UTC to match the UTC EndDate on billing items, so the day/month
-	// comparison can't drift when the server runs in a non-UTC timezone.
+	// Anchor in UTC to match the UTC end dates stored for billing lines.
 	yesterdayDate := time.Now().UTC().AddDate(0, 0, -1)
-	summary := summarizeDailySpend(usageReportResponse.Items, yesterdayDate)
-	todayItem := summary.todayItems
-	monthlyServices := summary.monthlyServices
+	summary, err := summarizeDailySpend(dbms, accountId, sink, yesterdayDate)
+	if err != nil {
+		return err
+	}
 	totalSpendOfDay := summary.totalDay
 	totalSpendOfMonth := summary.totalMonth
 	costCurrency := summary.currency
-	mixedCurrencies := summary.mixedCurrencies
 	if costCurrency == "" {
 		costCurrency = "USD"
 	}
-	if mixedCurrencies {
+	if summary.mixedCurrencies {
 		ctx.GetLogger().Warn("usagereport: mixed currencies detected in usage report, cost totals may be inaccurate",
 			"account_id", accountId, "primary_currency", costCurrency)
 	}
-	slices.SortFunc(todayItem, func(a, b providers.UsageReportItem) int {
-		return cmp.Compare(b.Cost, a.Cost)
-	})
-
-	serviceItems := make([]map[string]any, 0, len(monthlyServices))
-	for k, v := range monthlyServices {
-		serviceItems = append(serviceItems, map[string]any{
-			"service": k,
-			"cost":    v,
-		})
-	}
-	slices.SortFunc(serviceItems, func(a, b map[string]any) int {
-		return cmp.Compare(b["cost"].(float64), a["cost"].(float64))
-	})
-
-	dailyItemMap := lo.Map(lo.Slice(todayItem, 0, 5), func(item providers.UsageReportItem, i int) map[string]any {
-		return map[string]any{
-			"cost":         item.Cost,
-			"product_code": item.ProductCode,
-			"resource_arn": item.ResourceArn,
-		}
-	})
+	dailyItemMap := summary.topDailyItems
+	serviceItems := summary.topMonthlyServices
 
 	defaultChannels := map[string][]map[string]any{}
 	if len(config.Config.CloudCollectorNotificationSlackChannel) > 0 {
@@ -687,7 +629,7 @@ func sendDailySpendNotification(ctx *security.RequestContext, accountId, account
 			"account_name": accountName,
 			"summary": map[string]any{
 				"top_5_daily_items":      dailyItemMap,
-				"top_5_monthly_services": lo.Slice(serviceItems, 0, 5),
+				"top_5_monthly_services": serviceItems,
 			},
 			"total_daily_cost":   totalSpendOfDay,
 			"total_monthly_cost": totalSpendOfMonth,
@@ -699,7 +641,7 @@ func sendDailySpendNotification(ctx *security.RequestContext, accountId, account
 		},
 	}
 
-	err := common.MqPublish(config.Config.RabbitMqNotificationsExchange, config.Config.RabbitMqNotificationsQueue, message, common.MqPublishWithContext(ctx.GetContext()))
+	err = common.MqPublish(config.Config.RabbitMqNotificationsExchange, config.Config.RabbitMqNotificationsQueue, message, common.MqPublishWithContext(ctx.GetContext()))
 	if err != nil {
 		ctx.GetLogger().Error("usagereport: error publishing message to queue", "error", err)
 		return err
@@ -711,390 +653,6 @@ func sendDailySpendNotification(ctx *security.RequestContext, accountId, account
 func GetUsageData(ctx *security.RequestContext, accountId string, month time.Month, year int) (providers.GetUsageReportResponse, error) {
 	report, _, err := getUsageDataInternal(ctx, accountId, month, year)
 	return report, err
-}
-
-func storeUsageReport(ctx *security.RequestContext, dbms *common.DatabaseManager, accountId string, usageReport providers.GetUsageReportResponse, month time.Month, year int) error {
-	reportInsertedDate := time.Now().UTC()
-	reportDate := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
-
-	// Delete existing records for this month first.
-	// Use a half-open range on report_date (>= first-of-month, < first-of-next-month)
-	// rather than TO_CHAR(report_date,'yyyy-mm') so the (account_id, report_date) index
-	// can be used instead of a full table scan.
-	nextMonth := reportDate.AddDate(0, 1, 0)
-	_, err := dbms.DoInTransaction(func(tx common.DatabaseManagerTx) (any, error) {
-		impactedRecords, err := tx.Exec("DELETE FROM cloud_account_usage_report WHERE account_id = $1 AND report_date >= $2 AND report_date < $3", accountId, reportDate, nextMonth)
-		if err != nil {
-			ctx.GetLogger().Error("usagereport: unable to delete existing usage report", "error", err)
-			return nil, err
-		}
-		if c, err := impactedRecords.RowsAffected(); err == nil {
-			ctx.GetLogger().Info("usagereport: deleted existing usage report", "count", c)
-		}
-		return nil, nil
-	})
-	if err != nil {
-		return err
-	}
-
-	// Insert in chunks to avoid building all maps in memory at once.
-	// Each chunk builds maps, inserts, then lets GC reclaim before next chunk.
-	const chunkSize = 5000
-	insertQuery := `INSERT INTO cloud_account_usage_report (id, tenant_id, account_id, report_date, product_code, product_service_code, resource_region_code, resource_id, resource_type, resource_arn, cost_category, cost_sub_category, resource_operation, cost, cost_currency, resource_tags, start_date, end_date)
-				  VALUES (:id, :tenant_id, :account_id, :report_date, :product_code, :product_service_code, :resource_region_code, :resource_id, :resource_type, :resource_arn, :cost_category, :cost_sub_category, :resource_operation, :cost, :cost_currency, :resource_tags, :start_date, :end_date)
-				`
-
-	for chunkStart := 0; chunkStart < len(usageReport.Items); chunkStart += chunkSize {
-		chunkEnd := chunkStart + chunkSize
-		if chunkEnd > len(usageReport.Items) {
-			chunkEnd = len(usageReport.Items)
-		}
-		chunk := usageReport.Items[chunkStart:chunkEnd]
-
-		chunkMaps := make([]map[string]any, 0, len(chunk))
-		for _, item := range chunk {
-			if err := common.ValidateStruct(item); err != nil {
-				ctx.GetLogger().Error("usagereport: invalid usage report item", "error", err, "data", item)
-				return err
-			}
-
-			data := map[string]any{}
-			data["id"] = uuid.New().String()
-			tenantId := ctx.GetSecurityContext().GetTenantId()
-			if tenantId == "" {
-				data["tenant_id"] = nil
-			} else {
-				data["tenant_id"] = tenantId
-			}
-			data["account_id"] = accountId
-			data["report_date"] = reportDate.Format("2006-01-02")
-			data["report_inserted_date"] = reportInsertedDate
-			data["product_code"] = item.ProductCode
-			data["product_service_code"] = item.ProductServiceCode
-			data["resource_region_code"] = lo.Ternary(item.ResourceRegionCode == "", "global", item.ResourceRegionCode)
-			data["resource_id"] = item.ResourceId
-			data["resource_type"] = item.ResourceType
-			data["resource_arn"] = item.ResourceArn
-			data["resource_operation"] = item.ResourceOperation
-			data["cost_category"] = item.CostCategory
-			data["cost_sub_category"] = item.CostSubCategory
-			data["cost"] = item.Cost
-			data["cost_currency"] = lo.Ternary(item.CostCurrency == "", "USD", item.CostCurrency)
-			if len(item.ResourceTags) != 0 {
-				tagsJson, err := common.MarshalJson(item.ResourceTags)
-				if err != nil {
-					ctx.GetLogger().Error("usagereport: unable to marshal tags", "error", err)
-					return err
-				}
-				data["resource_tags"] = string(tagsJson)
-			} else {
-				data["resource_tags"] = "{}"
-			}
-			data["start_date"] = item.StartDate
-			data["end_date"] = item.EndDate
-			chunkMaps = append(chunkMaps, data)
-		}
-
-		_, err := dbms.DoInTransaction(func(tx common.DatabaseManagerTx) (any, error) {
-			_, err := dbms.NamedExec(insertQuery, chunkMaps)
-			return nil, err
-		})
-		if err != nil {
-			ctx.GetLogger().Error("usagereport: unable to insert usage report chunk", "error", err, "chunkStart", chunkStart, "chunkEnd", chunkEnd)
-			return err
-		}
-	}
-
-	return nil
-}
-
-func updateResourcesFromUsageReport(ctx *security.RequestContext, dbms *common.DatabaseManager, accountId string, account providers.Account, usageReport providers.GetUsageReportResponse) (int, error) {
-	if len(usageReport.Items) == 0 {
-		return 0, nil
-	}
-
-	resourceMap := map[string]map[string]any{}
-	t := time.Now().UTC().Format(time.RFC3339)
-	var err error
-	var nilString *string
-	for _, item := range usageReport.Items {
-		if item.ResourceId == "" {
-			continue
-		}
-		resourceMapKey := buildExternalResourceId(account.CloudProvider, account.AccountNumber, item.ResourceRegionCode, item.ProductCode, item.ResourceType, item.ResourceId, "")
-		if _, ok := resourceMap[resourceMapKey]; ok {
-			continue
-		}
-		tagsStr := []byte("{}")
-		if len(item.ResourceTags) > 0 {
-			tagsStr, err = common.MarshalJson(item.ResourceTags)
-			if err != nil {
-				ctx.GetLogger().Error("unable to marshal tags", "error", err)
-				return 0, err
-			}
-		}
-		tenantId := ctx.GetSecurityContext().GetTenantId()
-		resourceDbData := map[string]any{
-			"id":                   uuid.New().String(),
-			"created_at":           t,
-			"created_by":           nilString,
-			"updated_at":           t,
-			"updated_by":           nilString,
-			"resourse_id":          item.ResourceId,
-			"name":                 lo.Ternary(item.ResourceName != "", item.ResourceName, item.ResourceId),
-			"type":                 item.ResourceType,
-			"status":               providers.ResourceStatusActive,
-			"resourse_created_on":  t,
-			"account":              accountId,
-			"cloud_provider":       account.CloudProvider,
-			"region":               lo.Ternary(item.ResourceRegionCode == "", "global", item.ResourceRegionCode),
-			"arn":                  item.ResourceArn,
-			"tenant":               lo.Ternary(tenantId == "", nilString, &tenantId),
-			"tags":                 string(tagsStr),
-			"meta":                 `{"nb_source":"billing"}`,
-			"service_name":         item.ProductCode,
-			"first_seen":           t,
-			"last_seen":            t,
-			"is_active":            true,
-			"external_resource_id": resourceMapKey,
-		}
-
-		resourceMap[resourceMapKey] = resourceDbData
-	}
-
-	// update resources as inactive and upsert new ones in a single transaction to prevent deadlocks
-	resourceMapKeys := slices.Collect(maps.Keys(resourceMap))
-
-	// insert resources from usage report which dont exists and update existing ones last-seen
-	// Choose conflict strategy based on cloud provider
-	// Azure: Use (account, external_resource_id) because Azure external_resource_id = resource_id (full path)
-	// AWS/GCP: Use 5-column constraint to handle cases where external_resource_id varies (e.g., :data-transfer suffix)
-	baseInsertQuery := `INSERT INTO cloud_resourses (id, created_at, created_by, updated_at, updated_by, resourse_id, name, type, status, resourse_created_on, account, cloud_provider, region, arn, tenant, tags, meta, service_name, first_seen, last_seen, is_active, external_resource_id)
-				values (:id, :created_at, :created_by, :updated_at, :updated_by, :resourse_id, :name, :type, :status, :resourse_created_on, :account, :cloud_provider, :region, :arn, :tenant, :tags, :meta, :service_name, :first_seen, :last_seen, :is_active, :external_resource_id)`
-	var conflictClause string
-	if strings.EqualFold(account.CloudProvider, "azure") {
-		conflictClause = `
-				 on conflict (account, external_resource_id)
-					do update set
-						last_seen = EXCLUDED.last_seen,
-						tags = cloud_resourses.tags || EXCLUDED.tags,
-						meta = CASE
-							WHEN COALESCE(cloud_resourses.meta->>'nb_source', '') = ''
-								THEN COALESCE(cloud_resourses.meta, CAST('{}' AS jsonb)) || EXCLUDED.meta
-							ELSE
-								COALESCE(cloud_resourses.meta, CAST('{}' AS jsonb)) || (EXCLUDED.meta - 'nb_source')
-						END,
-						arn = EXCLUDED.arn,
-						resourse_id = EXCLUDED.resourse_id,
-						name = EXCLUDED.name,
-						type = EXCLUDED.type,
-						region = EXCLUDED.region,
-						service_name = EXCLUDED.service_name,
-						is_active = EXCLUDED.is_active,
-						status = EXCLUDED.status`
-	} else {
-		// AWS/GCP: arbiter on (account, external_resource_id) — the canonical
-		// identity, referenced by spends and events — paired with the
-		// reconcileExternalResourceIds pre-step inside the transaction below.
-		// Deliberately does NOT update the natural-key columns
-		// (resourse_id/type/region/service_name): an external_resource_id match
-		// can land on a row whose 5-column key differs, and rewriting it could
-		// violate the 5-column unique index. The canonical row's natural key
-		// already matches the value that produced its external_resource_id.
-		conflictClause = `
-				 on conflict (account, external_resource_id)
-					do update set
-						last_seen = EXCLUDED.last_seen,
-						tags = cloud_resourses.tags || EXCLUDED.tags,
-						meta = CASE
-							WHEN COALESCE(cloud_resourses.meta->>'nb_source', '') = ''
-								THEN COALESCE(cloud_resourses.meta, CAST('{}' AS jsonb)) || EXCLUDED.meta
-							ELSE
-								COALESCE(cloud_resourses.meta, CAST('{}' AS jsonb)) || (EXCLUDED.meta - 'nb_source')
-						END,
-						arn = EXCLUDED.arn,
-						name = EXCLUDED.name,
-						is_active = EXCLUDED.is_active,
-						status = EXCLUDED.status`
-	}
-	insertQuery := baseInsertQuery + conflictClause
-
-	_, err = dbms.DoInTransaction(func(tx common.DatabaseManagerTx) (any, error) {
-		if len(resourceMapKeys) > 0 {
-			updateQuery := `update cloud_resourses set is_active = false, last_seen = $2, status = $3 where account = $1 and status != 'Deleted' and external_resource_id != ALL($4::text[]) and meta->>'nb_source' = 'billing'`
-			_, err := tx.Exec(updateQuery, accountId, time.Now().UTC().Format(time.RFC3339), providers.ResourceStatusDeleted, pq.Array(resourceMapKeys))
-			if err != nil {
-				return nil, fmt.Errorf("update resources inactive: %w", err)
-			}
-		}
-		if !strings.EqualFold(account.CloudProvider, "azure") {
-			if err := reconcileExternalResourceIds(tx, accountId, slices.Collect(maps.Values(resourceMap))); err != nil {
-				return nil, fmt.Errorf("reconcile external_resource_id: %w", err)
-			}
-		}
-		_, err := tx.NamedExec(insertQuery, slices.Collect(maps.Values(resourceMap)))
-		if err != nil {
-			return nil, fmt.Errorf("upsert resources: %w", err)
-		}
-		return nil, nil
-	})
-	if err != nil {
-		ctx.GetLogger().Error("usagereport: unable to update resources", "error", err)
-		return 0, err
-	}
-	return len(resourceMap), nil
-}
-
-// buildSpendMap aggregates usage report items into spend records keyed for DB upsert.
-// The returned map keys align with the DB unique constraint (tenant, cloud_account, cloud_resource_id, date).
-// externalResourceIdMap maps externalResourceId → cloud_resourses.id (UUID).
-func buildSpendMap(account providers.Account, usageReport providers.GetUsageReportResponse, externalResourceIdMap map[string]string, tenantId string, accountId string) (map[string]map[string]any, error) {
-	spendMap := map[string]map[string]any{}
-	var nilString *string
-
-	for _, item := range usageReport.Items {
-		externalResourceId := ""
-		if item.ResourceId != "" {
-			externalResourceId = buildExternalResourceId(account.CloudProvider, account.AccountNumber, item.ResourceRegionCode, item.ProductCode, item.ResourceType, item.ResourceId, "")
-		}
-		resourceId := externalResourceIdMap[externalResourceId]
-		// spendKey must align with unique constraint (tenant, cloud_account, cloud_resource_id, date).
-		// Credit/Refund items have ResourceId="" (NULL in DB) so they won't conflict with non-credit rows.
-		// Use "credit" bucket to prevent credit costs merging with non-credit empty-resource rows.
-		creditBucket := ""
-		if item.CostCategory == "Credit" || item.CostCategory == "Refund" {
-			creditBucket = "credit"
-		}
-		// Build spendKey to match DB unique constraint granularity.
-		// For non-credit items: use externalResourceId which includes (provider, account, region,
-		// service, resourceType, resourceId) — prevents cross-service collision when multiple
-		// services share the same ResourceId (e.g., GCP services with NULL resource.name
-		// all fall back to project ID).
-		// For credit items: ResourceId is cleared to "", so use ProductCode+region to preserve
-		// per-service credit attribution instead of collapsing all credits into one row per day.
-		var spendKey string
-		if creditBucket == "credit" {
-			spendKey = fmt.Sprintf("credit:%s:%s:%s", item.ProductCode, item.ResourceRegionCode, item.StartDate.UTC().Format("2006-01-02"))
-		} else {
-			keyPart := externalResourceId
-			if keyPart == "" {
-				keyPart = fmt.Sprintf("%s:%s", item.ProductCode, item.ResourceRegionCode)
-			}
-			spendKey = fmt.Sprintf(":%s:%s", keyPart, item.StartDate.UTC().Format("2006-01-02"))
-		}
-		if _, ok := spendMap[spendKey]; !ok {
-			tagsStr := []byte("{}")
-			tags := item.ResourceTags
-			tags["nb_service_name"] = []string{item.ProductCode}
-			tags["nb_resource_type"] = []string{item.ResourceType}
-			tags["nb_resource_region_code"] = []string{item.ResourceRegionCode}
-			tags["nb_resource_id"] = []string{resourceId}
-			if len(item.ResourceTags) > 0 {
-				var err error
-				tagsStr, err = common.MarshalJson(item.ResourceTags)
-				if err != nil {
-					return nil, fmt.Errorf("unable to marshal tags: %w", err)
-				}
-			}
-			spendDbData := map[string]any{
-				"id":                uuid.New().String(),
-				"date":              item.StartDate.UTC().Format("2006-01-02"),
-				"amount":            item.Cost,
-				"unit":              item.CostCurrency,
-				"business_unit":     nilString,
-				"tenant":            lo.Ternary(tenantId == "", nilString, &tenantId),
-				"cloud_account":     accountId,
-				"cloud_resource_id": lo.Ternary(resourceId == "", nilString, &resourceId),
-				"exclude_aggregate": creditBucket == "credit",
-				"tags":              string(tagsStr),
-			}
-			spendMap[spendKey] = spendDbData
-		} else {
-			spendMap[spendKey]["amount"] = spendMap[spendKey]["amount"].(float64) + item.Cost
-		}
-	}
-	return spendMap, nil
-}
-
-func updateSpendsFromUsageReport(ctx *security.RequestContext, dbms *common.DatabaseManager, accountId string, account providers.Account, usageReport providers.GetUsageReportResponse) (int, error) {
-
-	externalResourceIds := []string{}
-	for _, item := range usageReport.Items {
-		if item.ResourceId != "" {
-			externalResourceIds = append(externalResourceIds, buildExternalResourceId(account.CloudProvider, account.AccountNumber, item.ResourceRegionCode, item.ProductCode, item.ResourceType, item.ResourceId, ""))
-		}
-	}
-
-	//fetch data from db
-	externalResourceIdMap, err := getExternalIdAndResourceIdMap(ctx, dbms, accountId, externalResourceIds)
-	if err != nil {
-		ctx.GetLogger().Error("usagereport: unable to fetch resources", "error", err)
-		return 0, err
-	}
-
-	tenantId := ctx.GetSecurityContext().GetTenantId()
-	spendMap, err := buildSpendMap(account, usageReport, externalResourceIdMap, tenantId, accountId)
-	if err != nil {
-		ctx.GetLogger().Error("usagereport: unable to build spend map", "error", err)
-		return 0, err
-	}
-
-	// Separate spends by whether they have a cloud_resource_id.
-	// NULL cloud_resource_id rows (credits/refunds) can't use UPSERT because
-	// PostgreSQL treats NULLs as distinct in unique indexes, so ON CONFLICT won't match them.
-	// Note: tenant is always non-NULL in this flow (set from job.TenantId), so the
-	// ON CONFLICT (tenant, cloud_account, cloud_resource_id, date) clause works correctly.
-	var spendsWithResource, spendsWithoutResource []map[string]any
-	for _, s := range spendMap {
-		if s["cloud_resource_id"] == nil {
-			spendsWithoutResource = append(spendsWithoutResource, s)
-		} else {
-			spendsWithResource = append(spendsWithResource, s)
-		}
-	}
-
-	dateStrArr := lo.Map(usageReport.Items, func(item providers.UsageReportItem, _ int) string { return item.StartDate.UTC().Format("2006-01-02") })
-	dateStrArr = lo.Uniq(dateStrArr)
-
-	_, err = dbms.DoInTransaction(func(tx common.DatabaseManagerTx) (any, error) {
-		// UPSERT spends with non-NULL cloud_resource_id.
-		// Only genuinely new rows trigger FK checks (KEY SHARE locks) on cloud_resourses.
-		// Existing rows just get amount/tags updated — no FK recheck, no lock contention
-		// with the post-report worker that UPSERTs cloud_resourses concurrently.
-		if len(spendsWithResource) > 0 {
-			upsertQuery := `INSERT INTO spends (id, date, amount, unit, business_unit, tenant, cloud_account, cloud_resource_id, exclude_aggregate, tags)
-				VALUES (:id, :date, :amount, :unit, :business_unit, :tenant, :cloud_account, :cloud_resource_id, :exclude_aggregate, :tags)
-				ON CONFLICT (tenant, cloud_account, cloud_resource_id, date)
-				DO UPDATE SET amount = EXCLUDED.amount, unit = EXCLUDED.unit, tags = EXCLUDED.tags, exclude_aggregate = EXCLUDED.exclude_aggregate`
-			_, err := tx.NamedExec(upsertQuery, spendsWithResource)
-			if err != nil {
-				return nil, fmt.Errorf("upsert spends: %w", err)
-			}
-		}
-
-		// DELETE + INSERT for NULL cloud_resource_id rows (credits/refunds).
-		// No FK contention — NULL cloud_resource_id means no FK check on cloud_resourses.
-		_, err := tx.Exec(`DELETE FROM spends WHERE cloud_account = $1 AND date IN ($2) AND cloud_resource_id IS NULL`, accountId, dateStrArr)
-		if err != nil {
-			return nil, fmt.Errorf("delete null-resource spends: %w", err)
-		}
-		if len(spendsWithoutResource) > 0 {
-			insertQuery := `INSERT INTO spends (id, date, amount, unit, business_unit, tenant, cloud_account, cloud_resource_id, exclude_aggregate, tags)
-				VALUES (:id, :date, :amount, :unit, :business_unit, :tenant, :cloud_account, :cloud_resource_id, :exclude_aggregate, :tags)`
-			_, err = tx.NamedExec(insertQuery, spendsWithoutResource)
-			if err != nil {
-				return nil, fmt.Errorf("insert null-resource spends: %w", err)
-			}
-		}
-
-		return nil, nil
-	})
-	if err != nil {
-		ctx.GetLogger().Error("usagereport: unable to update spends", "error", err)
-		return 0, err
-	}
-
-	return len(spendMap), nil
 }
 
 func storeAccountRecommendations(ctx *security.RequestContext, accountId string) (data map[string]StoreUsageRecommendationResponse, err error) {
@@ -1250,6 +808,11 @@ type CloudAccountPostReportJob struct {
 	TenantId  string `json:"tenant_id"`
 }
 
+// postReportLockWait bounds one attempt's wait for a cost sync of the same
+// account. It is part of postReportProcessingTimeout, so it has to leave room
+// for the job's own steps; a longer sync is waited out across MQ retries.
+const postReportLockWait = 8 * time.Minute
+
 // ConsumeCloudAccountPostReportJobs starts a RabbitMQ consumer that processes post-report jobs.
 // These jobs handle resource discovery, recommendations, and metrics sync asynchronously
 // after the cost report has been stored, to avoid holding large report data in memory
@@ -1298,12 +861,13 @@ func ConsumeCloudAccountPostReportJobs(ctx *security.RequestContext, concurrency
 		// burned the retry budget in microseconds (republishWithDelay's per-message
 		// TTL doesn't actually delay redelivery), causing post-report to be discarded
 		// after 3 retries — leaving recommendations stuck for days. The blocking
-		// acquire keeps the AMQP delivery in-flight while we wait, which is well
-		// inside the RabbitMQ consumer_timeout. Cap the wait safely under the
-		// 10-minute lock TTL so we never wait on a stale holder.
-		release, lockErr := common.AcquireSyncLockBlocking(procCtx, job.AccountId, 8*time.Minute)
+		// acquire keeps the AMQP delivery in-flight while we wait. The holder
+		// renews the lock while it runs and a dead holder's lock expires within
+		// minutes (common.TryAcquireSyncLock), so the wait is always on live
+		// work; a sync longer than one wait is waited out across MQ retries.
+		release, lockErr := common.AcquireSyncLockBlocking(procCtx, job.AccountId, postReportLockWait)
 		if errors.Is(lockErr, common.ErrLockTimeout) {
-			logger.Warn("postreport: gave up waiting for sync lock, will retry via MQ", "timeout", "8m")
+			logger.Warn("postreport: gave up waiting for sync lock, will retry via MQ", "timeout", postReportLockWait.String())
 			return lockErr
 		}
 		if lockErr != nil {
@@ -1348,8 +912,8 @@ func ConsumeCloudAccountPostReportJobs(ctx *security.RequestContext, concurrency
 
 		logger.Info("postreport: successfully processed post-report job")
 
-		// Notify KG system that data has been updated for this tenant
-		publishKGUpdate(procCtx, job.TenantId)
+		// Ask the knowledge graph to rebuild this account from the refreshed inventory.
+		kgnotify.PublishAccountUpdate(procCtx, job.TenantId, job.AccountId)
 
 		return nil
 	}

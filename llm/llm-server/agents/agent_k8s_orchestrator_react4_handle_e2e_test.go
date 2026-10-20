@@ -11,7 +11,7 @@ import (
 
 // TestK8sOrchestratorReAct4Handle_PinRunsReAct4 is the end-to-end proof that the
 // evaluation handle works the way it is meant to be used after deployment:
-// invoked by name, with LlmServerReAct4Enabled OFF, it still runs the ReAct4
+// invoked by name, with LlmServerPlannerEngine set to "react3", it still runs the ReAct4
 // native tool-calling planner.
 //
 // The planner that actually ran is NOT observable from the response — by design,
@@ -21,9 +21,9 @@ import (
 //
 //	createAgentPlanner: using react_4 native tool-calling planner
 //
-// Run it with the flag explicitly off and confirm the line is present:
+// Run it with the engine forced to react3 and confirm the line is present:
 //
-//	LLM_SERVER_REACT4_ENABLED=false go test -tags e2e \
+//	LLM_SERVER_PLANNER_ENGINE=react3 go test -tags e2e \
 //	  -run TestK8sOrchestratorReAct4Handle_PinRunsReAct4 ./agents/ -v 2>&1 \
 //	  | grep "using react_4"
 //

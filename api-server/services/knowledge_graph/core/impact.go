@@ -42,6 +42,7 @@ var flowObservationSources = map[string]bool{
 	"gcp-cloud-traces": true,
 	"datadog-apm":      true,
 	"newrelic-apm":     true,
+	"elastic-apm":      true,
 }
 
 // ImpactedService is one dependent of a resource: an application-level node that
@@ -59,6 +60,14 @@ type ImpactedService struct {
 	Namespace   string `json:"namespace,omitempty"`
 	Environment string `json:"environment,omitempty"`
 	HopsAway    int    `json:"hops_away"`
+	// AppHopsAway is the same distance counted in APPLICATION hops: crossing an
+	// infrastructure intermediate the graph models (a k8s Node, a PV, a PVC) is
+	// free, landing on an application costs one. It is what "direct" means to an
+	// operator — a workload mounting a volume through its PVC consumes it
+	// directly though three edges separate them, while a caller of a caller is
+	// two applications away however few edges that takes. Internal to the
+	// traversal (see RetainDirectDependents); never serialized.
+	AppHopsAway int `json:"-"`
 	// Relationship is the edge type linking this node one hop toward the seed
 	// (its own edge when direct, its first walked edge when multi-hop); Sources
 	// is the union of discovery sources asserting any such edge — the provenance
@@ -711,6 +720,7 @@ func (s *Service) attachedInstanceDependents(tenantID, seedID string, accountEnv
 			Environment:  resolveNodeEnvironment(n, accountEnv),
 			Criticality:  resolveNodeCriticality(n, criticality),
 			HopsAway:     1,
+			AppHopsAway:  1,
 			Relationship: att.relationship,
 			Sources:      att.sources,
 		})
@@ -792,10 +802,13 @@ func (s *Service) hostedWorkloadDependents(seed *DbNode, traversed []*DbNode, no
 		}
 		for _, r := range rollups {
 			entry := ImpactedService{
-				Name:         r.WorkloadName,
-				NodeType:     NodeTypeWorkload,
-				Namespace:    r.Namespace,
-				HopsAway:     hopsByNodeName[r.NodeName] + 1,
+				Name:      r.WorkloadName,
+				NodeType:  NodeTypeWorkload,
+				Namespace: r.Namespace,
+				HopsAway:  hopsByNodeName[r.NodeName] + 1,
+				// A workload sits on its node, and a node is infrastructure: the
+				// rollup is one application hop whichever seed reached it.
+				AppHopsAway:  1,
 				Relationship: RelationshipRunsOn,
 				Sources:      []string{"k8s"},
 				PodCount:     r.PodCount,
@@ -862,6 +875,7 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 	}
 
 	attribution := attributeConnectingEdges(edges, nodeMinDepth, TraverseDirectionUpstream)
+	appHops := appHopDistances(seedID, nodes, edges, nodeMinDepth, TraverseDirectionUpstream, appDependentTypes)
 	for _, n := range nodes {
 		if n == nil || n.ID == seedID || !canBeImpacted(n.NodeType) {
 			continue
@@ -878,6 +892,7 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 				Environment:  resolveNodeEnvironment(n, accountEnv),
 				Criticality:  resolveNodeCriticality(n, criticality),
 				HopsAway:     nodeMinDepth[n.ID],
+				AppHopsAway:  appHops[n.ID],
 				Relationship: att.relationship,
 				Sources:      att.sources,
 			})
@@ -899,6 +914,7 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 			Criticality:    resolveNodeCriticality(n, criticality),
 			LastObservedAt: lastObserved,
 			HopsAway:       nodeMinDepth[n.ID],
+			AppHopsAway:    appHops[n.ID],
 			Relationship:   att.relationship,
 			Sources:        att.sources,
 		})
@@ -921,6 +937,10 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 // required-argument contract as summarizeImpact.
 func summarizeDownstream(seedID string, nodes []*DbNode, edges []*DbEdge, nodeMinDepth map[string]int, accountEnv, criticality map[string]string) []ImpactedService {
 	attribution := attributeConnectingEdges(edges, nodeMinDepth, TraverseDirectionDownstream)
+	// The downstream list names a wider set than the upstream one (a database a
+	// workload calls is a dependency worth naming), so that set is what counts
+	// as an application hop here.
+	appHops := appHopDistances(seedID, nodes, edges, nodeMinDepth, TraverseDirectionDownstream, downstreamDependencyTypes)
 	deps := []ImpactedService{}
 	for _, n := range nodes {
 		if n == nil || n.ID == seedID || !downstreamDependencyTypes[n.NodeType] {
@@ -939,6 +959,7 @@ func summarizeDownstream(seedID string, nodes []*DbNode, edges []*DbEdge, nodeMi
 			Environment:  resolveNodeEnvironment(n, accountEnv),
 			Criticality:  resolveNodeCriticality(n, criticality),
 			HopsAway:     nodeMinDepth[n.ID],
+			AppHopsAway:  appHops[n.ID],
 			Relationship: att.relationship,
 			Sources:      att.sources,
 		})
@@ -976,12 +997,21 @@ func isUnresolvedVPCAddress(n *DbNode) bool {
 // callers (ExternalService nodes are bare IPs nobody can act on), then
 // closest-first, then by name — so bounded consumers keep the most relevant
 // slice and the UI leads with named services.
+//
+// "Closest" is application hops first and edge count only as a tiebreak. Every
+// consumer that keeps a prefix of this list — the downstream cap below, the 50
+// the recommendation layer persists — would otherwise measure closeness in
+// edges and could drop a dependent that relies on the resource directly in
+// favour of a transitive one that happens to sit fewer edges away.
 func sortImpactedServices(deps []ImpactedService) {
 	sort.Slice(deps, func(i, j int) bool {
 		iExternal := deps[i].NodeType == NodeTypeExternalService
 		jExternal := deps[j].NodeType == NodeTypeExternalService
 		if iExternal != jExternal {
 			return !iExternal
+		}
+		if deps[i].AppHopsAway != deps[j].AppHopsAway {
+			return deps[i].AppHopsAway < deps[j].AppHopsAway
 		}
 		if deps[i].HopsAway != deps[j].HopsAway {
 			return deps[i].HopsAway < deps[j].HopsAway
@@ -1056,6 +1086,141 @@ func attributeConnectingEdges(edges []*DbEdge, nodeMinDepth map[string]int, dire
 		}
 		sort.Strings(sources)
 		out[id] = connectingEdgeAttribution{relationship: e.RelationshipType, sources: sources, lastObserved: lastObserved[id]}
+	}
+	return out
+}
+
+// appHopDistances measures every discovered node's distance from the seed in
+// application hops rather than graph edges: a step onto a node in hopTypes costs
+// one, a step through anything else — the infrastructure intermediates the graph
+// models, a Node or a PV or a PVC — costs nothing. hopTypes is the caller's
+// definition of "an application" for this direction, which differs between the
+// two passes (see downstreamDependencyTypes).
+//
+// Edge pairing matches attributeConnectingEdges: a node connects through edges
+// whose other endpoint sits exactly one BFS layer closer to the seed, so
+// processing nodes shallowest-first means a node's neighbours are always
+// resolved before it. A node no such edge reaches — possible when the edge fetch
+// is capped — falls back to its raw BFS depth, which never understates how far
+// away it is.
+func appHopDistances(seedID string, nodes []*DbNode, edges []*DbEdge, nodeMinDepth map[string]int, direction TraverseDirection, hopTypes map[NodeType]bool) map[string]int {
+	typeByID := make(map[string]NodeType, len(nodes))
+	for _, n := range nodes {
+		if n != nil {
+			typeByID[n.ID] = n.NodeType
+		}
+	}
+
+	toward := map[string][]string{}
+	for _, e := range edges {
+		if e == nil {
+			continue
+		}
+		nodeID, towardSeedID := e.SourceNodeID, e.DestinationNodeID
+		if direction == TraverseDirectionDownstream {
+			nodeID, towardSeedID = e.DestinationNodeID, e.SourceNodeID
+		}
+		nodeDepth, ok := nodeMinDepth[nodeID]
+		if !ok {
+			continue
+		}
+		if towardDepth, ok := nodeMinDepth[towardSeedID]; !ok || towardDepth != nodeDepth-1 {
+			continue
+		}
+		toward[nodeID] = append(toward[nodeID], towardSeedID)
+	}
+
+	ordered := make([]string, 0, len(nodeMinDepth))
+	for id := range nodeMinDepth {
+		ordered = append(ordered, id)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return nodeMinDepth[ordered[i]] < nodeMinDepth[ordered[j]] })
+
+	dist := map[string]int{seedID: 0}
+	for _, id := range ordered {
+		if id == seedID {
+			continue
+		}
+		nearest := -1
+		for _, towardID := range toward[id] {
+			d, ok := dist[towardID]
+			if !ok {
+				continue
+			}
+			if nearest < 0 || d < nearest {
+				nearest = d
+			}
+		}
+		if nearest < 0 {
+			dist[id] = nodeMinDepth[id]
+			continue
+		}
+		if hopTypes[typeByID[id]] {
+			nearest++
+		}
+		dist[id] = nearest
+	}
+	return dist
+}
+
+// RetainDirectDependents narrows a blast radius to what depends on the resource
+// directly, dropping everything reached through another application, and
+// recomputes the rollups graded off it.
+//
+// It exists for the FinOps recommendation surface, which asks "what breaks if I
+// change this resource": a caller of a caller does not break — it sees whatever
+// its own dependency chooses to absorb — so naming it as impacted overstates the
+// change. The incident/triage surface keeps the full multi-hop picture, where a
+// transitive path is exactly how a failure propagates; that is why this is a
+// projection the recommendation layer applies rather than a narrower traversal.
+//
+// Distance is application hops (AppHopsAway), so the infrastructure chains the
+// graph models are never mistaken for indirection: a workload mounting a volume
+// through its PV and PVC stays, a caller of a caller goes. Retained entries
+// carry that distance in HopsAway too, so a consumer reading a hop count sees
+// dependency steps rather than the edge count it took to reach them.
+//
+// InfrastructureDependents, HostedWorkloads and Truncated are deliberately left
+// alone: the first two are seed-adjacent by construction, and a traversal that
+// hit the node cap stays flagged because trimming a list cannot un-truncate what
+// was never walked.
+func (s *ImpactSummary) RetainDirectDependents() {
+	if s == nil {
+		return
+	}
+	s.Dependents = directDependentsOnly(s.Dependents)
+	s.DownstreamDependencies = directDependentsOnly(s.DownstreamDependencies)
+	s.DependentCount = len(s.Dependents)
+	s.DownstreamCount = len(s.DownstreamDependencies)
+
+	s.ProductionDependents = 0
+	byType := map[NodeType]int{}
+	for _, d := range s.Dependents {
+		if isProdEnv(d.Environment) {
+			s.ProductionDependents++
+		}
+		byType[d.NodeType]++
+	}
+	// DependentsByType counts every impactable node the traversal kept, which
+	// after the trim is the direct dependents plus the infrastructure list.
+	for _, d := range s.InfrastructureDependents {
+		byType[d.NodeType]++
+	}
+	s.DependentsByType = byType
+}
+
+// directDependentsOnly keeps the entries exactly one application hop from the
+// seed, restating that distance as their hop count. Order is preserved: the
+// list is already sorted on application hops first (sortImpactedServices), so
+// dropping entries cannot disturb it.
+func directDependentsOnly(deps []ImpactedService) []ImpactedService {
+	out := make([]ImpactedService, 0, len(deps))
+	for _, d := range deps {
+		if d.AppHopsAway != 1 {
+			continue
+		}
+		d.HopsAway = d.AppHopsAway
+		out = append(out, d)
 	}
 	return out
 }

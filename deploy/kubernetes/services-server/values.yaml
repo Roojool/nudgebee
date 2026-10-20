@@ -70,13 +70,66 @@ ingress:
 
 secretName: 'nudgebee'
 
+# Small-tier defaults. See docs/sizing-and-tiers.md for the tier definitions and
+# the measurements these come from; values-medium/large.yaml override them.
+# Memory: steady state is 90-240Mi, but the finops-score recompute cron runs every
+# 6h for 80-90 minutes and materialises the whole recommendation set — 1.0Gi peak on
+# a small estate, 6.7Gi on the largest measured one. The old 1500Mi limit was below
+# that peak even at Small, so the cron OOM-killed the pod. Do not lower the limit
+# without changing the cron (tracked as the batch-recompute streaming fix).
+#
+# 4Gi, not 2Gi: a 15-day re-measurement found the dev deployment OOM-killing this
+# container 11 times against a 2500Mi limit — i.e. the recompute exceeds 2.5Gi on a
+# mid-sized estate even though the 30s-resolution working-set samples only caught
+# 1804Mi. The sampled peak is a floor on the real peak, not the peak, so the limit
+# has to clear the largest limit observed to fail, not the largest sample observed.
+# CPU: p95 is 24-46m; the old 300m request reserved ~10x what the service uses.
 resources:
   limits:
-    cpu: 500m
-    memory: 1500Mi
+    cpu: 1000m
+    memory: 4Gi
   requests:
-    cpu: 300m
-    memory: 1024Mi
+    cpu: 150m
+    memory: 500Mi
+
+# Background-job ("worker") deployment.
+#
+# Off by default: with worker.enabled false there is exactly one deployment and
+# it does what it always did — serve HTTP *and* drain every RabbitMQ queue. That
+# is what every single-replica, OSS and on-prem install wants, and it is the
+# only shape a one-pod install can have.
+#
+# Turn it on and the deployment splits in two: the existing deployment runs with
+# SERVER_ROLE=api and serves only HTTP, while a second `<fullname>-worker`
+# deployment runs the consumers and the EE background goroutines. The two roles
+# are complementary by construction, so there is no way to end up with a queue
+# nobody consumes — see templates/_helpers.tpl "services-server.serverRole".
+#
+# Scheduled crons: runbook-server fires them at /rpc-cron, and each one runs as
+# a goroutine on whichever pod took the call. Enabling the worker also renders a
+# `<fullname>-worker` Service; set runbook-server's SERVICE_API_SERVER_CRON_URL
+# to it to move those jobs onto the worker. Unset, they stay on the API pods.
+# Enable the worker before setting that URL, and unset it before disabling the
+# worker — runbook-server bakes the URL into its schedules at startup.
+#
+# Worth knowing before enabling: background work started from inside a
+# user-facing HTTP handler (scan_orchestrator's heartbeat evaluation,
+# application/profiler tickers, triage's rule-match batcher) is NOT moved by
+# this — it still runs on the API pods. Don't size API resources down on the
+# assumption they are now HTTP-only.
+worker:
+  enabled: false
+  # Fixed on purpose — no HPA. The point of the split is a known, deterministic
+  # number of consumers; autoscaling would silently change per-queue
+  # concurrency (replicas x the rabbit_mq_*_concurrency config values).
+  replicaCount: 1
+  # Each of the following falls back to the top-level value when unset, so a
+  # worker only needs to override what genuinely differs from the API pods.
+  resources: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 autoscaling:
   enabled: false

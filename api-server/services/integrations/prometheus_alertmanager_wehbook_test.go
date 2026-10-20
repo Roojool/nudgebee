@@ -279,3 +279,15 @@ func TestExtractAppIDWorkload(t *testing.T) {
 		})
 	}
 }
+
+func TestMarkAlertOrigin(t *testing.T) {
+	ruleAlert := map[string]string{"alertname": "CPUThrottlingHigh"}
+	markAlertOrigin(ruleAlert, "http://vmalert:8080/vmalert/alert?group_id=1&alert_id=2")
+	assert.Equal(t, "http://vmalert:8080/vmalert/alert?group_id=1&alert_id=2", ruleAlert["generatorURL"])
+	assert.NotContains(t, ruleAlert, AlertOriginLabel, "a rule-generated alert must not be flagged")
+
+	postedAlert := map[string]string{"alertname": "RouteTestCritical"}
+	markAlertOrigin(postedAlert, "")
+	assert.Equal(t, AlertOriginNoRuleEvaluation, postedAlert[AlertOriginLabel])
+	assert.NotContains(t, postedAlert, "generatorURL")
+}

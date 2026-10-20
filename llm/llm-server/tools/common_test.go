@@ -510,6 +510,96 @@ func TestExtractStartEndtimeFromLabels_Range(t *testing.T) {
 		assert.Equal(t, "2023-01-04T00:00:00Z", start.Format(time.RFC3339))
 		assert.Equal(t, "2023-01-05T00:00:00Z", end.Format(time.RFC3339))
 	})
+
+	// The logs agent writes absolute windows as an ISO-8601 interval. It is not a
+	// duration, so it used to fall through to the default last hour and the agent
+	// counted logs from the wrong window.
+	t.Run("an ISO-8601 interval is the window itself", func(t *testing.T) {
+		labels := map[string]any{"range": "2026-09-25T18:18:00Z/2026-09-25T18:48:00Z"}
+		start, end, err := ExtractStartEndtimeFromLabels(toolContext, labels)
+		assert.NoError(t, err)
+		assert.Equal(t, "2026-09-25T18:18:00Z", start.Format(time.RFC3339))
+		assert.Equal(t, "2026-09-25T18:48:00Z", end.Format(time.RFC3339))
+	})
+
+	t.Run("a reversed interval is swapped", func(t *testing.T) {
+		labels := map[string]any{"range": "2026-09-25T18:48:00Z / 2026-09-25T18:18:00Z"}
+		start, end, err := ExtractStartEndtimeFromLabels(toolContext, labels)
+		assert.NoError(t, err)
+		assert.Equal(t, "2026-09-25T18:18:00Z", start.Format(time.RFC3339))
+		assert.Equal(t, "2026-09-25T18:48:00Z", end.Format(time.RFC3339))
+	})
+
+	t.Run("an unparseable interval is not a window", func(t *testing.T) {
+		_, _, err := ExtractStartEndtimeFromLabels(toolContext, map[string]any{"range": "yesterday/today"})
+		assert.Error(t, err)
+	})
+}
+
+// The logs agent sometimes writes its window into the filter instead of time_range. With no
+// window argument the search ran over the last hour and answered 0 for 18:18–18:48 yesterday.
+func TestWindowFromTimestampBounds(t *testing.T) {
+	now := time.Date(2026, 9, 26, 3, 0, 0, 0, time.UTC)
+	b := func(op core.BinaryWhereClauseType, v any) core.QueryWhereClause {
+		return core.QueryWhereClause{Binary: core.BinaryWhereClause{"timestamp": {op: v}}}
+	}
+
+	t.Run("bounds under _and are the window", func(t *testing.T) {
+		from, to, ok := windowFromTimestampBounds(core.QueryWhereClause{And: []core.QueryWhereClause{
+			{Binary: core.BinaryWhereClause{"app": {core.Eq: "llm-server"}}},
+			b(core.Gte, "2026-09-25T18:18:00Z"),
+			b(core.Lte, "2026-09-25T18:48:00Z"),
+		}}, now)
+		assert.True(t, ok)
+		assert.Equal(t, "2026-09-25T18:18:00Z", from.Format(time.RFC3339))
+		assert.Equal(t, "2026-09-25T18:48:00Z", to.Format(time.RFC3339))
+	})
+
+	t.Run("the tightest bounds win", func(t *testing.T) {
+		from, to, ok := windowFromTimestampBounds(core.QueryWhereClause{And: []core.QueryWhereClause{
+			b(core.Gt, "2026-09-25T18:00:00Z"), b(core.Gte, "2026-09-25T18:18:00Z"),
+			b(core.Lt, "2026-09-25T19:00:00Z"), b(core.Lte, "2026-09-25T18:48:00Z"),
+		}}, now)
+		assert.True(t, ok)
+		assert.Equal(t, "2026-09-25T18:18:00Z", from.Format(time.RFC3339))
+		assert.Equal(t, "2026-09-25T18:48:00Z", to.Format(time.RFC3339))
+	})
+
+	t.Run("a lone lower bound runs to now; a lone upper bound covers the hour before", func(t *testing.T) {
+		from, to, ok := windowFromTimestampBounds(b(core.Gte, "2026-09-26T01:00:00Z"), now)
+		assert.True(t, ok)
+		assert.Equal(t, "2026-09-26T01:00:00Z", from.Format(time.RFC3339))
+		assert.Equal(t, now, to)
+
+		from, to, ok = windowFromTimestampBounds(b(core.Lt, "2026-09-26T01:00:00Z"), now)
+		assert.True(t, ok)
+		assert.Equal(t, "2026-09-26T00:00:00Z", from.Format(time.RFC3339))
+		assert.Equal(t, "2026-09-26T01:00:00Z", to.Format(time.RFC3339))
+	})
+
+	t.Run("bounds inside _or or _not do not constrain the window", func(t *testing.T) {
+		_, _, ok := windowFromTimestampBounds(core.QueryWhereClause{
+			Or:  []core.QueryWhereClause{b(core.Gte, "2026-09-25T18:18:00Z")},
+			Not: &core.QueryWhereClause{Binary: core.BinaryWhereClause{"timestamp": {core.Lte: "2026-09-25T18:48:00Z"}}},
+		}, now)
+		assert.False(t, ok)
+	})
+
+	t.Run("no timestamp bound, an inverted pair, or a future lower bound is no window", func(t *testing.T) {
+		_, _, ok := windowFromTimestampBounds(core.QueryWhereClause{Binary: core.BinaryWhereClause{"app": {core.Eq: "x"}}}, now)
+		assert.False(t, ok)
+		_, _, ok = windowFromTimestampBounds(core.QueryWhereClause{And: []core.QueryWhereClause{
+			b(core.Gte, "2026-09-25T19:00:00Z"), b(core.Lte, "2026-09-25T18:00:00Z")}}, now)
+		assert.False(t, ok)
+		_, _, ok = windowFromTimestampBounds(b(core.Gte, "2026-09-27T00:00:00Z"), now)
+		assert.False(t, ok)
+	})
+
+	t.Run("an explicit window argument is detected", func(t *testing.T) {
+		assert.True(t, hasWindowArgs(map[string]any{"range": "1h"}))
+		assert.True(t, hasWindowArgs(map[string]any{"start_time": "x"}))
+		assert.False(t, hasWindowArgs(map[string]any{"index": "logs-*"}))
+	})
 }
 
 func TestExtractStartEndtimeFromLabels_MergePriority(t *testing.T) {

@@ -1,6 +1,28 @@
 package core
 
-import "nudgebee/llm/security"
+import (
+	"errors"
+
+	"nudgebee/llm/security"
+)
+
+// MetadataResolvedTarget is the tool-call metadata key naming the configured
+// target a call ran against; MetadataResolvedBy names how it was chosen.
+//
+// Deliberately not "tool_config_name": that key is already carried in some
+// tools' own call context (watch's poll contract) and can hold the
+// "NoConfigToolsFound" sentinel, so reusing it would mix a tool's own value
+// with what actually ran and make the recorded data unusable for counting.
+const (
+	MetadataResolvedTarget = "nb_resolved_target"
+	MetadataResolvedBy     = "nb_resolved_by"
+)
+
+// ErrNoMatchingConfig means configs exist for this tool but none of them is the
+// system the question is about. Distinct from having no configuration at all:
+// the caller should be told which targets exist and that none matches, rather
+// than being handed one of them.
+var ErrNoMatchingConfig = errors.New("no configured target matches the subject")
 
 type NBToolType string
 
@@ -143,6 +165,11 @@ type NBToolResponseReference struct {
 	Type        string `json:"type"` // "link", "file", "k8s_resource", "citation"
 	Query       string `json:"query"`
 	Description string `json:"description"`
+	// Snippet is the retrieved text this reference stands for. Description
+	// carries the purpose guidance, which is identical for every knowledge base
+	// of a category, so it cannot tell a reader WHICH page or figure was used —
+	// the Additional Contexts panel renders this instead when it is set.
+	Snippet string `json:"snippet,omitempty"`
 }
 
 type NBToolResponse struct {
@@ -296,6 +323,14 @@ type ShellWrappable interface {
 // own approval.
 type ToolConfirmationScope interface {
 	ConfirmationKey(toolInput string) string
+}
+
+// PerCallTargetTool is an optional interface for account-sourced tools that
+// let one call name a target (cluster, cloud account) other than the
+// conversation's saved config. The executor checks write access on the named
+// target, since that is where a write lands.
+type PerCallTargetTool interface {
+	RequestedTarget(toolInput string) (string, error)
 }
 
 // ToolConfirmationExempt is an optional interface for write tools that may skip

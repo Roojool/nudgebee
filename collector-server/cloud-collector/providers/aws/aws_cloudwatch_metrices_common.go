@@ -936,6 +936,157 @@ func listAwsCloudwatchMetrics(request providers.ListMetricsRequest) (providers.L
 	return providers.ListMetricsResponse{Metrics: metrics}, nil
 }
 
+// queryMeta records what a GetMetricData query id (e.g. "m0" or, for a metric-
+// math request, the alarm's own "m1"/"e1") actually refers to, so the result-
+// reading loop in getAwsCloudwatchMetrics can label each returned series.
+type queryMeta struct {
+	resourceId string
+	metricName string
+	stat       string
+}
+
+// buildMetricDataQueriesFromMetricQueries converts an alarm's metric-math query
+// set (raw sub-metrics plus an expression referencing them) into the
+// MetricDataQuery list GetMetricData needs, and a matching queryIdMap keyed by
+// each entry's own id — never renumbered, unlike the single-metric path below,
+// because the expression string references these ids by name (e.g.
+// "m1 - m2 - m3" only resolves if this same request also contains queries
+// with those exact ids).
+func buildMetricDataQueriesFromMetricQueries(metricQueries []providers.CloudWatchMetricEntry, accountNumber string) ([]types.MetricDataQuery, map[string]queryMeta) {
+	queries := make([]types.MetricDataQuery, 0, len(metricQueries))
+	queryIdMap := make(map[string]queryMeta, len(metricQueries))
+
+	for _, mq := range metricQueries {
+		q := types.MetricDataQuery{
+			Id:        aws.String(mq.Id),
+			AccountId: aws.String(accountNumber),
+			// Always true here, regardless of mq.ReturnData: that flag reflects
+			// what the alarm itself needed back for its own evaluation (only the
+			// expression, typically — raw inputs are usually returnData:false
+			// since the alarm doesn't need their values, only the formula's
+			// result). This is a separate, evidence-display request: we want
+			// every series' data back, inputs included, not just the alarm's own
+			// narrower requirement.
+			ReturnData: aws.Bool(true),
+		}
+		if mq.Label != "" {
+			q.Label = aws.String(mq.Label)
+		}
+		metricName := mq.Label
+		var stat string
+		if mq.Expression != "" {
+			q.Expression = aws.String(mq.Expression)
+			if mq.Period > 0 {
+				// Only meaningful (and only present in the source data) for an
+				// expression with no MetricStat to inherit timing from — a
+				// Metrics Insights (SELECT ...) query. A metric math expression
+				// referencing other entries doesn't set this; it uses their
+				// periods instead.
+				q.Period = aws.Int32(int32(mq.Period))
+			}
+			if metricName == "" {
+				// An expression with no Label would otherwise surface as an
+				// empty-named series in the evidence.
+				metricName = mq.Id
+			}
+		} else if mq.MetricStat != nil {
+			var dims []types.Dimension
+			for k, v := range mq.MetricStat.Metric.Dimensions {
+				dims = append(dims, types.Dimension{Name: aws.String(k), Value: aws.String(v)})
+			}
+			q.MetricStat = &types.MetricStat{
+				Period: aws.Int32(int32(mq.MetricStat.Period)),
+				Stat:   aws.String(mq.MetricStat.Stat),
+				Metric: &types.Metric{
+					Namespace:  aws.String(mq.MetricStat.Metric.Namespace),
+					MetricName: aws.String(mq.MetricStat.Metric.Name),
+					Dimensions: dims,
+				},
+			}
+			stat = mq.MetricStat.Stat
+			if metricName == "" {
+				metricName = mq.MetricStat.Metric.Name
+			}
+		}
+		queries = append(queries, q)
+		// Keyed by the alarm's own id, so the result-reading loop can label
+		// every series correctly — including the expression's result, which
+		// would otherwise come back with an id ("e1") this map has no entry
+		// for, and get silently dropped as unmapped.
+		queryIdMap[mq.Id] = queryMeta{metricName: metricName, stat: stat}
+	}
+
+	return queries, queryIdMap
+}
+
+// combineMetricItemsAcrossResources merges MetricItems that share the same
+// Name+Statistics (e.g. the same metric queried across several resources)
+// into one aggregated series, applying the named statistic function
+// (metricsFunctions) across all items reporting at each shared timestamp.
+// Extracted from getAwsCloudwatchMetrics so it can be exercised directly in a
+// test — the bug this guards against (an unrecognised Statistics key, such as
+// the empty string on an expression's result, silently zeroing every value)
+// only reproduces once real MetricItems reach this code, which a test that
+// mocks QueryMetrices at the interface level never does.
+func combineMetricItemsAcrossResources(ctx providers.CloudProviderContext, metrics []providers.MetricItem, region, serviceName string) []providers.MetricItem {
+	groupedResources := lo.GroupBy(metrics, func(item providers.MetricItem) string {
+		return item.Name + "::" + item.Statistics
+	})
+
+	return lo.MapToSlice(groupedResources, func(key string, items []providers.MetricItem) providers.MetricItem {
+		keyParts := strings.Split(key, "::")
+		resourceId := ""
+
+		//merge timestamp and values
+		timestampedDataArray := map[time.Time][]float64{}
+
+		for _, item := range items {
+			resourceId = item.ResourceId
+			for i, timestamp := range item.Timestamps {
+				if _, ok := timestampedDataArray[timestamp]; !ok {
+					timestampedDataArray[timestamp] = []float64{}
+				}
+				timestampedDataArray[timestamp] = append(timestampedDataArray[timestamp], item.Values[i])
+			}
+		}
+
+		timestampedData := map[time.Time]float64{}
+
+		timestamps := []time.Time{}
+		values := []float64{}
+		if len(timestampedDataArray) > 0 {
+			for timestamp, values := range timestampedDataArray {
+				value := 0.0
+				if f, ok := metricsFunctions[keyParts[1]]; ok {
+					value = f(values)
+				} else {
+					ctx.GetLogger().Error("invalid statistics", "statistics", keyParts[1])
+				}
+				timestampedData[timestamp] = value
+			}
+
+			// sort timestamps and values in arrays
+			timestamps = slices.Collect(maps.Keys(timestampedData))
+			sort.Slice(timestamps, func(i, j int) bool {
+				return timestamps[i].Before(timestamps[j])
+			})
+			for _, timestamp := range timestamps {
+				values = append(values, timestampedData[timestamp])
+			}
+		}
+
+		return providers.MetricItem{
+			Name:        keyParts[0],
+			Values:      values,
+			Timestamps:  timestamps,
+			Statistics:  keyParts[1],
+			ResourceId:  resourceId,
+			Region:      region,
+			ServiceName: serviceName,
+		}
+	})
+}
+
 func getAwsCloudwatchMetrics(ctx providers.CloudProviderContext, account providers.Account, filter providers.QueryMetricsRequest) (providers.QueryMetricsResponse, error) {
 	err := common.ValidateStruct(filter)
 	if err != nil {
@@ -975,176 +1126,184 @@ func getAwsCloudwatchMetrics(ctx providers.CloudProviderContext, account provide
 		step = filter.Step
 	}
 
-	var serviceConfig serviceNamespace
-	metricsNames := filter.MetricNames
-	resourceType := strings.ToLower(filter.ResourceType)
-
-	if filter.MetricNamespace != "" {
-		serviceConfig = serviceNamespace{
-			Name: filter.MetricNamespace,
-		}
-		if filter.ServiceName != "" {
-			if serviceConfig1, ok := serviceCloudwatchNamespaceMap[strings.ToLower(filter.ServiceName)]; ok {
-				serviceConfig = refineELBServiceConfig(serviceConfig1, filter.ResourceIds, filter.Dimensions)
-				serviceConfig.Name = filter.MetricNamespace
-			}
-		}
-	} else {
-		// Get base service namespace configuration
-		serviceConfig = refineELBServiceConfig(
-			serviceCloudwatchNamespaceMap[strings.ToLower(filter.ServiceName)],
-			filter.ResourceIds, filter.Dimensions,
-		)
-		if serviceConfig.Name == "" {
-			ctx.GetLogger().Info("cloudwatch: service not supported, skipping metrics", "service", filter.ServiceName)
-			return providers.QueryMetricsResponse{}, nil
-		}
-		if resourceType == "" && len(serviceConfig.Metrices) > 0 {
-			resourceType = slices.Collect(maps.Keys(serviceConfig.Metrices))[0]
-		}
-	}
-
-	// try detect metrics
-	if len(metricsNames) == 0 && resourceType != "" {
-		metricsNames = serviceConfig.Metrices[strings.ToLower(resourceType)]
-		if len(metricsNames) == 0 {
-			ctx.GetLogger().Info("invalid resource type for service, or no metrics defined", "service", filter.ServiceName, "resourceType", resourceType)
-			return providers.QueryMetricsResponse{}, nil
-		}
-	}
-
-	// Get initial resource identifiers. If filter.ResourceIds is empty, use the Instances function.
-	resourceIds := filter.ResourceIds
-	if len(resourceIds) == 0 && len(filter.Dimensions) == 0 && serviceConfig.Instances != nil {
-		resourceIds = serviceConfig.Instances(cfg, resourceType)
-	}
-	if len(resourceIds) > 0 {
-		resourceIds = lo.Uniq(resourceIds)
-	}
-
-	// Prepare dimensions and namespace
-	var targetNamespaceName string
-	var dimensionsByResourceID map[string][]types.Dimension
-	var finalResourceIDsForQuery []string
-
-	if len(filter.Dimensions) > 0 {
-		dimensionsByResourceID = make(map[string][]types.Dimension)
-		dimensions := []types.Dimension{}
-		resourceId := ""
-
-		for _, dimension := range filter.Dimensions {
-			if dimension["Name"] != "" && dimension["Value"] != "" {
-				if resourceId == "" {
-					resourceId = dimension["Value"]
-				}
-				dimensions = append(dimensions, types.Dimension{
-					Name:  aws.String(dimension["Name"]),
-					Value: aws.String(dimension["Value"]),
-				})
-			} else {
-				for k, v := range dimension {
-					if resourceId == "" {
-						resourceId = v
-					}
-					resourceId2 := v
-					dimension := k
-					if resourceId2 == "" || dimension == "" {
-						continue
-					}
-					dimensions = append(dimensions, types.Dimension{
-						Name:  aws.String(dimension),
-						Value: aws.String(resourceId2),
-					})
-				}
-			}
-		}
-		dimensionsByResourceID[resourceId] = append(dimensionsByResourceID[resourceId], dimensions...)
-		finalResourceIDsForQuery = slices.Collect(maps.Keys(dimensionsByResourceID))
-		targetNamespaceName = serviceConfig.Name
-	} else if serviceConfig.PrepareDimensionsAndNamespace != nil {
-		targetNamespaceName, dimensionsByResourceID, finalResourceIDsForQuery, err = serviceConfig.PrepareDimensionsAndNamespace(ctx.GetContext(), cfg, serviceConfig.Name, resourceType, resourceIds, ctx.GetLogger())
-		if err != nil {
-			ctx.GetLogger().Error("failed to prepare custom dimensions and namespace", "error", err, "service", filter.ServiceName)
-			return providers.QueryMetricsResponse{}, err
-		}
-	} else {
-		if serviceConfig.ResourceDimensionName == "" {
-			return providers.QueryMetricsResponse{}, errors.New("cloudwatch: unable to identify resource-dimension-name, please provide dimensions explicitly")
-		}
-		// Default behavior for services without custom preparation
-		targetNamespaceName = serviceConfig.Name
-		dimensionsByResourceID = make(map[string][]types.Dimension)
-		for _, id := range resourceIds {
-			dimensionsByResourceID[id] = []types.Dimension{
-				{Name: aws.String(serviceConfig.ResourceDimensionName), Value: aws.String(id)},
-			}
-		}
-		finalResourceIDsForQuery = resourceIds
-	}
-
-	if len(finalResourceIDsForQuery) == 0 {
-		ctx.GetLogger().Info("No final resource IDs after dimension preparation", "service", filter.ServiceName, "resourceType", resourceType)
-		return providers.QueryMetricsResponse{}, nil
-	}
-
-	type queryMeta struct {
-		resourceId string
-		metricName string
-		stat       string
-	}
 	queries := []types.MetricDataQuery{}
 	queryIdMap := map[string]queryMeta{}
-	queryIndex := 0
-	for _, originalResourceID := range finalResourceIDsForQuery {
-		for _, metricName := range metricsNames {
-			stats := []string{"Average"}
-			if serviceConfig.MetricsStats != nil && len(serviceConfig.MetricsStats[metricName]) > 0 {
-				stats = serviceConfig.MetricsStats[metricName]
+
+	if len(filter.MetricQueries) > 0 {
+		// Metric-math alarm: filter.MetricQueries already carries every raw
+		// sub-metric plus the expression, each tagged with its own real id (the
+		// same ids CloudWatch itself assigned when the alarm was created) — build
+		// queries straight from that, skipping the resource/dimension-resolution
+		// logic in the else branch entirely, since each entry already carries its
+		// own namespace/dimensions and doesn't need resolving from a resource id.
+		// Extracted to its own function (rather than inlined here, like the else
+		// branch's loop) so it can be unit-tested without a live AWS call.
+		queries, queryIdMap = buildMetricDataQueriesFromMetricQueries(filter.MetricQueries, account.AccountNumber)
+	} else {
+		var serviceConfig serviceNamespace
+		metricsNames := filter.MetricNames
+		resourceType := strings.ToLower(filter.ResourceType)
+
+		if filter.MetricNamespace != "" {
+			serviceConfig = serviceNamespace{
+				Name: filter.MetricNamespace,
 			}
-			if len(filter.Statistics) > 0 {
-				stats = filter.Statistics
-			}
-			for _, stat := range stats {
-				queryId := fmt.Sprintf("m%d", queryIndex)
-				queryIndex++
-				queryIdMap[queryId] = queryMeta{resourceId: originalResourceID, metricName: metricName, stat: stat}
-				// Get dimensions for the current originalResourceID
-				currentDimensions := dimensionsByResourceID[originalResourceID]
-				if currentDimensions == nil {
-					// This shouldn't happen if finalResourceIDsForQuery is derived correctly
-					ctx.GetLogger().Warn("No dimensions found for resource ID, skipping metric query", "resourceId", originalResourceID, "metric", metricName)
-					continue
+			if filter.ServiceName != "" {
+				if serviceConfig1, ok := serviceCloudwatchNamespaceMap[strings.ToLower(filter.ServiceName)]; ok {
+					serviceConfig = refineELBServiceConfig(serviceConfig1, filter.ResourceIds, filter.Dimensions)
+					serviceConfig.Name = filter.MetricNamespace
 				}
+			}
+		} else {
+			// Get base service namespace configuration
+			serviceConfig = refineELBServiceConfig(
+				serviceCloudwatchNamespaceMap[strings.ToLower(filter.ServiceName)],
+				filter.ResourceIds, filter.Dimensions,
+			)
+			if serviceConfig.Name == "" {
+				ctx.GetLogger().Info("cloudwatch: service not supported, skipping metrics", "service", filter.ServiceName)
+				return providers.QueryMetricsResponse{}, nil
+			}
+			if resourceType == "" && len(serviceConfig.Metrices) > 0 {
+				resourceType = slices.Collect(maps.Keys(serviceConfig.Metrices))[0]
+			}
+		}
 
-				// Make a copy to add additional dimensions without modifying the shared map
-				queryDimensions := make([]types.Dimension, len(currentDimensions))
-				copy(queryDimensions, currentDimensions)
+		// try detect metrics
+		if len(metricsNames) == 0 && resourceType != "" {
+			metricsNames = serviceConfig.Metrices[strings.ToLower(resourceType)]
+			if len(metricsNames) == 0 {
+				ctx.GetLogger().Info("invalid resource type for service, or no metrics defined", "service", filter.ServiceName, "resourceType", resourceType)
+				return providers.QueryMetricsResponse{}, nil
+			}
+		}
 
-				if additionalDimensions, ok := serviceConfig.AdditionalDimensions[metricName]; ok {
-					for key, value := range additionalDimensions {
-						queryDimensions = append(queryDimensions, types.Dimension{
-							Name:  aws.String(key),
-							Value: aws.String(value),
+		// Get initial resource identifiers. If filter.ResourceIds is empty, use the Instances function.
+		resourceIds := filter.ResourceIds
+		if len(resourceIds) == 0 && len(filter.Dimensions) == 0 && serviceConfig.Instances != nil {
+			resourceIds = serviceConfig.Instances(cfg, resourceType)
+		}
+		if len(resourceIds) > 0 {
+			resourceIds = lo.Uniq(resourceIds)
+		}
+
+		// Prepare dimensions and namespace
+		var targetNamespaceName string
+		var dimensionsByResourceID map[string][]types.Dimension
+		var finalResourceIDsForQuery []string
+
+		if len(filter.Dimensions) > 0 {
+			dimensionsByResourceID = make(map[string][]types.Dimension)
+			dimensions := []types.Dimension{}
+			resourceId := ""
+
+			for _, dimension := range filter.Dimensions {
+				if dimension["Name"] != "" && dimension["Value"] != "" {
+					if resourceId == "" {
+						resourceId = dimension["Value"]
+					}
+					dimensions = append(dimensions, types.Dimension{
+						Name:  aws.String(dimension["Name"]),
+						Value: aws.String(dimension["Value"]),
+					})
+				} else {
+					for k, v := range dimension {
+						if resourceId == "" {
+							resourceId = v
+						}
+						resourceId2 := v
+						dimension := k
+						if resourceId2 == "" || dimension == "" {
+							continue
+						}
+						dimensions = append(dimensions, types.Dimension{
+							Name:  aws.String(dimension),
+							Value: aws.String(resourceId2),
 						})
 					}
 				}
+			}
+			dimensionsByResourceID[resourceId] = append(dimensionsByResourceID[resourceId], dimensions...)
+			finalResourceIDsForQuery = slices.Collect(maps.Keys(dimensionsByResourceID))
+			targetNamespaceName = serviceConfig.Name
+		} else if serviceConfig.PrepareDimensionsAndNamespace != nil {
+			targetNamespaceName, dimensionsByResourceID, finalResourceIDsForQuery, err = serviceConfig.PrepareDimensionsAndNamespace(ctx.GetContext(), cfg, serviceConfig.Name, resourceType, resourceIds, ctx.GetLogger())
+			if err != nil {
+				ctx.GetLogger().Error("failed to prepare custom dimensions and namespace", "error", err, "service", filter.ServiceName)
+				return providers.QueryMetricsResponse{}, err
+			}
+		} else {
+			if serviceConfig.ResourceDimensionName == "" {
+				return providers.QueryMetricsResponse{}, errors.New("cloudwatch: unable to identify resource-dimension-name, please provide dimensions explicitly")
+			}
+			// Default behavior for services without custom preparation
+			targetNamespaceName = serviceConfig.Name
+			dimensionsByResourceID = make(map[string][]types.Dimension)
+			for _, id := range resourceIds {
+				dimensionsByResourceID[id] = []types.Dimension{
+					{Name: aws.String(serviceConfig.ResourceDimensionName), Value: aws.String(id)},
+				}
+			}
+			finalResourceIDsForQuery = resourceIds
+		}
 
-				queries = append(queries,
-					types.MetricDataQuery{
-						Id:         aws.String(queryId),
-						AccountId:  aws.String(account.AccountNumber),
-						ReturnData: aws.Bool(true),
-						MetricStat: &types.MetricStat{
-							Period: aws.Int32(int32(step.Seconds())),
-							Stat:   aws.String(stat),
-							Metric: &types.Metric{
-								Namespace:  aws.String(targetNamespaceName),
-								MetricName: aws.String(metricName),
-								Dimensions: queryDimensions,
+		if len(finalResourceIDsForQuery) == 0 {
+			ctx.GetLogger().Info("No final resource IDs after dimension preparation", "service", filter.ServiceName, "resourceType", resourceType)
+			return providers.QueryMetricsResponse{}, nil
+		}
+
+		queryIndex := 0
+		for _, originalResourceID := range finalResourceIDsForQuery {
+			for _, metricName := range metricsNames {
+				stats := []string{"Average"}
+				if serviceConfig.MetricsStats != nil && len(serviceConfig.MetricsStats[metricName]) > 0 {
+					stats = serviceConfig.MetricsStats[metricName]
+				}
+				if len(filter.Statistics) > 0 {
+					stats = filter.Statistics
+				}
+				for _, stat := range stats {
+					queryId := fmt.Sprintf("m%d", queryIndex)
+					queryIndex++
+					queryIdMap[queryId] = queryMeta{resourceId: originalResourceID, metricName: metricName, stat: stat}
+					// Get dimensions for the current originalResourceID
+					currentDimensions := dimensionsByResourceID[originalResourceID]
+					if currentDimensions == nil {
+						// This shouldn't happen if finalResourceIDsForQuery is derived correctly
+						ctx.GetLogger().Warn("No dimensions found for resource ID, skipping metric query", "resourceId", originalResourceID, "metric", metricName)
+						continue
+					}
+
+					// Make a copy to add additional dimensions without modifying the shared map
+					queryDimensions := make([]types.Dimension, len(currentDimensions))
+					copy(queryDimensions, currentDimensions)
+
+					if additionalDimensions, ok := serviceConfig.AdditionalDimensions[metricName]; ok {
+						for key, value := range additionalDimensions {
+							queryDimensions = append(queryDimensions, types.Dimension{
+								Name:  aws.String(key),
+								Value: aws.String(value),
+							})
+						}
+					}
+
+					queries = append(queries,
+						types.MetricDataQuery{
+							Id:         aws.String(queryId),
+							AccountId:  aws.String(account.AccountNumber),
+							ReturnData: aws.Bool(true),
+							MetricStat: &types.MetricStat{
+								Period: aws.Int32(int32(step.Seconds())),
+								Stat:   aws.String(stat),
+								Metric: &types.Metric{
+									Namespace:  aws.String(targetNamespaceName),
+									MetricName: aws.String(metricName),
+									Dimensions: queryDimensions,
+								},
 							},
 						},
-					},
-				)
+					)
+				}
 			}
 		}
 	}
@@ -1201,67 +1360,16 @@ func getAwsCloudwatchMetrics(ctx providers.CloudProviderContext, account provide
 		}
 	}
 
-	//combine data for services that have multiple metrics
-	if len(filter.ResourceIds) == 0 {
-		groupedResources := lo.GroupBy(metrics, func(item providers.MetricItem) string {
-			return item.Name + "::" + item.Statistics
-		})
-
-		aggregatedMetrices := lo.MapToSlice(groupedResources, func(key string, items []providers.MetricItem) providers.MetricItem {
-			keyParts := strings.Split(key, "::")
-			resourceId := ""
-
-			//merge timestamp and values
-			timestampedDataArray := map[time.Time][]float64{}
-
-			for _, item := range items {
-				resourceId = item.ResourceId
-				for i, timestamp := range item.Timestamps {
-					if _, ok := timestampedDataArray[timestamp]; !ok {
-						timestampedDataArray[timestamp] = []float64{}
-					}
-					timestampedDataArray[timestamp] = append(timestampedDataArray[timestamp], item.Values[i])
-				}
-			}
-
-			timestampedData := map[time.Time]float64{}
-
-			timestamps := []time.Time{}
-			values := []float64{}
-			if len(timestampedDataArray) > 0 {
-				for timestamp, values := range timestampedDataArray {
-					value := 0.0
-					if f, ok := metricsFunctions[keyParts[1]]; ok {
-						value = f(values)
-					} else {
-						ctx.GetLogger().Error("invalid statistics", "statistics", keyParts[1])
-					}
-					timestampedData[timestamp] = value
-				}
-
-				// sort timestamps and values in arrays
-				timestamps = slices.Collect(maps.Keys(timestampedData))
-				sort.Slice(timestamps, func(i, j int) bool {
-					return timestamps[i].Before(timestamps[j])
-				})
-				for _, timestamp := range timestamps {
-					values = append(values, timestampedData[timestamp])
-				}
-			}
-
-			return providers.MetricItem{
-				Name:        keyParts[0],
-				Values:      values,
-				Timestamps:  timestamps,
-				Statistics:  keyParts[1],
-				ResourceId:  resourceId,
-				Region:      filter.Region,
-				ServiceName: filter.ServiceName,
-			}
-		})
-
-		metrics = aggregatedMetrices
-
+	// Combine data for services that have multiple metrics — merges several
+	// resources' MetricItems that share the same Name+Statistics into one
+	// aggregated series. Skipped for the metric-math path: each entry there is
+	// already exactly one distinct series (never multiple resources reporting
+	// the same metric), so grouping doesn't apply — and the expression's own
+	// item has no Statistics (it's not an aggregation like Average/Sum), so
+	// the metricsFunctions[""] lookup inside would silently fail and zero out
+	// its values if this ran.
+	if len(filter.ResourceIds) == 0 && len(filter.MetricQueries) == 0 {
+		metrics = combineMetricItemsAcrossResources(ctx, metrics, filter.Region, filter.ServiceName)
 	}
 
 	return providers.QueryMetricsResponse{

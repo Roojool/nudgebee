@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -33,8 +34,20 @@ type workspaceLLMMessage struct {
 type workspaceLLMMessagePart struct {
 	Type         string                 `json:"type"`
 	Text         string                 `json:"text,omitempty"`
-	ToolCall     *llms.ToolCall         `json:"tool_call,omitempty"`
+	ToolCall     *workspaceLLMToolCall  `json:"tool_call,omitempty"`
 	ToolResponse *llms.ToolCallResponse `json:"tool_response,omitempty"`
+}
+
+// workspaceLLMToolCall is a tool call as a workspace sends it, in langchaingo's
+// JSON envelope: {"type":"tool_call","tool_call":{"id":…,"type":…,"function":{…}}}.
+// It is decoded here rather than by langchaingo, whose ToolCall decoder drops
+// the function name and arguments.
+type workspaceLLMToolCall struct {
+	ToolCall struct {
+		ID       string             `json:"id"`
+		Type     string             `json:"type"`
+		Function *llms.FunctionCall `json:"function"`
+	} `json:"tool_call"`
 }
 
 type workspaceLLMTool struct {
@@ -66,31 +79,10 @@ func handleWorkspaceLLM(r *gin.Engine, tracer trace.Tracer, meter metric.Meter) 
 			return
 		}
 
-		messages := make([]llms.MessageContent, 0, len(req.Messages))
-		for _, message := range req.Messages {
-			parts := make([]llms.ContentPart, 0, len(message.Parts))
-			for _, part := range message.Parts {
-				switch part.Type {
-				case "text":
-					parts = append(parts, llms.TextPart(part.Text))
-				case "tool_call":
-					if part.ToolCall == nil {
-						returnBadWorkspaceLLM(c, "tool_call part is missing tool_call")
-						return
-					}
-					parts = append(parts, *part.ToolCall)
-				case "tool_response":
-					if part.ToolResponse == nil {
-						returnBadWorkspaceLLM(c, "tool_response part is missing tool_response")
-						return
-					}
-					parts = append(parts, *part.ToolResponse)
-				default:
-					returnBadWorkspaceLLM(c, fmt.Sprintf("unsupported message part type %q", part.Type))
-					return
-				}
-			}
-			messages = append(messages, llms.MessageContent{Role: llms.ChatMessageType(message.Role), Parts: parts})
+		messages, err := workspaceLLMMessages(req.Messages)
+		if err != nil {
+			returnBadWorkspaceLLM(c, err.Error())
+			return
 		}
 
 		tools := make([]llms.Tool, 0, len(req.Tools))
@@ -110,6 +102,46 @@ func handleWorkspaceLLM(r *gin.Engine, tracer trace.Tracer, meter metric.Meter) 
 		}
 		c.JSON(http.StatusOK, response)
 	})
+}
+
+// workspaceLLMMessages converts a workspace's messages into the form the
+// provider clients take. A workspace sends all tool results of one step in a
+// single tool message; each result becomes its own tool message here, the
+// layout llm-server's own planner sends, because the OpenAI-compatible clients
+// accept exactly one result per tool message.
+func workspaceLLMMessages(wire []workspaceLLMMessage) ([]llms.MessageContent, error) {
+	messages := make([]llms.MessageContent, 0, len(wire))
+	for _, message := range wire {
+		role := llms.ChatMessageType(message.Role)
+		parts := make([]llms.ContentPart, 0, len(message.Parts))
+		for _, part := range message.Parts {
+			switch part.Type {
+			case "text":
+				parts = append(parts, llms.TextPart(part.Text))
+			case "tool_call":
+				if part.ToolCall == nil || part.ToolCall.ToolCall.Function == nil {
+					return nil, errors.New("tool_call part is missing its function")
+				}
+				call := part.ToolCall.ToolCall
+				parts = append(parts, llms.ToolCall{ID: call.ID, Type: call.Type, FunctionCall: call.Function})
+			case "tool_response":
+				if part.ToolResponse == nil {
+					return nil, errors.New("tool_response part is missing tool_response")
+				}
+				parts = append(parts, *part.ToolResponse)
+			default:
+				return nil, fmt.Errorf("unsupported message part type %q", part.Type)
+			}
+		}
+		if role == llms.ChatMessageTypeTool && len(parts) > 1 {
+			for _, part := range parts {
+				messages = append(messages, llms.MessageContent{Role: role, Parts: []llms.ContentPart{part}})
+			}
+			continue
+		}
+		messages = append(messages, llms.MessageContent{Role: role, Parts: parts})
+	}
+	return messages, nil
 }
 
 func returnBadWorkspaceLLM(c *gin.Context, message string) {

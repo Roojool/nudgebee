@@ -198,7 +198,7 @@ test("Global Search - open the search, dismiss it with the close button, verify 
   test.setTimeout(SPEC_TIMEOUT_MS);
   const search = await openGlobalSearch(page);
 
-  const urlBeforeClose = page.url();
+  const pathBeforeClose = new URL(page.url()).pathname;
   await searchFor(search, "Optimize Resolutions");
   await expect(search.searchResultRow("Optimize Resolutions")).toBeVisible();
 
@@ -206,7 +206,8 @@ test("Global Search - open the search, dismiss it with the close button, verify 
 
   await expectPanelClosed(search);
   await test.step("Dismissing is a true cancel — the typed query navigates nowhere", async () => {
-    expect(page.url()).toBe(urlBeforeClose);
+    // Pathname only: the app appends ?accountId= to the page on its own once the account resolves.
+    expect(new URL(page.url()).pathname).toBe(pathBeforeClose);
   });
 
   await test.step("Reopening starts from an empty query, not the dismissed one", async () => {

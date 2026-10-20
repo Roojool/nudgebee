@@ -115,10 +115,7 @@ func (a *deploymentHistoryAction) AutoExecute(ctx PlaybookActionContext) (Playbo
 	}
 
 	// Step 2: Verify by querying events table
-	eventStartTime := time.Now()
-	if ctx.GetEvent().StartedAt != nil {
-		eventStartTime = *ctx.GetEvent().StartedAt
-	}
+	eventStartTime := historyAnchor(ctx.GetEvent(), time.Now())
 
 	deployments, err := queryDeploymentEvents(accountId, rolloutName, namespace, eventStartTime, 5)
 
@@ -179,10 +176,8 @@ func (a *deploymentHistoryAction) Execute(ctx PlaybookActionContext, rawParams m
 	}
 
 	// Get event start time
-	eventStartTime := time.Now()
-	if ctx.GetEvent().StartedAt != nil {
-		eventStartTime = *ctx.GetEvent().StartedAt
-	}
+	alertStart := ctx.GetEvent().AlertStart()
+	eventStartTime := historyAnchor(ctx.GetEvent(), time.Now())
 
 	// Query deployment events
 	deployments, err := queryDeploymentEvents(accountId, rolloutName, namespace, eventStartTime, maxDeployments)
@@ -192,7 +187,7 @@ func (a *deploymentHistoryAction) Execute(ctx PlaybookActionContext, rawParams m
 
 	// Calculate time before event for each deployment
 	for i := range deployments {
-		if ctx.GetEvent().StartedAt != nil {
+		if alertStart != nil {
 			timeBefore := eventStartTime.Sub(deployments[i].Timestamp)
 			deployments[i].TimeBeforeEvent = formatDuration(timeBefore)
 		}
@@ -212,7 +207,7 @@ func (a *deploymentHistoryAction) Execute(ctx PlaybookActionContext, rawParams m
 		return nil, nil
 	}
 	// Generate insights
-	insights := generateDeploymentInsights(deployments, ctx.GetEvent().StartedAt)
+	insights := generateDeploymentInsights(deployments, alertStart)
 
 	// Generate labels for correlation
 	labels := map[string]any{
@@ -237,6 +232,17 @@ func (a *deploymentHistoryAction) Execute(ctx PlaybookActionContext, rawParams m
 	}
 
 	return NewPlaybookActionResponseJsonWithLabels(response, additionalInfo, insights, metadata, labels), nil
+}
+
+// historyAnchor is the upper bound of the history window: the alert's start.
+// Not StartedAt, which the event service sets 10 minutes early to give metric
+// and log queries a lead-in — anchoring on it dropped every change made in the
+// 10 minutes before the alert, which is the deploy most likely to have caused it.
+func historyAnchor(ev PlaybookEvent, now time.Time) time.Time {
+	if t := ev.AlertStart(); t != nil {
+		return *t
+	}
+	return now
 }
 
 // findRolloutNameFromWorkload queries k8s_workloads to find rollout name using service label matching

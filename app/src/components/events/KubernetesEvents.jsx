@@ -18,9 +18,9 @@ import SearchInput from '@ui/SearchInput';
 // DS V2 compositions / format / widgets
 import Datetime from '@shared/format/Datetime';
 import Text from '@shared/format/Text';
-import { Label } from '@ui/Label';
 import TicketLink from '@shared/links/TicketLink';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
+import AlertStatusBadge from '@shared/widgets/AlertStatusBadge';
 import { toast as snackbar } from '@ui/Toast';
 import ScoreDisplay from '@shared/widgets/ScoreDisplay';
 import PriorityPinControl from '@shared/widgets/PriorityPinControl';
@@ -50,7 +50,7 @@ import k8sApi from '@api1/kubernetes';
 import ticketsApi from '@api1/tickets';
 import apiUser from '@api1/user';
 import { getDateString, getLast24Hrs } from '@lib/datetime';
-import { hasWriteAccess, hasPermission, getCurrentTenant } from '@lib/auth';
+import { hasWriteAccess, hasPermission, getCurrentTenant, getUserSession } from '@lib/auth';
 import { safeJSONParse, titleCaseForAggregationKey, syncFilterFromQuery, toSeverityLevel, EXCLUDED_TRIAGE_AGGREGATION_KEYS } from 'src/utils/common';
 import { applyFiltersOnRouter } from '@lib/router';
 import { action } from 'src/utils/actionStyles';
@@ -85,6 +85,16 @@ const KNOWN_SHORTCUT_DURATIONS_MS = new Set([
   24 * 60 * 60 * 1000,
   7 * 24 * 60 * 60 * 1000,
 ]);
+
+const resolveEffectiveRange = (range) => {
+  const shortcut = range?.shortcutClickTime;
+  if (typeof shortcut === 'number' && KNOWN_SHORTCUT_DURATIONS_MS.has(shortcut)) {
+    const now = Date.now();
+    return { startDate: now - shortcut, endDate: now };
+  }
+  return { startDate: range?.startDate, endDate: range?.endDate };
+};
+
 // Distinct line colors for the multi-account trend chart, cycled by account index.
 const TREND_SERIES_COLORS = ['#2f7af0', '#f5b400', '#e5484d', '#16a34a', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
 
@@ -397,10 +407,12 @@ const KubernetesEventsTable = ({
     const endTime = getValidParam(router.query.end_time);
 
     if (startTime && endTime) {
-      return {
-        startDate: parseInt(startTime),
-        endDate: parseInt(endTime),
-      };
+      const urlShortcut = Number(getValidParam(router.query.time_shortcut));
+      if (!isTroubleshootPage && Number.isFinite(urlShortcut) && KNOWN_SHORTCUT_DURATIONS_MS.has(urlShortcut)) {
+        const now = Date.now();
+        return { startDate: now - urlShortcut, endDate: now, shortcutClickTime: urlShortcut };
+      }
+      return { startDate: parseInt(startTime), endDate: parseInt(endTime) };
     } else if (defaultQuery?.startTime && defaultQuery?.endTime) {
       return { startDate: defaultQuery.startTime, endDate: defaultQuery.endTime };
     }
@@ -420,7 +432,7 @@ const KubernetesEventsTable = ({
     ) {
       return { startDate: persisted.startDate, endDate: persisted.endDate };
     }
-    return { startDate: getLast24Hrs().getTime(), endDate: new Date().getTime() };
+    return { startDate: getLast24Hrs().getTime(), endDate: new Date().getTime(), shortcutClickTime: 24 * 60 * 60 * 1000 };
   };
 
   const getInitialAggregationKey = () => {
@@ -594,6 +606,7 @@ const KubernetesEventsTable = ({
   const [isTrendChartLoading, setIsTrendChartLoading] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState({});
   const [isClassifyModalOpen, setIsClassifyModalOpen] = useState(false);
+  const [dateDisplayNonce, setDateDisplayNonce] = useState(0);
 
   // --- Hooks ---
 
@@ -767,6 +780,9 @@ const KubernetesEventsTable = ({
 
   const rawEventsRef = useRef([]);
   const ticketReferenceMapRef = useRef(new Map());
+  // event id -> the display name of whoever manually closed it, prefetched in
+  // listEvents' non-blocking second pass for the current page's Closed rows.
+  const closedByMapRef = useRef(new Map());
   const buildRowDataRef = useRef(null);
   // Sequence guards so a slow, superseded request can't overwrite state set by a
   // later, faster one (e.g. rapid filter changes firing overlapping API calls).
@@ -945,6 +961,9 @@ const KubernetesEventsTable = ({
 
   const getMenuItems = (item, disableTicket) => {
     const canCreateTicket = canCreateTicketFor(item);
+    // Close/Open lives on the Alert Status badge's own dropdown (AlertStatusBadge),
+    // not here — matching how Triage Status exposes its transitions on the badge
+    // rather than in this overflow menu.
     let MENU_ITEMS;
     if (hasWriteAccess(item.account_id)) {
       MENU_ITEMS = [
@@ -1006,6 +1025,32 @@ const KubernetesEventsTable = ({
       if (accountId) params.set('eventCluster', accountId);
       if (data.subject_namespace) params.set('eventNamespace', data.subject_namespace);
       router.push(`/automation/new?${params.toString()}`);
+    }
+  };
+
+  const handleToggleEventStatus = async (eventId, newStatus, details) => {
+    try {
+      await k8sApi.updateEventStatus(eventId, newStatus, details);
+      rawEventsRef.current = rawEventsRef.current.map((e) => (e.id === eventId ? { ...e, status: newStatus } : e));
+      if (newStatus === 'CLOSED') {
+        const closerName = getUserSession()?.user?.name || getUserSession()?.user?.email;
+        if (closerName) {
+          closedByMapRef.current.set(eventId, {
+            name: closerName,
+            reasonCode: details?.reasonCode,
+            reasonText: details?.reasonText,
+            evidenceUrl: details?.evidenceUrl,
+          });
+        }
+      } else {
+        closedByMapRef.current.delete(eventId);
+      }
+      if (buildRowDataRef.current) {
+        setData(buildRowDataRef.current(rawEventsRef.current, ticketReferenceMapRef.current));
+      }
+      snackbar.success(newStatus === 'CLOSED' ? 'Event closed' : 'Event opened');
+    } catch (_error) {
+      snackbar.error(newStatus === 'CLOSED' ? 'Failed to close event' : 'Failed to open event');
     }
   };
 
@@ -1146,15 +1191,16 @@ const KubernetesEventsTable = ({
     if (selectedSource && selectedSource.length > 0) {
       query.source = selectedSource?.map((e) => e.value);
     }
+    const effectiveRange = resolveEffectiveRange(selectedDateRange);
     if (defaultQuery.startDate) {
       query.startDate = new Date(defaultQuery.startDate);
-    } else if (selectedDateRange?.startDate) {
-      query.startDate = new Date(selectedDateRange.startDate);
+    } else if (effectiveRange.startDate) {
+      query.startDate = new Date(effectiveRange.startDate);
     }
     if (defaultQuery.endDate) {
       query.endDate = new Date(defaultQuery.endDate);
-    } else if (selectedDateRange?.endDate) {
-      query.endDate = new Date(selectedDateRange.endDate);
+    } else if (effectiveRange.endDate) {
+      query.endDate = new Date(effectiveRange.endDate);
     }
     if (resource_ids.length) {
       query.resource_ids = resource_ids;
@@ -1393,10 +1439,15 @@ const KubernetesEventsTable = ({
                   alignItems: 'center',
                 }}
               >
-                <Label
-                  margin='0'
-                  text={item.status === 'FIRING' ? 'Open' : item.status === 'CLOSED' ? 'Closed' : item.status}
-                  variant={item.status === 'FIRING' ? 'red' : item.status === 'CLOSED' ? 'grey' : ''}
+                <AlertStatusBadge
+                  eventId={item.id}
+                  status={item.status}
+                  canToggle={hasWriteAccess(item.account_id)}
+                  closedByName={closedByMapRef.current.get(item.id)?.name}
+                  closedReasonCode={closedByMapRef.current.get(item.id)?.reasonCode}
+                  closedReasonText={closedByMapRef.current.get(item.id)?.reasonText}
+                  closedEvidenceUrl={closedByMapRef.current.get(item.id)?.evidenceUrl}
+                  onToggle={handleToggleEventStatus}
                 />
               </Box>
             ),
@@ -1554,6 +1605,7 @@ const KubernetesEventsTable = ({
       const events = res.data?.events || [];
       rawEventsRef.current = events;
       ticketReferenceMapRef.current = new Map();
+      closedByMapRef.current = new Map();
       setData(buildRowData(events, ticketReferenceMapRef.current));
       setLoading(false);
 
@@ -1562,6 +1614,35 @@ const KubernetesEventsTable = ({
         if (item.fingerprint) uniqueReferenceIds.add(item.fingerprint);
       });
       const references = Array.from(uniqueReferenceIds);
+
+      // "Closed by" tooltip / reopen-dropdown data for the current page's Closed
+      // rows — batched in one call and independent of the tickets pass below, so
+      // neither hovering nor opening the badge ever waits on a request (see
+      // AlertStatusBadge).
+      const closedEventIds = events.filter((item) => item.status === 'CLOSED').map((item) => item.id);
+      if (closedEventIds.length) {
+        k8sApi
+          .getEventStatusChanges(closedEventIds)
+          .then((changes) => {
+            if (requestId !== eventsRequestIdRef.current) return;
+            const closedByMap = new Map();
+            (changes || []).forEach((change) => {
+              if (change.event_id && change.changed_by_name) {
+                closedByMap.set(change.event_id, {
+                  name: change.changed_by_name,
+                  reasonCode: change.reason_code,
+                  reasonText: change.reason_text,
+                  evidenceUrl: change.evidence_url,
+                });
+              }
+            });
+            closedByMapRef.current = closedByMap;
+            setData(buildRowData(events, ticketReferenceMapRef.current));
+          })
+          .catch(() => {
+            // Non-critical: the tooltip just falls back to plain "Closed".
+          });
+      }
 
       return ticketsApi.listTicketsSummary({ reference_id: references }).then((ticketRes) => {
         if (requestId !== eventsRequestIdRef.current) return;
@@ -1789,6 +1870,7 @@ const KubernetesEventsTable = ({
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
               {showTimeFilter && !hideScopeFilters && (
                 <CustomDateTimeRangePicker
+                  key={dateDisplayNonce}
                   passedSelectedDateTime={{
                     startTime: selectedDateRange.startDate,
                     endTime: selectedDateRange.endDate,
@@ -1838,7 +1920,10 @@ const KubernetesEventsTable = ({
                 aria-label='Refresh'
                 tooltip='Refresh'
                 id='all-events-refresh'
-                onClick={() => listEvents()}
+                onClick={() => {
+                  setSelectedDateRange((prev) => ({ ...prev, ...resolveEffectiveRange(prev) }));
+                  setDateDisplayNonce((n) => n + 1);
+                }}
                 loading={loading}
               />
             </Box>

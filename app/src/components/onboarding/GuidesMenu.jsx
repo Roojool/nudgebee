@@ -71,7 +71,13 @@ const GuidesMenu = ({ open, onClose }) => {
           groups.map(([module, tours]) => (
             <Box key={module} sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
               <Typography
-                sx={{ fontSize: ds.text.caption, fontWeight: 600, letterSpacing: '0.4px', color: ds.gray[400], textTransform: 'uppercase' }}
+                sx={{
+                  fontSize: ds.text.caption,
+                  fontWeight: ds.weight.semibold,
+                  letterSpacing: '0.4px',
+                  color: ds.gray[400],
+                  textTransform: 'uppercase',
+                }}
               >
                 {module}
               </Typography>
@@ -96,11 +102,13 @@ const GuidesMenu = ({ open, onClose }) => {
                     '&:hover': { borderColor: 'var(--ds-brand-200)', background: ds.background[200] },
                   }}
                 >
-                  <Box sx={{ mt: '2px', flexShrink: 0 }}>
+                  <Box sx={{ mt: ds.space[0], flexShrink: 0 }}>
                     <SafeIcon src={HelpOutlineDarkIcon} alt='' width={16} height={16} />
                   </Box>
                   <Box sx={{ minWidth: 0 }}>
-                    <Typography sx={{ fontSize: ds.text.body, fontWeight: 500, color: ds.gray[700] }}>{brandText(tour.title)}</Typography>
+                    <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.medium, color: ds.gray[700] }}>
+                      {brandText(tour.title)}
+                    </Typography>
                     {tour.description && (
                       <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], lineHeight: 1.4 }}>{brandText(tour.description)}</Typography>
                     )}

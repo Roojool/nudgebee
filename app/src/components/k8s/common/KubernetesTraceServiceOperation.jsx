@@ -5,7 +5,6 @@ import PropTypes from 'prop-types';
 import { formatDurationInTrace } from 'src/utils/common';
 import { Label } from '@ui/Label';
 import { Card } from '@ui/Card';
-import WidgetCard from '@ui/WidgetCard';
 import { Box, Typography } from '@mui/material';
 
 const randomColors = [
@@ -85,7 +84,7 @@ export const KubernetesTraceServiceOperation = ({ accountId, query, traceData, e
   const httpStatusCode = getHttpStatus(query);
 
   return (
-    <WidgetCard>
+    <Card sx={{ mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
       <Card variant='outlined' size='md' header={<Typography sx={{ fontWeight: 'bold' }}>Trace Info</Typography>}>
         <div style={{ display: 'flex', flexDirection: 'row', gap: 'var(--ds-space-7)' }}>
           <div
@@ -173,7 +172,7 @@ export const KubernetesTraceServiceOperation = ({ accountId, query, traceData, e
       <Box sx={{ mt: 'var(--ds-space-3)' }}>
         <TraceGanttChart data={data} loading={loading} randomColors={randomColors} />
       </Box>
-    </WidgetCard>
+    </Card>
   );
 };
 

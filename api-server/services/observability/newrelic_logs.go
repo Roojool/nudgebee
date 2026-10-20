@@ -897,13 +897,14 @@ func (s *NewRelicLogSource) convertToLogGroupOutput(results []map[string]any, ti
 			group.Container = extractStringField(r, "container_name", "container")
 		}
 
-		// Build container_id similar to Prometheus format for compatibility
+		// /k8s/<namespace>/<workload>, the shape Loki, Elasticsearch, Datadog and the other
+		// log-group providers emit. Not Prometheus's /k8s/<namespace>/<pod>/<container>:
+		// the UI reads a four-segment id as that format and trims a pod suffix off the
+		// third segment, which here is already the workload — so cloud-collector-server
+		// was displayed, and drilled down into, as "cloud". The container stays in its
+		// own field.
 		if group.Namespace != "" && group.Workload != "" {
-			if group.Container != "" {
-				group.ContainerID = fmt.Sprintf("/k8s/%s/%s/%s", group.Namespace, group.Workload, group.Container)
-			} else {
-				group.ContainerID = fmt.Sprintf("/k8s/%s/%s", group.Namespace, group.Workload)
-			}
+			group.ContainerID = fmt.Sprintf("/k8s/%s/%s", group.Namespace, group.Workload)
 		}
 
 		// Generate pattern_hash from message for ticket reference linking

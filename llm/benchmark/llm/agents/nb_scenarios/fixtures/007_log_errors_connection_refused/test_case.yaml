@@ -1,0 +1,5 @@
+user_prompt: "check the inventory-api logs in namespace benchmark-scenarios — are there errors, and what are they about?"
+expected_output:
+  - The response must report ERROR log lines saying the service failed to connect to inventory-db:5432 with connection refused, repeating with an increasing attempt counter.
+  - The response must be based on actual log lines (quoting or paraphrasing them), not on pod status alone.
+tags: [kubernetes, logs, scenario, medium]

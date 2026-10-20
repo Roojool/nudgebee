@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"nudgebee/services/internal/database"
+	"nudgebee/services/internal/database/pgbatch"
 	"nudgebee/services/security"
 )
 
@@ -128,7 +129,7 @@ func persistSecretEnvExposures(ctx *security.RequestContext, account ScanAccount
 		})
 	}
 
-	if _, err := tx.NamedExec(
+	if err := pgbatch.NamedExec(tx,
 		`INSERT INTO recommendation
 		   (status, tenant_id, cloud_account_id, recommendation, severity, category, rule_name,
 		    estimated_savings, recommendation_action, resource_id, account_object_id, updated_at,

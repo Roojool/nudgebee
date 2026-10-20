@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"nudgebee/services/account"
 	"nudgebee/services/account/adapter"
 	"nudgebee/services/audit"
@@ -25,11 +27,14 @@ import (
 	"nudgebee/services/relay"
 	"nudgebee/services/security"
 	"nudgebee/services/triage"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/samber/lo"
 	"gopkg.in/yaml.v2"
 )
@@ -1703,33 +1708,107 @@ func assertNoLaterChangeOnSamePaths(ctx *security.RequestContext, change models.
 		ctx.GetLogger().Error("event resolution: could not check for later changes", "error", err, "event_id", change.Id)
 		return common.ErrorBadRequest("event resolution: cannot verify whether a later change touched the same fields; not reverting")
 	}
-	// What the change being reverted left behind at each path. A later change only conflicts if it
-	// moved the field somewhere ELSE: reverting writes this change's `old` back, which is safe
-	// exactly while the live value is still this change's `new`.
-	appliedValues := changedValuesOf(change)
-
-	for _, l := range later {
-		for path, laterValue := range changedValuesOf(l) {
-			if !targeted[path] {
-				continue
-			}
-			// The same change recorded twice is not a later change. Dev has these in quantity —
-			// undo-test-app carries pairs of config-change events sharing a timestamp, a path and
-			// both values — and treating a duplicate record as a conflict would refuse a revert
-			// that is perfectly safe, which is worse than the gap it was meant to close.
-			if applied, ok := appliedValues[path]; ok && sameChangedValue(applied, laterValue) {
-				continue
-			}
-			when := ""
-			if l.StartsAt != nil {
-				when = l.StartsAt.UTC().Format(time.RFC3339)
-			}
-			return common.ErrorBadRequest(fmt.Sprintf(
-				"event resolution: %q was changed again by a later change (%s) — reverting this one would undo that too. Revert the later change first.",
-				path, when))
-		}
+	if reason := laterChangeConflict(change, targeted, later); reason != "" {
+		return common.ErrorBadRequest("event resolution: " + reason)
 	}
 	return nil
+}
+
+// listIndex matches one list position in a recorded path: "env[2]" in
+// "spec.template.spec.containers[0].env[2].value". listItem matches a path naming a whole list item.
+var (
+	listIndex = regexp.MustCompile(`\[(\d+)\]`)
+	listItem  = regexp.MustCompile(`^(.*)\[(\d+)\]$`)
+)
+
+// laterChangeConflict reports why reverting `change` at the targeted paths would be unsafe given
+// the changes recorded after it, or "" when it is safe.
+//
+// Recorded paths address list items by POSITION ("containers[1].env[2]"), and the agent writes a
+// revert at that position. A position only means the same item while nothing was added to or
+// removed from the list ahead of it, so three kinds of later change conflict:
+//   - the same path moved to a different value (reverting would undo that later change);
+//   - a parent or child of the path changed — a whole env entry replaced, or one field inside an
+//     entry the revert rewrites whole;
+//   - an item was added or removed at or before the position in the same list, so the position
+//     now points at a different item and the revert would overwrite the wrong entry.
+//
+// A later record carrying the value this change itself left is the same change recorded twice
+// (dev has these in quantity) and is not a conflict.
+func laterChangeConflict(change models.Event, targeted map[string]bool, later []models.Event) string {
+	// What the change being reverted left behind at each path. Reverting writes this change's
+	// `old` back, which is safe exactly while the live value is still this change's `new`.
+	appliedValues := changedValuesOf(change)
+	for _, l := range later {
+		when := ""
+		if l.StartsAt != nil {
+			when = l.StartsAt.UTC().Format(time.RFC3339)
+		}
+		laterNew := changedValuesOf(l)
+		laterOld := changedOldValuesOf(l)
+		for laterPath, laterValue := range laterNew {
+			if applied, ok := appliedValues[laterPath]; ok && sameChangedValue(applied, laterValue) {
+				continue
+			}
+			for path := range targeted {
+				if laterPath == path || isPathAncestor(laterPath, path) || isPathAncestor(path, laterPath) {
+					return fmt.Sprintf(
+						"%q was changed again by a later change (%s) — reverting this one would undo that too. Revert the later change first.",
+						path, when)
+				}
+				// An add or remove shows as one side of the item absent.
+				if laterValue != nil && laterOld[laterPath] != nil {
+					continue
+				}
+				if shiftsListPosition(laterPath, path) {
+					return fmt.Sprintf(
+						"a later change (%s) added or removed an item in the list %q belongs to, so that position now holds a different item — reverting would write to the wrong entry.",
+						when, path)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// isPathAncestor reports whether `ancestor` names a field or list item that contains `path`.
+func isPathAncestor(ancestor, path string) bool {
+	return strings.HasPrefix(path, ancestor+".") || strings.HasPrefix(path, ancestor+"[")
+}
+
+// shiftsListPosition reports whether adding or removing the list item at `itemPath` ("…env[1]")
+// moves an item `path` addresses by position ("…env[2].value"): same list, at or before it.
+func shiftsListPosition(itemPath, path string) bool {
+	item := listItem.FindStringSubmatch(itemPath)
+	if item == nil {
+		return false
+	}
+	list := item[1]
+	changedAt, _ := strconv.Atoi(item[2])
+	for _, loc := range listIndex.FindAllStringSubmatchIndex(path, -1) {
+		if path[:loc[0]] != list {
+			continue
+		}
+		position, _ := strconv.Atoi(path[loc[2]:loc[3]])
+		return changedAt <= position
+	}
+	return false
+}
+
+// changedOldValuesOf maps each path a change touched to the value it replaced — the other side of
+// changedValuesOf.
+func changedOldValuesOf(e models.Event) map[string]any {
+	values := map[string]any{}
+	for _, entry := range extractRevertPaths(e, false) {
+		change, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if path, _ := change["path"].(string); path != "" {
+			values[path] = change["old"]
+		}
+	}
+	return values
 }
 
 // hasManifestPayload reports whether the request carries a pre-change manifest under its per-kind
@@ -1864,7 +1943,22 @@ func getRevertRecommendationRequest(cr models.Resource, r models.Event, undo boo
 	if len(resourceKeys) != 3 {
 		return map[string]any{}, fmt.Errorf("resolution: service key is not correct")
 	}
+	// An alert can carry one diff block per correlated change (its workload's deploy, a ConfigMap
+	// it reads, an Ingress in front of it). Merging their paths into one request writes every
+	// change's old values — a ConfigMap's `data.*` included — onto the workload. The caller must
+	// name the change it means via change_event_id, whose own event holds exactly one diff.
+	if countDiffEvidences(r) > 1 {
+		return map[string]any{}, common.ErrorBadRequest("event resolution: this event carries several recorded changes; select the change to revert")
+	}
 	kind := resourceKeys[1]
+	// A change to another object the workload uses — a ConfigMap it reads — is filed under the
+	// workload's resource, so it reaches here looking like the workload's own change and passes the
+	// same-resource check. Its paths are that object's (`data.*`); writing them onto the workload is
+	// never what anyone asked for.
+	if other := changedObjectKind(r); other != "" {
+		return map[string]any{}, common.ErrorBadRequest(fmt.Sprintf(
+			"event resolution: this change is to a %s, not to the %s itself, so it cannot be reverted onto the workload", other, kind))
+	}
 	request := map[string]any{
 		"name":      resourceKeys[2],
 		"namespace": r.SubjectNamespace,
@@ -1885,6 +1979,63 @@ func getRevertRecommendationRequest(cr models.Resource, r models.Event, undo boo
 		return map[string]any{}, common.ErrorBadRequest("event resolution: cannot revert, this event has no recorded configuration change to undo")
 	}
 	return request, nil
+}
+
+// revertableWorkloadKinds are the kinds a revert can write to, as recorded in a diff's resource_name
+// ("deployment/<namespace>/<name>.yaml").
+var revertableWorkloadKinds = map[string]bool{"deployment": true, "statefulset": true, "daemonset": true, "rollout": true, "replicaset": true}
+
+// changedObjectKind names the object an event's recorded change was made to when that is not a
+// workload, or returns "". Known from the diff's resource_name, or — for a record without one — from
+// the paths: a change touching only `data`, `binaryData` or `stringData` is a ConfigMap or Secret.
+func changedObjectKind(r models.Event) string {
+	if r.Evidences == nil || !r.Evidences.IsArray() {
+		return ""
+	}
+	for _, item := range r.Evidences.Array() {
+		evidence, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if evidenceType, _ := evidence["type"].(string); evidenceType != "diff" {
+			continue
+		}
+		dataMap, _ := evidence["data"].(map[string]any)
+		if resourceName, _ := dataMap["resource_name"].(string); resourceName != "" {
+			kind := strings.ToLower(strings.SplitN(resourceName, "/", 2)[0])
+			if !revertableWorkloadKinds[kind] {
+				return kind
+			}
+			return ""
+		}
+	}
+	paths := extractRevertPaths(r, false)
+	if len(paths) == 0 {
+		return ""
+	}
+	for _, entry := range paths {
+		change, _ := entry.(map[string]any)
+		path, _ := change["path"].(string)
+		if !strings.HasPrefix(path, "data.") && !strings.HasPrefix(path, "binaryData.") && !strings.HasPrefix(path, "stringData.") {
+			return ""
+		}
+	}
+	return "ConfigMap or Secret"
+}
+
+func countDiffEvidences(r models.Event) int {
+	if r.Evidences == nil || !r.Evidences.IsArray() {
+		return 0
+	}
+	n := 0
+	for _, item := range r.Evidences.Array() {
+		if evidence, ok := item.(map[string]any); ok {
+			if evidenceType, _ := evidence["type"].(string); evidenceType == "diff" {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // extractDiffOldManifest returns the pre-change manifest recorded on the diff
@@ -2505,7 +2656,11 @@ var clusterKeys = []string{"cluster", "k8s_cluster"}
 var endTimeKeys = []string{"end", "ends_at", "ended_at"}
 var startTimeKeys = []string{"start", "starts_at", "started_at"}
 
-func getPlaybookStartEndTime(e Event) (time.Time, time.Time) {
+// getPlaybookStartEndTime returns the playbook's observability window and the
+// alert start it was derived from. The window starts playbookLeadIn before the
+// alert so metric and log queries cover the lead-up; detected is the alert
+// start itself, for enrichers that ask what happened before the alert.
+func getPlaybookStartEndTime(e Event) (start, end, detected time.Time) {
 	var startTime, endTime time.Time
 	if e.StartsAt != nil {
 		startTime = *e.StartsAt
@@ -2544,11 +2699,12 @@ func getPlaybookStartEndTime(e Event) (time.Time, time.Time) {
 	if startTime.IsZero() {
 		startTime = endTime.Add(-time.Hour)
 	}
-	// set start time as -10 minutes
-	startTime = startTime.Add(-10 * time.Minute)
 
-	return startTime.UTC(), endTime.UTC()
+	return startTime.Add(-playbookLeadIn).UTC(), endTime.UTC(), startTime.UTC()
 }
+
+// playbookLeadIn is how far before the alert the playbook window starts.
+const playbookLeadIn = 10 * time.Minute
 
 func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string) (string, error) {
 	start := time.Now().UTC()
@@ -2796,6 +2952,7 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 		// the label it resolves from is both present in the payload and later
 		// rewritten by an enricher.
 		applySubjectFallbacks(&webhookEvent)
+		applyNodeSubjectCorrection(sc, &webhookEvent)
 
 		if webhookEvent.CreatedAt == nil {
 			webhookEvent.CreatedAt = &start
@@ -2916,6 +3073,57 @@ func applySubjectFallbacks(webhookEvent *Event) {
 	}
 }
 
+// applyNodeSubjectCorrection repoints a node-scoped alert at the node it is
+// actually about. Prometheus stamps every series an exporter emits with that
+// exporter's own pod/namespace labels, so alerts like NodeSystemSaturation and
+// NodeCPUHighUsage arrive claiming to be about a node-exporter pod: the
+// investigation then shows that pod's CPU chart, its logs and its events, none
+// of which describe the node whose saturation fired the alert.
+//
+// core.ResolveNodeSubject returns "" unless the alert's rule expression is
+// node-scoped AND the current subject is an exporter, so an alert genuinely
+// about the exporter keeps its subject. It also returns "" when no node name can
+// be resolved, in which case the event is left exactly as it arrived rather than
+// half-rewritten.
+//
+// Runs on the new-event path only. Occurrences that attach to an existing chain
+// keep the subject the chain was opened with.
+func applyNodeSubjectCorrection(sc *security.RequestContext, webhookEvent *Event) {
+	alertName := webhookEvent.AggregationKey
+	if v := webhookEvent.Labels["nb_alert_name"]; v != "" {
+		alertName = v
+	} else if v := webhookEvent.Labels["alertname"]; v != "" {
+		alertName = v
+	}
+
+	nodeName := integrationcore.ResolveNodeSubject(sc, webhookEvent.AccountId, integrationcore.NodeSubjectInput{
+		AlertName:        alertName,
+		SubjectName:      webhookEvent.SubjectName,
+		SubjectType:      webhookEvent.SubjectType,
+		SubjectNamespace: webhookEvent.SubjectNamespace,
+		Labels:           webhookEvent.Labels,
+	})
+	if nodeName == "" {
+		return
+	}
+
+	sc.GetLogger().Info("event: repointed node-scoped alert from exporter to node",
+		"alert", alertName, "from", webhookEvent.SubjectName, "to", nodeName,
+		"account_id", webhookEvent.AccountId)
+
+	webhookEvent.SubjectType = "node"
+	webhookEvent.SubjectName = nodeName
+	webhookEvent.SubjectNode = nodeName
+	// The namespace, owner and service key all described the exporter pod. A node
+	// is cluster-scoped, so leaving them would keep correlating this event with
+	// the monitoring namespace's workloads.
+	webhookEvent.SubjectNamespace = ""
+	webhookEvent.SubjectOwner = ""
+	webhookEvent.SubjectOwnerKind = ""
+	webhookEvent.ServiceKey = ""
+	webhookEvent.CloudResourceId = ""
+}
+
 // runPlaybookEnrichment executes the event's playbook and applies every
 // post-playbook mutation to webhookEvent in place: it appends evidence cards,
 // merges aggregated-alert labels and links the cloud resource.
@@ -2945,7 +3153,7 @@ func runPlaybookEnrichment(sc *security.RequestContext, webhookEvent *Event, eve
 	if webhookEvent.FindingType == "configuration_change" {
 		sc.GetLogger().Info("event: skipping playbook execution for configuration change event", "event_id", eventId, "aggregation_key", webhookEvent.AggregationKey)
 	} else {
-		eventruleStart, eventruleEnd := getPlaybookStartEndTime(*webhookEvent)
+		eventruleStart, eventruleEnd, eventruleDetected := getPlaybookStartEndTime(*webhookEvent)
 
 		// Use the actual alert name for playbook lookup instead of AggregationKey (which is the PagerDuty service name).
 		// nb_alert_name is set during webhook enrichment and contains the correct alert name.
@@ -2967,6 +3175,7 @@ func runPlaybookEnrichment(sc *security.RequestContext, webhookEvent *Event, eve
 			Annotations: map[string]string{},
 			StartedAt:   &eventruleStart,
 			EndedAt:     &eventruleEnd,
+			DetectedAt:  &eventruleDetected,
 			IncidentAt: resolveIncidentAt(sc, webhookEvent.AggregationKey, webhookEvent.AccountId,
 				webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType, webhookEvent.StartsAt),
 			Source:                  webhookEvent.Source,
@@ -3271,7 +3480,7 @@ func RefreshInvestigation(sc *security.RequestContext, eventId string) error {
 		}
 	}
 
-	eventruleStart, eventruleEnd := getPlaybookStartEndTime(Event{
+	eventruleStart, eventruleEnd, eventruleDetected := getPlaybookStartEndTime(Event{
 		StartsAt: event.StartsAt,
 		EndsAt:   event.EndsAt,
 		Labels:   labels,
@@ -3305,6 +3514,7 @@ func RefreshInvestigation(sc *security.RequestContext, eventId string) error {
 		Annotations: map[string]string{},
 		StartedAt:   &eventruleStart,
 		EndedAt:     &eventruleEnd,
+		DetectedAt:  &eventruleDetected,
 		IncidentAt: resolveIncidentAt(sc, *event.AggregationKey, accountId,
 			*event.SubjectName, subjectNamespace, common.StrVal(event.SubjectType), event.StartsAt),
 		Source:           *event.Source,
@@ -4207,6 +4417,300 @@ func UpdateEvent(ctx *security.RequestContext, request models.UpdateEventRequest
 	}
 
 	return r, nil
+}
+
+// manualStatusChangeReasons is the set of statuses the Events three-dot menu's
+// Close/Open toggle accepts, and the event_history change_reason recorded for
+// each so a later GetEventManualStatusChange lookup can tell a manual flip
+// apart from an automated one (ingestion, webhook resolves, the inactive-
+// resource sweep) touching the same status field.
+var manualStatusChangeReasons = map[string]string{
+	string(EventStatusClosed): "manual_close",
+	string(EventStatusFiring): "manual_reopen",
+}
+
+// closeReasonCodes and reopenReasonCodes are the fixed reason vocabularies
+// offered on the Close and Open dropdowns respectively — same reason_code/
+// reason_text shape as event_classification, so a manual status change is
+// reportable by cause rather than only readable as free text.
+var closeReasonCodes = map[string]bool{
+	"already_fixed_externally":   true,
+	"false_alarm":                true,
+	"duplicate_of_another_alert": true,
+	"known_issue_wont_fix":       true,
+	"other":                      true,
+}
+
+var reopenReasonCodes = map[string]bool{
+	"issue_recurred":              true,
+	"closed_by_mistake":           true,
+	"needs_further_investigation": true,
+	"other":                       true,
+}
+
+// UpdateEventStatusRequest manually opens or closes an event's alert status.
+type UpdateEventStatusRequest struct {
+	EventID string `json:"event_id" mapstructure:"event_id"`
+	Status  string `json:"status" mapstructure:"status"`
+	// ReasonCode is required: one of closeReasonCodes when Status is CLOSED, or
+	// reopenReasonCodes when Status is FIRING.
+	ReasonCode string `json:"reason_code" mapstructure:"reason_code"`
+	// ReasonText is free-text elaboration. Required when ReasonCode is "other",
+	// optional otherwise.
+	ReasonText string `json:"reason_text" mapstructure:"reason_text"`
+	// EvidenceUrl is always optional: it's a free-text URL, so requiring it
+	// only proves the caller typed something, not that it's relevant.
+	EvidenceUrl string `json:"evidence_url" mapstructure:"evidence_url"`
+}
+
+type UpdateEventStatusResponse struct {
+	Success    bool   `json:"success"`
+	PrevStatus string `json:"prev_status"`
+	NewStatus  string `json:"new_status"`
+	AccountId  string `json:"account_id"`
+}
+
+// UpdateEventStatus manually opens or closes an event (Troubleshoot > Events >
+// three-dot menu > Close/Open). Unlike UpdateEvent, it writes status directly
+// rather than round-tripping through InsertEvent: InsertEvent re-persists the
+// full event content and is meant for metadata edits, while a status-only
+// change here mirrors CloseEventsForInactiveResources's direct UPDATE +
+// event_history audit row so a manual change is indistinguishable in the
+// timeline from any other status change.
+func UpdateEventStatus(ctx *security.RequestContext, request UpdateEventStatusRequest, userID string) (*UpdateEventStatusResponse, error) {
+	changeReason, ok := manualStatusChangeReasons[request.Status]
+	if !ok {
+		return nil, fmt.Errorf("unsupported status: %s (only %s and %s are supported)", request.Status, EventStatusClosed, EventStatusFiring)
+	}
+
+	reasonCodes := closeReasonCodes
+	if request.Status == string(EventStatusFiring) {
+		reasonCodes = reopenReasonCodes
+	}
+	if !reasonCodes[request.ReasonCode] {
+		return nil, fmt.Errorf("invalid reason_code: %s", request.ReasonCode)
+	}
+	if request.ReasonCode == "other" && strings.TrimSpace(request.ReasonText) == "" {
+		return nil, fmt.Errorf("reason_text is required when reason_code is 'other'")
+	}
+	if utf8.RuneCountInString(request.ReasonText) > 500 {
+		return nil, fmt.Errorf("reason_text must not exceed 500 characters")
+	}
+	// The frontend already enforces this, but this RPC action is a public write
+	// boundary any client can call directly, bypassing that check.
+	if evidenceURL := strings.TrimSpace(request.EvidenceUrl); evidenceURL != "" {
+		if len(evidenceURL) > 2048 {
+			return nil, fmt.Errorf("evidence_url must not exceed 2048 characters")
+		}
+		parsed, parseErr := url.Parse(evidenceURL)
+		if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return nil, fmt.Errorf("evidence_url must be a valid http or https URL")
+		}
+	}
+
+	r, err := GetEvent(ctx, request.EventID)
+	if err != nil {
+		ctx.GetLogger().Error("services.UpdateEventStatus error getting event", "error", err)
+		return nil, err
+	}
+	if r.CloudAccountId == nil || *r.CloudAccountId == "" {
+		return nil, fmt.Errorf("event %s has no account association", request.EventID)
+	}
+	if !ctx.GetSecurityContext().HasAccountAccess(*r.CloudAccountId, security.SecurityAccessTypeUpdate) {
+		return nil, common.ErrorUnauthorized("access denied for account: " + *r.CloudAccountId)
+	}
+
+	prevStatus := common.StrVal(r.Status)
+	if prevStatus == request.Status {
+		return &UpdateEventStatusResponse{Success: true, PrevStatus: prevStatus, NewStatus: request.Status, AccountId: *r.CloudAccountId}, nil
+	}
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to get db manager: %w", err)
+	}
+
+	var endsAt sql.NullTime
+	if request.Status == string(EventStatusClosed) {
+		endsAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+	}
+
+	_, err = dbms.Db.ExecContext(ctx.GetContext(),
+		`UPDATE events SET status = $1, ends_at = $2, updated_at = now() AT TIME ZONE 'utc' WHERE id = $3 AND status <> $1`,
+		request.Status, endsAt, request.EventID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to update event status: %w", err)
+	}
+
+	logger := ctx.GetLogger()
+	tenant := common.StrVal(r.Tenant)
+	accountId := *r.CloudAccountId
+
+	// metadata carries the user-facing "why" alongside the fixed change_reason
+	// marker: change_reason must stay exactly "manual_close"/"manual_reopen" for
+	// GetEventManualStatusChanges' exact-match lookup below to keep working.
+	metadata := map[string]any{"reason_code": request.ReasonCode}
+	if reasonText := strings.TrimSpace(request.ReasonText); reasonText != "" {
+		metadata["reason_text"] = reasonText
+	}
+	if evidenceUrl := strings.TrimSpace(request.EvidenceUrl); evidenceUrl != "" {
+		metadata["evidence_url"] = evidenceUrl
+	}
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to marshal status-change metadata: %w", err)
+	}
+
+	// Detach from the request context: this fire-and-forget write outlives the HTTP
+	// request, and the request ctx is cancelled the moment the handler returns its
+	// response (see the equivalent comment on triage.UpdateNBStatus).
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if histErr := insertEventStatusHistory(bgCtx, dbms.Db, request.EventID, tenant, accountId, prevStatus, request.Status, changeReason, userID, metadataJSON); histErr != nil {
+			logger.Error("event: failed to record manual status-change history", "error", histErr, "event_id", request.EventID)
+		}
+	}()
+
+	return &UpdateEventStatusResponse{Success: true, PrevStatus: prevStatus, NewStatus: request.Status, AccountId: accountId}, nil
+}
+
+// EventManualStatusChange is the most recent manual open/close of an event,
+// surfaced as the "Closed by <user>" tooltip on the Alert Status badge.
+type EventManualStatusChange struct {
+	EventID       string    `json:"event_id"`
+	ChangedByName string    `json:"changed_by_name"`
+	Status        string    `json:"status"`
+	ChangedAt     time.Time `json:"changed_at"`
+	ReasonCode    string    `json:"reason_code"`
+	ReasonText    string    `json:"reason_text"`
+	EvidenceUrl   string    `json:"evidence_url"`
+}
+
+// GetEventManualStatusChanges batch-looks-up the most recent status-field
+// entry in event_history for each of eventIDs, resolving the acting user's
+// display name in the same query so the Events table can prefetch tooltip
+// data for every currently-rendered "Closed" row in one round trip (instead
+// of a per-row fetch-on-hover, which meant two sequential dependent requests
+// — status lookup, then user lookup — before the tooltip could show anything).
+// An event is included in the result only if its latest status-history row is
+// a manual close (change_reason "manual_close", new_value "CLOSED"); an event
+// whose current status came from ingestion, a webhook resolve, the inactive-
+// resource sweep, or was never touched is simply absent from the result.
+//
+// Deliberately CLOSED-only, not "any manual change": callers only ever ask
+// about events currently showing as CLOSED, but ingestion and webhook resolves
+// write no history row on their own status flips, so the latest row can be a
+// stale manual_reopen even though the event has since been closed again by
+// one of those untracked paths (reopen, then an unrelated webhook resolves it
+// again) — attributing that close to the old reopener would be wrong. Pinning
+// the check to the "CLOSED" value, not just "some manual reason", is what
+// rules that out. Taking only the LATEST row (not the latest CLOSED one) is
+// what keeps this correct across repeated toggles: close, reopen, close again
+// correctly attributes to the third close, not the first.
+func GetEventManualStatusChanges(ctx *security.RequestContext, eventIDs []string) ([]EventManualStatusChange, error) {
+	if len(eventIDs) == 0 {
+		return nil, nil
+	}
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to get db manager: %w", err)
+	}
+
+	var rows []struct {
+		EventID        string         `db:"event_id"`
+		CloudAccountId string         `db:"cloud_account_id"`
+		ChangedBy      sql.NullString `db:"changed_by"`
+		ChangedByName  sql.NullString `db:"changed_by_name"`
+		NewValue       []byte         `db:"new_value"`
+		ChangeReason   string         `db:"change_reason"`
+		ChangedAt      time.Time      `db:"changed_at"`
+		Metadata       []byte         `db:"metadata"`
+	}
+	err = dbms.Db.SelectContext(ctx.GetContext(), &rows,
+		`SELECT DISTINCT ON (eh.event_id)
+			eh.event_id, eh.cloud_account_id, eh.changed_by, eh.new_value, eh.change_reason, eh.changed_at,
+			COALESCE(eh.metadata, '{}'::jsonb) AS metadata,
+			COALESCE(u.display_name, u.username) AS changed_by_name
+		 FROM event_history eh
+		 LEFT JOIN users u ON u.id = eh.changed_by
+		 WHERE eh.event_id = ANY($1) AND eh.change_type = 'status'
+		 ORDER BY eh.event_id, eh.changed_at DESC`,
+		pq.Array(eventIDs),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to look up status history for %d events: %w", len(eventIDs), err)
+	}
+
+	results := make([]EventManualStatusChange, 0, len(rows))
+	for _, row := range rows {
+		// Callers pass event ids from their own already-authorized events_list
+		// fetch, but nothing stops a direct RPC call naming an id from an
+		// account the caller can't see — event_history carries no row-level
+		// scoping of its own, so this is the only check standing between an
+		// arbitrary event id and another account's "who closed this" data.
+		if !ctx.GetSecurityContext().HasAccountAccess(row.CloudAccountId, security.SecurityAccessTypeRead) {
+			continue
+		}
+		status := stringFromJSON(row.NewValue)
+		if !row.ChangedBy.Valid || status != string(EventStatusClosed) || row.ChangeReason != manualStatusChangeReasons[string(EventStatusClosed)] {
+			continue
+		}
+		var meta struct {
+			ReasonCode  string `json:"reason_code"`
+			ReasonText  string `json:"reason_text"`
+			EvidenceUrl string `json:"evidence_url"`
+		}
+		_ = json.Unmarshal(row.Metadata, &meta) // pre-feature rows have no metadata; leave fields empty
+		results = append(results, EventManualStatusChange{
+			EventID:       row.EventID,
+			ChangedByName: row.ChangedByName.String,
+			Status:        status,
+			ChangedAt:     row.ChangedAt,
+			ReasonCode:    meta.ReasonCode,
+			ReasonText:    meta.ReasonText,
+			EvidenceUrl:   meta.EvidenceUrl,
+		})
+	}
+	return results, nil
+}
+
+// insertEventStatusHistory records a manual status transition. Unlike
+// InsertEventHistory, it always writes a fresh row with a random id rather
+// than one derived from (event, change_type, old, new): the Close/Open toggle
+// legitimately repeats the same old->new pair (close, reopen, close again),
+// and InsertEventHistory's fingerprint-derived id would collide on the
+// second occurrence, silently dropping it via its ON CONFLICT DO NOTHING
+// dedup. triage.logStatusChangeToHistory (nb_status, equally repeatable)
+// uses the same random-id approach for the same reason.
+func insertEventStatusHistory(ctx context.Context, db DBExecutor, eventID, tenantID, cloudAccountID, oldStatus, newStatus, changeReason, changedBy string, metadata []byte) error {
+	oldJSON, err := json.Marshal(oldStatus)
+	if err != nil {
+		return err
+	}
+	newJSON, err := json.Marshal(newStatus)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO event_history (id, event_id, tenant_id, cloud_account_id, change_type, old_value, new_value, change_reason, changed_by, metadata)
+		 VALUES ($1, $2, $3, $4, 'status', $5, $6, $7, $8, $9)`,
+		uuid.New().String(), eventID, tenantID, cloudAccountID, oldJSON, newJSON, changeReason,
+		sql.NullString{String: changedBy, Valid: changedBy != ""}, metadata,
+	)
+	return err
+}
+
+// stringFromJSON unmarshals a jsonb column known to hold a plain JSON string
+// (as insertEventStatusHistory writes it), returning "" for anything else.
+func stringFromJSON(raw []byte) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
 }
 
 // evidenceSourceWorkflowKey is the additional_info field carrying the automation

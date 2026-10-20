@@ -252,6 +252,12 @@ func (s *GCPSource) createComputeInstanceEdges(nodes []*core.DbNode, lookup *sou
 // extractComputePropertiesFromLabels extracts compute-related properties from GCP labels
 // This is useful for resources without metadata (type=compute-engine from billing)
 // that have labels like system:compute.googleapis.com/machine_spec
+// extractComputeLabels reads the compute properties the collector reports
+// through labels rather than metadata.
+func (s *GCPSource) extractComputeLabels(properties map[string]interface{}, labels map[string]interface{}) {
+	extractComputePropertiesFromLabels(properties, labels)
+}
+
 func extractComputePropertiesFromLabels(properties map[string]interface{}, labels map[string]interface{}) {
 	// Extract machine spec from billing/system labels
 	if machineSpec := extractGCPLabelValue(labels, "system:compute.googleapis.com/machine_spec"); machineSpec != "" {
@@ -284,4 +290,19 @@ func extractComputePropertiesFromLabels(properties map[string]interface{}, label
 	if gkeNode := extractGCPLabelValue(labels, "goog-gke-node"); gkeNode != "" {
 		properties["is_gke_node"] = true
 	}
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	computeEngineRows := resourceKind{
+		Service:      "Compute Engine",
+		NodeType:     core.NodeTypeComputeInstance,
+		SpecificType: "GCEInstance",
+		Subtype:      "ComputeEngine",
+		Extract:      (*GCPSource).extractGCPComputeMetadata,
+		Labels:       (*GCPSource).extractComputeLabels,
+	}
+	registerKind(computeEngineRows)
+	registerKind(computeEngineRows.withTypes("compute-engine", "compute.googleapis.com/instance"))
 }

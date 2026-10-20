@@ -1509,7 +1509,7 @@ func TestBuildLokiQuery(t *testing.T) {
 // query yields the correct — and Loki-parseable — LogQL.
 func TestCanonicalToLokiQuery(t *testing.T) {
 	s := &LokiSource{}
-	mapping := s.GetLabelMapping() // canonical → loki: {"content": "log"}
+	mapping := s.GetLabelMapping() // canonical → loki: {"content"|"message" → "log"}
 
 	bin := func(m map[string]map[query.BinaryWhereClauseType]interface{}) query.QueryWhereClause {
 		return query.QueryWhereClause{Binary: m}
@@ -1528,6 +1528,20 @@ func TestCanonicalToLokiQuery(t *testing.T) {
 				"app":       {query.Eq: "relay-server"},
 				"namespace": {query.Eq: "nudgebee"},
 				"content":   {query.ILike: "%error%"},
+			}),
+			expected: `{app="relay-server", namespace="nudgebee"} |~ "^(?i).*error.*$"`,
+		},
+		{
+			// `message` is the canonical spelling every producer converges on (#39573).
+			// Unmapped it renders as `{message=~"..."}` — a stream-label matcher that
+			// matches nothing and returns HTTP 200, the same silent-empty failure
+			// `_body` had. It must produce the identical line filter.
+			name:     "message resolves to the same line filter as content",
+			question: "errors in app relay-server in namespace nudgebee",
+			canonical: bin(map[string]map[query.BinaryWhereClauseType]interface{}{
+				"app":       {query.Eq: "relay-server"},
+				"namespace": {query.Eq: "nudgebee"},
+				"message":   {query.ILike: "%error%"},
 			}),
 			expected: `{app="relay-server", namespace="nudgebee"} |~ "^(?i).*error.*$"`,
 		},

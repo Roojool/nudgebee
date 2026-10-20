@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -44,6 +45,10 @@ const (
 	ElasticsearchMetricsIndex   = "metrics_index"
 	ElasticsearchTraceIndex     = "trace_index"
 	ElasticsearchTLSSkipVerify  = "es_tls_skip_verify"
+	// ElasticsearchTraceSchema declares which of the three mutually incompatible
+	// trace layouts the cluster stores, so the reader is chosen from config rather
+	// than guessed from the index name. See es_trace_schema.go.
+	ElasticsearchTraceSchema = "trace_schema"
 	// ElasticsearchIndexAccountMapping is the "Advanced Settings" config value: a
 	// JSON array of per-account index overrides. When a bound account has an entry,
 	// its index wins over the top-level log_index / metrics_index / trace_index.
@@ -53,17 +58,24 @@ const (
 // esIndexOverride is one per-account row of the index_account_mapping blob.
 // Empty fields fall back to the integration's top-level index.
 type esIndexOverride struct {
-	AccountId    string `json:"account_id"`
-	LogIndex     string `json:"log_index"`
+	AccountId string `json:"account_id"`
+	LogIndex  string `json:"log_index"`
+	// TraceSchema is the declared trace layout for this account's trace index. It
+	// travels with TraceIndex because the layout is a property of what that index
+	// holds, so overriding one without the other would read the wrong schema.
+	TraceSchema  string `json:"trace_schema"`
 	MetricsIndex string `json:"metrics_index"`
 	TraceIndex   string `json:"trace_index"`
 }
 
-// resolveESIndexOverride returns the per-account index for the given indexType
-// ("logs" | "metrics" | "traces") from the index_account_mapping JSON blob, or ""
-// when the blob is empty/malformed or has no (matching, non-empty) entry for the
-// account. Tolerant by design: a bad blob must never break query resolution — the
-// caller falls back to the top-level index on "".
+// resolveESIndexOverride returns the per-account value for the given field
+// ("logs" | "metrics" | "traces" | "trace_schema") from the index_account_mapping
+// JSON blob, or "" when the blob is empty/malformed or has no (matching, non-empty)
+// entry for the account. Tolerant by design: a bad blob must never break query
+// resolution — the caller falls back to the top-level value on "".
+//
+// "trace_schema" is not an index; it rides in the same blob because the layout is a
+// property of the account's trace index and the two must be overridden together.
 func resolveESIndexOverride(mappingJSON, accountId, indexType string) string {
 	mappingJSON = strings.TrimSpace(mappingJSON)
 	if mappingJSON == "" || accountId == "" {
@@ -84,6 +96,8 @@ func resolveESIndexOverride(mappingJSON, accountId, indexType string) string {
 			return strings.TrimSpace(r.MetricsIndex)
 		case "traces":
 			return strings.TrimSpace(r.TraceIndex)
+		case "trace_schema":
+			return strings.TrimSpace(r.TraceSchema)
 		}
 	}
 	return ""
@@ -103,7 +117,13 @@ type ElasticsearchConfig struct {
 	LogIndex       string // index pattern for log queries; empty means the caller must supply one
 	MetricsIndex   string // index pattern for utilisation queries; defaults to "*"
 	TraceIndex     string // index pattern for trace queries; defaults to esTraceIndex
-	TLSSkipVerify  bool   // user-configured opt-in for self-signed certs
+	// TraceSchema is the declared trace layout for this cluster. Empty means the
+	// integration predates the property; resolveESTraceSchema then falls back to
+	// ESTraceSchemaDataPrepper, the historical default. Never inferred from the
+	// index name — that guess is what this property replaced.
+	TraceSchema   ESTraceSchema
+	TLSSkipVerify bool   // user-configured opt-in for self-signed certs
+	IntegrationID string // the integration this config was read from; empty when built from raw values
 }
 
 // BuildElasticsearchConfigFromValues maps already-decrypted config values into an
@@ -140,6 +160,8 @@ func BuildElasticsearchConfigFromValues(values []core.IntegrationConfigValue) *E
 			cfg.MetricsIndex = c.Value
 		case ElasticsearchTraceIndex:
 			cfg.TraceIndex = c.Value
+		case ElasticsearchTraceSchema:
+			cfg.TraceSchema = ESTraceSchema(strings.TrimSpace(c.Value))
 		case ElasticsearchTLSSkipVerify:
 			cfg.TLSSkipVerify = strings.EqualFold(strings.TrimSpace(c.Value), "true")
 		}
@@ -175,6 +197,10 @@ func validateESConfig(cfg *ElasticsearchConfig) error {
 	return nil
 }
 
+// ErrNoElasticsearchIntegration means the account has no user-configured
+// Elasticsearch integration — a normal state for callers that probe every account.
+var ErrNoElasticsearchIntegration = errors.New("no elasticsearch integrations found")
+
 func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*ElasticsearchConfig, error) {
 	integrationDto, err := core.ListIntegrationConfigs(ctx, accountId, "ES")
 	if err != nil {
@@ -190,7 +216,7 @@ func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*El
 		}
 	}
 	if len(userIntegrations) == 0 {
-		return nil, errors.New("no elasticsearch integrations found")
+		return nil, ErrNoElasticsearchIntegration
 	}
 
 	integration := userIntegrations[0]
@@ -215,6 +241,7 @@ func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*El
 	}
 
 	cfg := BuildElasticsearchConfigFromValues(values)
+	cfg.IntegrationID = integration.Id
 
 	// Advanced Settings: a per-account index override wins over the top-level
 	// log_index / metrics_index / trace_index for this account. These become the
@@ -227,6 +254,13 @@ func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*El
 	}
 	if override := resolveESIndexOverride(indexAccountMapping, accountId, "traces"); override != "" {
 		cfg.TraceIndex = override
+	}
+	// The trace schema overrides independently of the index: an account may share the
+	// integration's index pattern but be the only one whose cluster writes a different
+	// layout. An unrecognised value is ignored rather than trusted — same fail-open
+	// contract as the index fields above.
+	if override := ESTraceSchema(resolveESIndexOverride(indexAccountMapping, accountId, "trace_schema")); override.Valid() {
+		cfg.TraceSchema = override
 	}
 
 	if err := validateESConfig(cfg); err != nil {
@@ -321,12 +355,18 @@ var esSkipVerifyClient = func() *http.Client {
 
 // esRequest executes an HTTP request to OpenSearch with the configured auth method.
 func esRequest(method, rawURL, body string, cfg *ElasticsearchConfig) (*http.Response, error) {
+	return esRequestCtx(context.Background(), method, rawURL, body, cfg)
+}
+
+// esRequestCtx is esRequest bound to ctx, so a caller that is itself cancellable (a
+// knowledge-graph build) stops waiting on Elasticsearch when it is cancelled.
+func esRequestCtx(ctx context.Context, method, rawURL, body string, cfg *ElasticsearchConfig) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != "" {
 		bodyReader = strings.NewReader(body)
 	}
 
-	req, err := http.NewRequest(method, rawURL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -389,7 +429,96 @@ func readResponse(resp *http.Response, operation string) ([]byte, error) {
 		return nil, fmt.Errorf("%s failed with status %d: %s", operation, resp.StatusCode, string(bodyBytes))
 	}
 
+	if err := esRemoteClusterFailure(bodyBytes); err != nil {
+		return nil, fmt.Errorf("%s: %w", operation, err)
+	}
+
 	return bodyBytes, nil
+}
+
+// esRemoteClusterFailure returns an error when a search against a remote-cluster index
+// (`cluster:index`) matched nothing because the remote side failed.
+//
+// Elasticsearch does not fail such a search. A remote defaults to skip_unavailable, so
+// when every shard on it rejects the query — a malformed date, an unknown field type —
+// the response is HTTP 200 with the cluster marked skipped and zero hits. Measured on
+// 8.19 with a self-registered remote: the same bad-date query is a 400 against the local
+// index and a 200 with 0 hits against `remote:index`. Read as data, that is "no
+// documents", which is how an agent concluded an index held no RDS metrics.
+//
+// Only the zero-hit case is an error: with hits present some clusters answered, and the
+// caller has real (partial) data. Non-search responses (no `hits` block) are left alone. Responses without a `_clusters` block — every
+// non-cross-cluster request — are skipped without a full decode.
+func esRemoteClusterFailure(body []byte) error {
+	if !bytes.Contains(body, []byte(`"_clusters"`)) {
+		return nil
+	}
+	var r struct {
+		Clusters struct {
+			Skipped int `json:"skipped"`
+			Failed  int `json:"failed"`
+			Details map[string]struct {
+				Status   string `json:"status"`
+				Failures []struct {
+					Reason json.RawMessage `json:"reason"`
+				} `json:"failures"`
+			} `json:"details"`
+		} `json:"_clusters"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil
+	}
+	// Only a search result that reports exactly zero hits is judged. Responses with no
+	// hit count at all (field capabilities, listings) carry their data elsewhere, and a
+	// partial skip there still returned real content from the clusters that answered.
+	if r.Clusters.Skipped+r.Clusters.Failed == 0 || esHitsTotal(string(body)) != 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(r.Clusters.Details))
+	for name := range r.Clusters.Details {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var reasons []string
+	for _, name := range names {
+		d := r.Clusters.Details[name]
+		if d.Status != "skipped" && d.Status != "failed" {
+			continue
+		}
+		reason := "no reason given"
+		if len(d.Failures) > 0 {
+			reason = esFailureReason(d.Failures[0].Reason)
+		}
+		reasons = append(reasons, fmt.Sprintf("%s (%s): %s", name, d.Status, reason))
+	}
+	if len(reasons) == 0 {
+		return fmt.Errorf("remote cluster search did not run, so 0 hits is not an answer (skipped: %d, failed: %d)", r.Clusters.Skipped, r.Clusters.Failed)
+	}
+	return fmt.Errorf("remote cluster search did not run, so 0 hits is not an answer — %s", strings.Join(reasons, "; "))
+}
+
+// esFailureReason digs the innermost human-readable reason out of an Elasticsearch
+// failure object, which nests the real cause (the parse error) under generic wrappers
+// ("all shards failed").
+func esFailureReason(raw json.RawMessage) string {
+	var reason struct {
+		Type         string `json:"type"`
+		Reason       string `json:"reason"`
+		FailedShards []struct {
+			Reason json.RawMessage `json:"reason"`
+		} `json:"failed_shards"`
+	}
+	if err := json.Unmarshal(raw, &reason); err != nil {
+		return string(raw)
+	}
+	if len(reason.FailedShards) > 0 {
+		return esFailureReason(reason.FailedShards[0].Reason)
+	}
+	if reason.Reason == "" {
+		return string(raw)
+	}
+	return reason.Reason
 }
 
 func (e *ElasticSaasSource) GetLabelMapping() map[string]string {
@@ -502,6 +631,30 @@ func parseESSearchLogs(rawJSON string) ([]OutputLog, error) {
 			output = append(output, log)
 		}
 	}
+
+	// An empty log result carries no error, so the two very different causes —
+	// "the query matched nothing" and "the query matched but every hit was an
+	// unrecognised shape" — look identical at the UI. Separate them here:
+	// matched is the cluster's own hit count, returned is what came back under
+	// `size`, and parsed is what survived ParseSourceMap.
+	matched := esHitsTotal(rawJSON)
+	returned := len(searchResp.Hits.Hits)
+	switch {
+	case returned == 0:
+		slog.Info("ES log query: matched no documents",
+			"matched", matched, "returned", 0,
+			"hint", "index pattern or @timestamp window excludes everything; labels/label-values do not apply a time bound, which is why they still return data")
+	case len(output) == 0:
+		slog.Warn("ES log query: all hits dropped as unparseable",
+			"matched", matched, "returned", returned, "parsed", 0,
+			"sample_source_fields", esSourceFieldNames(searchResp.Hits.Hits[0].Source),
+			"hint", "ParseSourceMap needs a message at log|body|body.text|message and an @timestamp")
+	default:
+		slog.Info("ES log query: parsed hits",
+			"matched", matched, "returned", returned, "parsed", len(output),
+			"dropped", returned-len(output))
+	}
+
 	return output, nil
 }
 
@@ -635,7 +788,6 @@ func (e *ElasticSaasSource) QueryLogs(ctx *security.RequestContext, fetchLogRequ
 	default:
 		return nil, fmt.Errorf("unsupported query_type: %v", queryType)
 	}
-
 }
 
 // esHitsTotal best-effort reads hits.total from a raw _search response for
@@ -829,6 +981,10 @@ func (e *ElasticSaasSource) QueryIndexFields(ctx *security.RequestContext, fetch
 			"hint", "set log_index on the ES integration (or a per-account entry under Advanced Settings → index mapping)")
 	}
 
+	if esIndexIsRemote(index) {
+		return esFetchFieldCaps(cfg, index)
+	}
+
 	resp, err := esRequest("GET", fmt.Sprintf("%s/%s/_mapping", cfg.Url, index), "", cfg) //nolint:bodyclose
 	if err != nil {
 		return nil, fmt.Errorf("failed to query elasticsearch mapping: %w", err)
@@ -840,6 +996,87 @@ func (e *ElasticSaasSource) QueryIndexFields(ctx *security.RequestContext, fetch
 	}
 
 	return parseESMappingFields(bodyBytes)
+}
+
+// esIndexIsRemote reports whether an index expression names a remote cluster
+// (`cluster:index`, or any comma-separated part of one).
+//
+// `_mapping` does not do cross-cluster calls. Measured on 8.19: a concrete
+// `remote:index` is a 400 ("Cross-cluster calls are not supported in this context"), and
+// a wildcard `remote:index-*` is `{}` with HTTP 200 — an empty field list that looks
+// like success. `_field_caps` is the field-listing API that does cross clusters, so
+// remote expressions go there. Local ones stay on `_mapping`: its output is what every
+// caller and test was built against, and OpenSearch shares this path.
+func esIndexIsRemote(index string) bool {
+	for _, part := range strings.Split(index, ",") {
+		if strings.Contains(strings.TrimPrefix(strings.TrimSpace(part), "-"), ":") {
+			return true
+		}
+	}
+	return false
+}
+
+// esFetchFieldCaps lists an index expression's fields through `_field_caps`, in the same
+// shape parseESMappingFields produces: one entry per leaf field, including multi-fields
+// such as `<field>.keyword`, with a flat {"type": "<es type>"} attribute.
+//
+// Object/nested containers and metadata fields (`_id`, `_index`, …) are dropped, as
+// they are from a `_mapping` walk. A field mapped with different types across indices
+// takes the first type in sorted order, so repeated calls agree.
+func esFetchFieldCaps(cfg *ElasticsearchConfig, index string) ([]OutputLogLabelFields, error) {
+	resp, err := esRequest("GET", fmt.Sprintf("%s/%s/_field_caps?fields=*", cfg.Url, index), "", cfg) //nolint:bodyclose
+	if err != nil {
+		return nil, fmt.Errorf("failed to query elasticsearch field capabilities: %w", err)
+	}
+	bodyBytes, err := readResponse(resp, "elasticsearch field capabilities query")
+	if err != nil {
+		return nil, err
+	}
+	return parseESFieldCaps(bodyBytes)
+}
+
+// parseESFieldCaps is the network-free half of esFetchFieldCaps.
+func parseESFieldCaps(bodyBytes []byte) ([]OutputLogLabelFields, error) {
+	var caps struct {
+		Fields map[string]map[string]struct {
+			Type          string `json:"type"`
+			MetadataField bool   `json:"metadata_field"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(bodyBytes, &caps); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal field capabilities response: %w", err)
+	}
+
+	output := make([]OutputLogLabelFields, 0, len(caps.Fields))
+	for name, byType := range caps.Fields {
+		types := make([]string, 0, len(byType))
+		metadata := false
+		for t, detail := range byType {
+			if detail.MetadataField {
+				metadata = true
+			}
+			// Metadata fields report their own name as the type (`_id`, `_index`), which
+			// also covers clusters that omit the metadata_field flag.
+			if t == "object" || t == "nested" || t == "unmapped" || strings.HasPrefix(t, "_") {
+				continue
+			}
+			types = append(types, t)
+		}
+		if metadata || len(types) == 0 {
+			continue
+		}
+		sort.Strings(types)
+		output = append(output, OutputLogLabelFields{
+			Field:      name,
+			Attributes: map[string]any{"type": types[0]},
+		})
+	}
+	if len(output) == 0 {
+		return nil, nil
+	}
+
+	sort.Slice(output, func(i, j int) bool { return output[i].Field < output[j].Field })
+	return output, nil
 }
 
 // parseESMappingFields flattens an ES _mapping response into the field list

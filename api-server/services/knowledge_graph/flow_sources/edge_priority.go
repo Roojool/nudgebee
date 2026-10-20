@@ -12,21 +12,22 @@ type EdgeSourcePriority int
 // the core/helpers.go table; this one only stamps the source_priority property
 // on edges via BaseFlowSource.CreateEdge. Both must stay in sync until merged.
 const (
-	EdgePriority1 EdgeSourcePriority = 1 // Highest priority (k8s)
-	EdgePriority2 EdgeSourcePriority = 2 // manual (user-declared dependencies)
-	EdgePriority3 EdgeSourcePriority = 3 // aws
-	EdgePriority4 EdgeSourcePriority = 4 // ebpf
-	EdgePriority5 EdgeSourcePriority = 5 // traces
-	EdgePriority6 EdgeSourcePriority = 6 // datadog-apm
-	EdgePriority7 EdgeSourcePriority = 7 // newrelic-apm
-	EdgePriority8 EdgeSourcePriority = 8 // aws-vpc-flow (VPC Flow Logs — coarsest network observation: no L7, no latency, IP-derived)
-	EdgePriority9 EdgeSourcePriority = 9 // Lowest priority (unknown sources)
+	EdgePriority1  EdgeSourcePriority = 1  // Highest priority (k8s)
+	EdgePriority2  EdgeSourcePriority = 2  // manual (user-declared dependencies)
+	EdgePriority3  EdgeSourcePriority = 3  // aws
+	EdgePriority4  EdgeSourcePriority = 4  // ebpf
+	EdgePriority5  EdgeSourcePriority = 5  // traces
+	EdgePriority6  EdgeSourcePriority = 6  // datadog-apm
+	EdgePriority7  EdgeSourcePriority = 7  // newrelic-apm
+	EdgePriority8  EdgeSourcePriority = 8  // elastic-apm
+	EdgePriority9  EdgeSourcePriority = 9  // aws-vpc-flow (VPC Flow Logs — coarsest network observation: no L7, no latency, IP-derived)
+	EdgePriority10 EdgeSourcePriority = 10 // Lowest priority (unknown sources)
 )
 
 // Aliases for readability
 const (
 	EdgePriorityHighest = EdgePriority1
-	EdgePriorityLowest  = EdgePriority9
+	EdgePriorityLowest  = EdgePriority10
 )
 
 // EdgeTypePriorities defines source priority for each edge type.
@@ -55,7 +56,8 @@ var EdgeTypePriorities = map[core.RelationshipType]map[string]EdgeSourcePriority
 		"gcp-cloud-traces": EdgePriority5, // GCP Cloud Trace (disjoint from K8s "traces" accounts)
 		"datadog-apm":      EdgePriority6, // External APM source (instrumentation-derived)
 		"newrelic-apm":     EdgePriority7, // External APM source (NRQL Span aggregation)
-		"aws-vpc-flow":     EdgePriority8, // VPC Flow Logs: sees cloud-managed edges others miss, but coarsest (no L7/latency) — loses to any richer source that corroborates
+		"elastic-apm":      EdgePriority8, // External APM source (Elastic APM service_destination metrics + parent.id join)
+		"aws-vpc-flow":     EdgePriority9, // VPC Flow Logs: sees cloud-managed edges others miss, but coarsest (no L7/latency) — loses to any richer source that corroborates
 	},
 	core.RelationshipResolvesTo: {
 		"k8s":              EdgePriority1, // K8s DNS resolution

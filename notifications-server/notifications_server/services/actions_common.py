@@ -928,13 +928,41 @@ def _close_event_analysis_stream(service, token, context, stream_ts, outcome, ta
         LOG.debug("event analysis poller: failed to close progress panel for event %s: %s", context.event_id, e)
 
 
+def _post_final_writeup(service, context, detailed, investigation, summary):
+    """Post the closing write-up without repeating the investigation.
+
+    nudgebee/nudgebee#38925: detailed_response is no longer a rewrite of the
+    investigation -- it now opens with that investigation verbatim and appends
+    the affected components, code findings and firing history. The
+    investigation was already posted to this thread, so posting the whole
+    write-up after it would print the same text twice in a row. Post only what
+    the write-up adds; when it adds nothing, still close with a one-line ping so
+    the user learns the analysis finished. Returns True iff settled.
+    """
+    detailed = (detailed or "").strip()
+    investigation = (investigation or "").strip()
+
+    added = detailed
+    if investigation and detailed.startswith(investigation):
+        added = detailed[len(investigation) :].strip()
+
+    if added:
+        return _post_investigation_content(service, context, added, "Here's the full write-up:", mention=True)
+    if detailed:
+        return _post_investigation_content(service, context, "That's everything I found.", "", mention=True)
+    # No write-up at all -- fall back to the initial summary, as before.
+    return _post_investigation_content(service, context, summary, "Here's the full write-up:", mention=True)
+
+
 def _post_investigation_content(service, context, content, preamble, mention=False):
     """Returns True iff settled (nothing to post, or posted ok); False only on
     a Slack failure, so callers can retry instead of marking it sent."""
     content = (content or "").strip()
     if not content:
         return True
-    text = f"{preamble}\n\n{Transformer.markdown_to_slack_markdown(content)}"
+    preamble = (preamble or "").strip()
+    body = Transformer.markdown_to_slack_markdown(content)
+    text = f"{preamble}\n\n{body}" if preamble else body
     if mention:
         text = f"{text}\n\n<@{context.slack_user_id}>"
     try:
@@ -1065,9 +1093,12 @@ def _poll_event_analysis(engine, slack_app, teams_app, context, user_id, token, 
                         _advance_event_analysis_panel(service, token, context, stream_ts, field)
 
                 if task_statuses.get("detailed_response") == "COMPLETED":
-                    content = result.get("detailed_response") or result.get("summary")
-                    if _post_investigation_content(
-                        service, context, content, "Here's the full write-up:", mention=True
+                    if _post_final_writeup(
+                        service,
+                        context,
+                        result.get("detailed_response"),
+                        result.get("investigation"),
+                        result.get("summary"),
                     ):
                         _close_event_analysis_stream(service, token, context, stream_ts, outcome="completed")
                         _finalize_card_after_analysis(service, context, outcome="completed")
@@ -1189,8 +1220,13 @@ def _run_event_analysis_background(engine, slack_app, teams_app, context: EventA
                 # summary/investigation were already posted then, so only the
                 # write-up goes out now. The panel never got past the
                 # placeholder, so that's all that needs closing.
-                content = result.get("detailed_response") or result.get("summary")
-                _post_investigation_content(service, context, content, "Here's the full write-up:", mention=True)
+                _post_final_writeup(
+                    service,
+                    context,
+                    result.get("detailed_response"),
+                    result.get("investigation"),
+                    result.get("summary"),
+                )
                 _close_event_analysis_stream(
                     service, token, context, stream_ts, "completed", task_ids=[_EVENT_ANALYSIS_PLACEHOLDER_TASK_ID]
                 )

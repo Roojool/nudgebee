@@ -67,10 +67,16 @@ const TriggerSimulatorPanel: React.FC<TriggerSimulatorPanelProps> = ({
   const eventOverrideKey = JSON.stringify(eventOverrides || {});
   const optimizationOverrideKey = JSON.stringify(optimizationOverrides || {});
 
-  const mockPayload = useMemo(
-    () => buildTriggerMock(triggerType, lifecyclePhase, JSON.parse(eventOverrideKey), JSON.parse(optimizationOverrideKey)),
-    [triggerType, lifecyclePhase, eventOverrideKey, optimizationOverrideKey]
-  );
+  const mockPayload = useMemo(() => {
+    // With no account picked, sample an event from the automation's own account, which it always listens to.
+    const withOwnAccount = <T extends { cloud_account_id?: string }>(o: T): T => ({ ...o, cloud_account_id: o.cloud_account_id || accountId });
+    return buildTriggerMock(
+      triggerType,
+      lifecyclePhase,
+      withOwnAccount(JSON.parse(eventOverrideKey)),
+      withOwnAccount(JSON.parse(optimizationOverrideKey))
+    );
+  }, [triggerType, lifecyclePhase, eventOverrideKey, optimizationOverrideKey, accountId]);
 
   const [payloadJson, setPayloadJson] = useState('');
   // Once the user edits the payload we stop re-seeding it from the config, so a
@@ -183,6 +189,16 @@ const TriggerSimulatorPanel: React.FC<TriggerSimulatorPanelProps> = ({
         background: ds.amber[100],
       };
     }
+    // The account gate also rejects a payload with no account at all; only a named one is "another account".
+    const payloadAccount = parsedPayload?.account_id || parsedPayload?.cloud_account_id;
+    if (!matchResult.matched && matchResult.gate === 'account' && payloadAccount) {
+      return {
+        message: "Not matched — event is from an account this automation doesn't listen to.",
+        text: ds.red[700],
+        border: ds.red[300],
+        background: ds.red[100],
+      };
+    }
     if (matchResult.matched) {
       return {
         message: `This payload fires the automation.${matchResult.reason ? ` ${capitalize(matchResult.reason)}.` : ''}`,
@@ -243,7 +259,7 @@ const TriggerSimulatorPanel: React.FC<TriggerSimulatorPanelProps> = ({
         >
           <Typography sx={{ fontSize: 'var(--ds-text-small)', color: verdictStyle.text, lineHeight: 1.5 }}>{verdictStyle.message}</Typography>
           {!!matchResult?.filter && !isChecking && (
-            <Typography sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-caption)', color: ds.gray[400], mt: 0.5, wordBreak: 'break-all' }}>
+            <Typography sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-caption)', color: ds.gray[400], mt: 0.5, wordBreak: 'break-all' }}>
               {matchResult.filter}
             </Typography>
           )}
@@ -295,14 +311,14 @@ const TriggerSimulatorPanel: React.FC<TriggerSimulatorPanelProps> = ({
             }}
           >
             <CopyButton text={`{{ Inputs.event.${field.path} }}`} size='xs' />
-            <Typography sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-caption)', color: ds.gray[700], flexShrink: 0 }}>
+            <Typography sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-caption)', color: ds.gray[700], flexShrink: 0 }}>
               event.{field.path}
             </Typography>
             <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400], flexShrink: 0 }}>{field.type}</Typography>
             <Typography
               title={field.example}
               sx={{
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 fontSize: 'var(--ds-text-caption)',
                 color: ds.gray[400],
                 flex: 1,

@@ -85,7 +85,7 @@ export const RunningTasksBanner: React.FC<RunningTasksBannerProps> = ({ tasks, i
           </Typography>
         </Box>
 
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[1] }}>
           {allowStop && onStop && (
             <Tooltip title='Stop execution' placement='top'>
               <IconButton

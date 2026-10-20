@@ -103,3 +103,18 @@ func TestPrimarySavingsSubqueryDedupes(t *testing.T) {
 		assert.Contains(t, sub, "GROUP BY "+groupCol)
 	}
 }
+
+// See safeSavingsScopeColumns.
+func TestPrimarySavingsSubqueryRejectsUnsafeScope(t *testing.T) {
+	assert.Panics(t, func() {
+		PrimarySavingsSubquery("cloud_account_id", " AND r2.rule_name = $1")
+	})
+	assert.Panics(t, func() {
+		// Unqualified column: still resolves against r2 (the only aliased
+		// table scopeFilter lands against), so it must be rejected too.
+		PrimarySavingsSubquery("cloud_account_id", " AND rule_name = $1")
+	})
+	assert.NotPanics(t, func() {
+		PrimarySavingsSubquery("cloud_account_id", " AND r2.tenant_id = $1 AND r2.cloud_account_id = $2")
+	})
+}

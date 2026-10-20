@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS idx_tickets_integration_id;
+DROP INDEX IF EXISTS idx_integration_user_accounts_integration_id;
+DROP INDEX IF EXISTS idx_event_incoming_webhooks_integration_id;

@@ -32,7 +32,7 @@ import SafeIcon from '@shared/icons/SafeIcon';
 
 // DS V2 primitives — phased in alongside the legacy components. Visual swap only;
 // API calls, handlers, and modal forms untouched.
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Stat } from '@ui/Stat';
 import { CostCallout } from '@ui/CostCallout';
@@ -138,6 +138,7 @@ export const KubernetesUnusedWorkloadUpdatePopupForm = ({ open, onClose, onSucce
   return (
     <Modal
       confirmText='Scale Down'
+      confirmTone='danger'
       handleClose={handleClose}
       title=''
       onConfirm={() => submitRecommendation()}
@@ -616,7 +617,7 @@ const KubernetesAbandonedWorkloads = ({ enabledSummary = true, enabledFilters = 
           mt={2}
           mb={2}
         >
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Recommendations'
@@ -627,8 +628,8 @@ const KubernetesAbandonedWorkloads = ({ enabledSummary = true, enabledFilters = 
                   : kubernetesAbandonedWorkloadsCount ?? '—'
               }
             />
-          </WidgetCard>
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          </Card>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Savings Potential'
@@ -641,7 +642,7 @@ const KubernetesAbandonedWorkloads = ({ enabledSummary = true, enabledFilters = 
                 )
               }
             />
-          </WidgetCard>
+          </Card>
         </Box>
       )}
 

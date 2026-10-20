@@ -181,7 +181,7 @@ export function ConnectView({ gatewayUrl }: ConnectViewProps) {
         </Box>
       </Section>
 
-      <ApiTokens open={tokenOpen} title='API Tokens' onClose={() => setTokenOpen(false)} />
+      <ApiTokens open={tokenOpen} title='API Tokens' defaultKind='gateway' onClose={() => setTokenOpen(false)} />
     </Box>
   );
 }

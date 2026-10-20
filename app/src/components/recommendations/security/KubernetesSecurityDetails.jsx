@@ -437,9 +437,16 @@ const KubernetesSecurityDetails = (props) => {
       data.push({ component: <Datetime value={item.created_at} /> });
       data.push({
         component: (
-          <Box display={'flex'} flexDirection={'row'} alignItems={'center'} justifyContent={'flex-end'} gap={'var(--ds-space-1)'}>
+          <Box
+            display={'flex'}
+            flexDirection={'row'}
+            alignItems={'center'}
+            justifyContent={'flex-end'}
+            gap={'var(--ds-space-1)'}
+            onClick={(e) => e.stopPropagation()}
+          >
             <AskNubiIconButton id={`security-ask-nubi-${item.id}`} assistantName={assistantName} onClick={() => askAboutFinding(item)} />
-            <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(item)} data={item} onMenuClick={onMenuClick} />
+            <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(item)} data={item} onMenuClick={onMenuClick} disablePortal={false} />
           </Box>
         ),
       });

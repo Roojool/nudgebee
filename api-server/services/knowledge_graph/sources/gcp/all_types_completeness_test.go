@@ -77,17 +77,17 @@ func TestE2E_GCPAllTypesNodeCoverage(t *testing.T) {
 	var rows []sources.CloudResourceRow
 	expected := map[core.NodeType]bool{}
 	i := 0
-	for rt, svcMap := range gcpResourceTypeMap {
-		for svc, nt := range svcMap {
-			rows = append(rows, allTypesRow(i, rt, svc, "GCP"))
-			expected[nt] = true
+	for _, kind := range kinds.Kinds() {
+		key := kind.KindKey()
+		types := key.Types
+		if len(types) == 0 {
+			types = []string{"__fallback_type__"}
+		}
+		for _, rt := range types {
+			rows = append(rows, allTypesRow(i, rt, key.Service, "GCP"))
 			i++
 		}
-	}
-	for svc, nt := range gcpServiceFallbackMap {
-		rows = append(rows, allTypesRow(i, "__fallback_type__", svc, "GCP"))
-		expected[nt] = true
-		i++
+		expected[kind.NodeType] = true
 	}
 
 	req := &core.SourceBuildRequest{TenantID: "all-types-tenant", CloudAccountID: "all-types-account"}

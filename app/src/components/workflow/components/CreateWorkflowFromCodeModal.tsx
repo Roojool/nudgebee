@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Alert, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import * as jsYaml from 'js-yaml';
 import { useRouter } from 'next/router';
 import { CodeEditor } from '@ui/CodeEditor';
 import { Modal } from '@ui/Modal';
+import { Banner } from '@ui/Banner';
 import { Button } from '@ui/Button';
 import { snackbar } from '@shared/snackbarService';
 import apiWorkflow from '@api1/workflow';
@@ -199,11 +200,15 @@ const CreateWorkflowFromCodeModal: React.FC<CreateWorkflowFromCodeModalProps> = 
         </Box>
 
         {parseError && (
-          <Alert severity='error'>
-            <Typography variant='body2' sx={{ fontSize: 'var(--ds-text-body)' }}>
-              <strong>{formatLabel} Parse Error:</strong> {parseError}
-            </Typography>
-          </Alert>
+          <Banner
+            tone='critical'
+            surface='section'
+            message={
+              <>
+                <strong>{formatLabel} Parse Error:</strong> {parseError}
+              </>
+            }
+          />
         )}
         <CodeEditor
           value={currentText}

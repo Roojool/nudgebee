@@ -9,6 +9,7 @@ import (
 	"nudgebee/services/internal/database"
 	"nudgebee/services/relay"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -150,6 +151,37 @@ func (a *argoCDHistoryAction) CanAutoExecute(ctx PlaybookActionContext) bool {
 	return err == nil
 }
 
+// argoCDAppNameFromTracking resolves the ArgoCD application that owns a workload from the
+// ownership markers ArgoCD writes, which depend on `application.resourceTrackingMethod`:
+//
+//   - `label`            → label `argocd.argoproj.io/instance` (only when instanceLabelKey is
+//     overridden to it; ArgoCD's default key is `app.kubernetes.io/instance`)
+//   - `annotation`       → annotation `argocd.argoproj.io/tracking-id`, formatted
+//     "<instance>:<group>/<Kind>:<namespace>/<name>"
+//   - `annotation+label` → both
+//
+// Under apps-in-any-namespace the <instance> is "<app-namespace>_<app-name>"
+// (Application.InstanceName), while `argocd app get` parses a namespace-qualified reference as
+// "<app-namespace>/<app-name>" (ParseFromQualifiedName) — two different delimiters in ArgoCD's
+// own code. Application names are DNS-1123 subdomains and cannot contain "_", so an underscore
+// here is unambiguously that separator; translate it to the form the CLI accepts.
+//
+// `app.kubernetes.io/instance` is deliberately not consulted: plain Helm sets it on releases
+// ArgoCD does not manage, so it would feed a release name into `argocd app get`.
+func argoCDAppNameFromTracking(instanceLabel, trackingID string) string {
+	instance := instanceLabel
+	if instance == "" {
+		var found bool
+		if instance, _, found = strings.Cut(trackingID, ":"); !found {
+			return ""
+		}
+	}
+	if appNamespace, appName, qualified := strings.Cut(instance, "_"); qualified {
+		return appNamespace + "/" + appName
+	}
+	return instance
+}
+
 func (a *argoCDHistoryAction) AutoExecute(ctx PlaybookActionContext) (PlaybookActionResponse, error) {
 
 	dbms, err := database.GetDatabaseManager(database.Metastore)
@@ -162,9 +194,10 @@ func (a *argoCDHistoryAction) AutoExecute(ctx PlaybookActionContext) (PlaybookAc
 		serviceName = ctx.GetEvent().Labels["service"]
 	}
 
-	// Match by service label (using serviceName), subject name as service label, or workload name
+	// Match by service label (using serviceName), subject name as service label, or workload name.
 	query := `
-		SELECT COALESCE(meta-> 'config' -> 'labels' ->> 'argocd.argoproj.io/instance', '')::text AS argo_instance_name
+		SELECT COALESCE(meta -> 'config' -> 'labels' ->> 'argocd.argoproj.io/instance', '')::text AS argo_instance_label,
+		       COALESCE(meta -> 'config' -> 'annotations' ->> 'argocd.argoproj.io/tracking-id', '')::text AS argo_tracking_id
 		FROM k8s_workloads ksw
 		WHERE ksw.cloud_account_id = $1
 		AND (ksw.labels ->> 'service'::text = $2
@@ -172,16 +205,25 @@ func (a *argoCDHistoryAction) AutoExecute(ctx PlaybookActionContext) (PlaybookAc
 			OR ksw.labels ->> 'service'::text = $3
 			OR ksw.labels ->> 'tags.datadoghq.com/service'::text = $3
 			OR ksw.name = $3)
-		AND is_active IS NOT FALSE LIMIT 1`
-	var argoInstanceName string
-	err = dbms.Db.QueryRowx(query, ctx.GetAccountId(), serviceName, ctx.GetEvent().SubjectName).Scan(&argoInstanceName)
+		AND is_active IS NOT FALSE
+		-- Several rows can match the OR above; prefer one that actually carries ArgoCD
+		-- ownership ('' sorts last under DESC) over an arbitrary pick.
+		ORDER BY argo_instance_label DESC, argo_tracking_id DESC LIMIT 1`
+	var argoInstanceLabel, argoTrackingID string
+	err = dbms.Db.QueryRowx(query, ctx.GetAccountId(), serviceName, ctx.GetEvent().SubjectName).Scan(&argoInstanceLabel, &argoTrackingID)
 	if err != nil {
 		// Workload not found in k8s_workloads — expected for non-k8s resources
+		slog.Debug("argocd history: no matching k8s workload, skipping",
+			"account_id", ctx.GetAccountId(), "subject", ctx.GetEvent().SubjectName, "service", serviceName, "error", err)
 		return nil, nil
 	}
 
+	argoInstanceName := argoCDAppNameFromTracking(argoInstanceLabel, argoTrackingID)
 	if argoInstanceName == "" {
-		// Workload exists but has no ArgoCD label — not managed by ArgoCD
+		// Workload exists but carries neither the ArgoCD tracking label nor annotation —
+		// not managed by ArgoCD.
+		slog.Debug("argocd history: workload has no ArgoCD tracking label or annotation, skipping",
+			"account_id", ctx.GetAccountId(), "subject", ctx.GetEvent().SubjectName, "service", serviceName)
 		return nil, nil
 	}
 
@@ -360,9 +402,9 @@ func (a *argoCDHistoryAction) Execute(ctx PlaybookActionContext, rawParams map[s
 	insights := []PlaybookActionResponseInsight{}
 
 	// Show when the last deployment occurred before the event
-	if response.LastSyncedAt != nil && ctx.GetEvent().StartedAt != nil {
+	if alertStart := ctx.GetEvent().AlertStart(); response.LastSyncedAt != nil && alertStart != nil {
 		deploymentTime := *response.LastSyncedAt
-		eventStartTime := *ctx.GetEvent().StartedAt
+		eventStartTime := *alertStart
 
 		if deploymentTime.Before(eventStartTime) {
 			timeBefore := eventStartTime.Sub(deploymentTime)

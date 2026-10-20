@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"nudgebee/llm/events"
+	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
 )
 
@@ -323,4 +326,124 @@ func TestMergeEvidenceManifestsPreservesMetadataOrderAndMissingEvidence(t *testi
 	assert.Equal(t, "event-1", data[1]["id"])
 	assert.Equal(t, firstManifest, data[1]["evidences"])
 	assert.NotContains(t, data[2], "evidences")
+}
+
+// metricSeriesJSON builds a valid JSON metric document, larger than
+// maxEvidenceInsightDataChars, shaped like the pod_metrics evidence the
+// collector stores as a string.
+func metricSeriesJSON(t *testing.T, points int) string {
+	t.Helper()
+	values := make([]string, points)
+	timestamps := make([]int64, points)
+	for i := range values {
+		values[i] = "2097152000"
+		timestamps[i] = 1787408040 + int64(i*30)
+	}
+	doc, err := json.Marshal(map[string]any{
+		"data": map[string]any{
+			"memory_usage": map[string]any{
+				"series_list_result": []any{map[string]any{"timestamps": timestamps, "values": values}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Greater(t, len(doc), maxEvidenceInsightDataChars)
+	return string(doc)
+}
+
+// Regression (dev events 2271fe6b, f1580e90, f6d8fa9e, 509532e3): the workspace
+// file get_event_by_id points agents to as "full evidence" was written AFTER the
+// per-field 3000-char cap, so every JSON-string field over the cap (pod_metrics,
+// pod_data, others) was invalid JSON and json.load failed at char ~3000.
+func TestOffloadEventEvidence_WorkspaceFileHoldsUncappedValidJSON(t *testing.T) {
+	sc := security.NewRequestContextForSuperAdmin()
+	metrics := metricSeriesJSON(t, 400)
+	podData := metricSeriesJSON(t, 300)
+	evidence := events.InvestigateData{
+		PodMetrics: []events.InvestigateDataInsight{{Data: metrics, Title: "json"}},
+		PodData:    events.InvestigateDataInsight{Data: podData},
+	}
+
+	var savedPath, savedContent string
+	wm := &mockWorkspaceManager{
+		saveFileFunc: func(ctx *security.RequestContext, accountId, conversationId, path, content string) error {
+			savedPath, savedContent = path, content
+			return nil
+		},
+	}
+
+	inline, refs := offloadEventEvidence(sc, wm, "acct-1", "conv-1", "evt-1", evidence)
+
+	assert.Equal(t, "event_evt-1_evidence.json", savedPath)
+	var saved events.InvestigateData
+	require.NoError(t, json.Unmarshal([]byte(savedContent), &saved))
+	require.Len(t, saved.PodMetrics, 1)
+	assert.Equal(t, metrics, saved.PodMetrics[0].Data, "file must carry the uncapped metric document")
+	assert.True(t, json.Valid([]byte(saved.PodMetrics[0].Data.(string))))
+	assert.Equal(t, podData, saved.PodData.Data)
+
+	inlineStr, ok := inline.(string)
+	require.True(t, ok)
+	assert.Contains(t, inlineStr, "Evidence saved to event_evt-1_evidence.json with every section complete")
+	assert.Contains(t, inlineStr, "evidence_type=logs", "log_data is reduced by enrichData, so the note must not claim the logs are complete")
+	assert.Contains(t, inlineStr, "... (truncated)", "inline preview is the capped view")
+	require.Len(t, refs, 1)
+	assert.Equal(t, "event_evt-1_evidence.json", refs[0].Url)
+}
+
+func TestOffloadEventEvidence_SaveFailureFallsBackToCappedInline(t *testing.T) {
+	sc := security.NewRequestContextForSuperAdmin()
+	evidence := events.InvestigateData{
+		PodMetrics: []events.InvestigateDataInsight{{Data: metricSeriesJSON(t, 400)}},
+	}
+	wm := &mockWorkspaceManager{
+		saveFileFunc: func(ctx *security.RequestContext, accountId, conversationId, path, content string) error {
+			return errors.New("workspace down")
+		},
+	}
+
+	inline, refs := offloadEventEvidence(sc, wm, "acct-1", "conv-1", "evt-1", evidence)
+
+	assert.Nil(t, refs)
+	capped, ok := inline.(events.InvestigateData)
+	require.True(t, ok)
+	assert.LessOrEqual(t, len(capped.PodMetrics[0].Data.(string)), maxEvidenceInsightDataChars+len("\n... (truncated)"))
+}
+
+func TestOffloadEventEvidence_SmallEvidenceIsNotCapped(t *testing.T) {
+	sc := security.NewRequestContextForSuperAdmin()
+	many := make([]events.InvestigateDataInsight, maxEvidenceInsightEntries+5)
+	for i := range many {
+		many[i] = events.InvestigateDataInsight{Data: "e"}
+	}
+	evidence := events.InvestigateData{PodEvents: many}
+	wm := &mockWorkspaceManager{
+		saveFileFunc: func(ctx *security.RequestContext, accountId, conversationId, path, content string) error {
+			t.Fatal("SaveFile must not be called for evidence under the overflow threshold")
+			return nil
+		},
+	}
+
+	inline, refs := offloadEventEvidence(sc, wm, "acct-1", "conv-1", "evt-1", evidence)
+
+	assert.Nil(t, refs)
+	got, ok := inline.(events.InvestigateData)
+	require.True(t, ok)
+	assert.Len(t, got.PodEvents, maxEvidenceInsightEntries+5, "evidence under the threshold is returned whole, without the entry cap")
+}
+
+func TestOffloadEventEvidence_SmallEvidenceStaysInlineWithoutSave(t *testing.T) {
+	sc := security.NewRequestContextForSuperAdmin()
+	evidence := events.InvestigateData{Markdowns: []events.InvestigateDataInsight{{Data: "restart count: 2"}}}
+	wm := &mockWorkspaceManager{
+		saveFileFunc: func(ctx *security.RequestContext, accountId, conversationId, path, content string) error {
+			t.Fatal("SaveFile must not be called for evidence under the overflow threshold")
+			return nil
+		},
+	}
+
+	inline, refs := offloadEventEvidence(sc, wm, "acct-1", "conv-1", "evt-1", evidence)
+
+	assert.Nil(t, refs)
+	assert.Equal(t, evidence, inline)
 }

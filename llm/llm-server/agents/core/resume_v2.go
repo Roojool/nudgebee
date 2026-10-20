@@ -408,29 +408,25 @@ func runAgentResumeV2(ctx *security.RequestContext, req NBAgentRequest, agent Co
 	return executeAgent(ctx, agentImpl, resumeReq)
 }
 
-// buildResumeAgentRequest restores both forms of tool configuration. QueryConfig
-// is the durable representation loaded from message_config, while ClientTools
-// and Capabilities are the runtime fields consumed directly by the planner and
-// executor. Omitting the runtime fields makes a request-scoped client tool work
-// for the first iteration and disappear after client-tool-result resumes it.
+// buildResumeAgentRequest carries the turn's request forward and overrides only
+// what resume changes. Copy-then-override, not an allowlist: the request already
+// arrives fully populated from the normal conversation path, and rebuilding it
+// field by field silently dropped 18 of 35 fields — account context, memory, KB
+// content, skills, images — degrading the resumed answer and evicting the first
+// turn's provider cache, which shares one slot with the shortened prefix.
+//
+// QueryConfig is the durable representation loaded from message_config; ClientTools
+// and Capabilities are the runtime fields the planner and executor read directly.
+// Omitting the runtime fields makes a request-scoped client tool work for the
+// first iteration and disappear after client-tool-result resumes it.
 func buildResumeAgentRequest(req NBAgentRequest, parentAgentID, previousState string, queryConfig toolcore.NBQueryConfig) NBAgentRequest {
-	return NBAgentRequest{
-		Query:                 req.Query,
-		AccountId:             req.AccountId,
-		UserId:                req.UserId,
-		ConversationId:        req.ConversationId,
-		MessageId:             req.MessageId,
-		AgentId:               req.AgentId,
-		ParentAgentId:         parentAgentID,
-		PreviousState:         previousState,
-		QueryConfig:           queryConfig,
-		QueryContext:          req.QueryContext,
-		SessionId:             req.SessionId,
-		ConversationSource:    req.ConversationSource,
-		EnableQueryRefinement: req.EnableQueryRefinement,
-		ClientTools:           queryConfig.ClientTools,
-		Capabilities:          queryConfig.Capabilities,
-	}
+	resumed := req
+	resumed.ParentAgentId = parentAgentID
+	resumed.PreviousState = previousState
+	resumed.QueryConfig = queryConfig
+	resumed.ClientTools = queryConfig.ClientTools
+	resumed.Capabilities = queryConfig.Capabilities
+	return resumed
 }
 
 // bubbleUpIfSiblingsDone is the recursive parent-resume helper.
@@ -454,10 +450,7 @@ func bubbleUpIfSiblingsDone(ctx *security.RequestContext, req NBAgentRequest, ch
 
 	// Top-level agent: no parent to bubble up to. Persist final message + conversation state.
 	if parentAgentID == "" || parentAgentID == uuid.Nil.String() || parentAgentID == childAgent.ID.String() {
-		persistFinalMessage(ctx, req.MessageId, childResp)
-		if err := dao.UpdateConversationStatus(req.ConversationId, ConversationStatusCompleted); err != nil {
-			logger.Warn("resume_v2: failed to mark conversation complete", "error", err)
-		}
+		finalizeCompletedConversation(ctx, req, childResp)
 		return childResp, nil
 	}
 
@@ -514,10 +507,7 @@ func bubbleUpIfSiblingsDone(ctx *security.RequestContext, req NBAgentRequest, ch
 			"child_agent_id", childAgent.ID.String(),
 			"agent_name", childAgent.AgentName,
 			"parent_agent_id", parentAgentID)
-		persistFinalMessage(ctx, req.MessageId, childResp)
-		if err := dao.UpdateConversationStatus(req.ConversationId, ConversationStatusCompleted); err != nil {
-			logger.Warn("resume_v2: failed to mark conversation complete after terminal child", "error", err)
-		}
+		finalizeCompletedConversation(ctx, req, childResp)
 		return childResp, nil
 	}
 
@@ -562,8 +552,7 @@ func bubbleUpIfSiblingsDone(ctx *security.RequestContext, req NBAgentRequest, ch
 			len(parents) > 0 && parents[0].Response != nil && *parents[0].Response != "" {
 			finalResp.Response = []string{*parents[0].Response}
 		}
-		persistFinalMessage(ctx, req.MessageId, finalResp)
-		_ = dao.UpdateConversationStatus(req.ConversationId, ConversationStatusCompleted)
+		finalizeCompletedConversation(ctx, req, finalResp)
 		return finalResp, nil
 	}
 
@@ -694,6 +683,96 @@ func resolveBubbleUpParent(
 		grandparentID = executableParent.ID.String()
 	}
 	return agent, executableParent, grandparentID, state, walkedLevels, nil
+}
+
+// finalizeCompletedConversation persists the final message + conversation
+// status and fires the answer-confidence grader — the same post-completion
+// hook the normal (non-followup) path runs right after its save-back
+// (conversation.go:1561-1568). resume_v2 bubbles up through executeAgent
+// directly rather than returning through handleConversationRequest's
+// save-back block, so without this call the grader never ran for a turn
+// that needed a followup (any confirm-to-proceed, pick-one, or extra-input
+// exchange) — #37534.
+func finalizeCompletedConversation(ctx *security.RequestContext, req NBAgentRequest, resp NBAgentResponse) {
+	persistFinalMessage(ctx, req.MessageId, resp)
+	if err := GetConversationDao().UpdateConversationStatus(req.ConversationId, ConversationStatusCompleted); err != nil {
+		ctx.GetLogger().Warn("resume_v2: failed to mark conversation complete", "error", err)
+	}
+
+	if resp.AgentName == ToolLlm {
+		return
+	}
+
+	// Free checks before either DB read below. shouldScoreAnswerConfidence
+	// rejects a blank answer anyway, so reaching it costs two round-trips for a
+	// turn that was never gradeable.
+	answer := ""
+	if len(resp.Response) > 0 {
+		answer = strings.TrimSpace(resp.Response[0])
+	}
+	if answer == "" {
+		return
+	}
+
+	// Cheap gate before the GetConversationMessage round-trip below, so a tenant
+	// without the feature pays nothing on every followup resume. This repeats a
+	// check ScoreAnswerConfidenceAsync also makes, which costs one extra indexed
+	// lookup for tenants that DO have it enabled.
+	secCtx := ctx.GetSecurityContext()
+	if secCtx == nil || !AnswerConfidenceEnabledForTenant(ctx, secCtx.GetTenantId()) {
+		return
+	}
+
+	question, err := originalQuestionForScoring(req)
+	if err != nil {
+		// Worth surfacing: a dropped connection or schema mismatch here stops
+		// every resumed turn being graded, and silence would make that look
+		// like the feature simply doing nothing.
+		ctx.GetLogger().Error("resume_v2: unable to recover the original question, skipping confidence scoring",
+			"error", err, "message_id", req.MessageId)
+		return
+	}
+	if question == "" {
+		// Must not fall through with an empty OriginalQuery: on this resume
+		// path req.Query is always the followup answer (e.g. "yes"), never
+		// empty (HandleFollowupAndResumeV2 rejects that at the door), so
+		// shouldScoreAnswerConfidence's OriginalQuery-empty fallback would
+		// grade the followup answer as if it were the question — reintroducing
+		// the bug this function exists to fix (#37535 review).
+		return
+	}
+
+	scoreReq := req
+	scoreReq.OriginalQuery = question
+	ScoreAnswerConfidenceAsync(ctx, scoreReq, answer)
+}
+
+// originalQuestionForScoring resolves the user's verbatim top-level question
+// for answer-confidence classification. On a followup-resume completion,
+// req.Query is the user's answer to the followup (e.g. "yes"), not the
+// question — the generation message row holds the original text, untouched
+// by any followup exchange.
+//
+// An empty string with a nil error means "no usable question" — a missing
+// identifier, or a blank stored message — and the caller skips scoring quietly.
+// A non-nil error means the lookup itself failed and is worth logging. Either
+// way the caller must NOT hand on a "", which shouldScoreAnswerConfidence would
+// silently replace with req.Query, i.e. the followup answer.
+func originalQuestionForScoring(req NBAgentRequest) (string, error) {
+	// Not an error: there is simply nothing to look up, and querying with a
+	// blank uuid would turn a structurally impossible case into log noise.
+	if req.AccountId == "" || req.MessageId == "" || req.ConversationId == "" {
+		return "", nil
+	}
+	msg, err := GetConversationDao().GetConversationMessage(req.MessageId, req.AccountId, req.ConversationId)
+	if err != nil {
+		return "", fmt.Errorf("resume_v2: failed to load generation message %s for confidence scoring: %w", req.MessageId, err)
+	}
+	// Return the trimmed form so the value matches the predicate computed from
+	// it. Both consumers trim anyway (IsInvestigationRequestTask, and
+	// generateAnswerConfidence when it builds the grader prompt), so this
+	// normalizes rather than changes behaviour.
+	return strings.TrimSpace(msg.Message), nil
 }
 
 // persistFinalMessage writes the agent response content + status to the

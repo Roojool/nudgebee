@@ -33,6 +33,7 @@ Hard-fail (only for files new in this PR)
   - reuses a V<N> already on a reference branch or on a sibling new file
   - malformed name / missing _V<N>_ / missing .up.sql
   - empty .up.sql (scaffolded but never filled in)
+  - unqualified CREATE TABLE in a new .up.sql (search_path-dependent schema)
 
 Warn (grandfathered legacy)
   - pre-existing duplicate V<N> labels, missing .down.sql, legacy naming
@@ -55,6 +56,13 @@ FILENAME_RE = re.compile(
 )
 REL_DIR = "api-server/migrations/migrations/app"
 APP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations", "app")
+SQL_IDENT = r'(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z_0-9$]*)'
+CREATE_TABLE_RE = re.compile(
+    r"\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+"
+    r"(?P<if_not_exists>IF\s+NOT\s+EXISTS\s+)?"
+    rf"(?P<first>{SQL_IDENT})(?:\s*\.\s*(?P<second>{SQL_IDENT}))?",
+    re.IGNORECASE,
+)
 
 
 def parse(path):
@@ -105,6 +113,19 @@ def strip_sql_comments(text):
             out.append(text[i])
             i += 1
     return "".join(out)
+
+
+def sql_identifier(value):
+    return value[1:-1].replace('""', '"') if value.startswith('"') else value.lower()
+
+
+def created_tables(text):
+    """Yield (schema, table, if_not_exists) for permanent CREATE TABLEs."""
+    for match in CREATE_TABLE_RE.finditer(strip_sql_comments(text)):
+        first, second = match.group("first", "second")
+        yield (sql_identifier(first) if second else None,
+               sql_identifier(second) if second else sql_identifier(first),
+               bool(match.group("if_not_exists")))
 
 
 def has_executable_sql(filename):
@@ -256,6 +277,13 @@ def main():
             errors.append(f"[F empty-migration] new migration {tag} has an empty .up.sql "
                           f"(no executable SQL). Fill it in, then re-run "
                           f"./new-migration.sh --regen-sum.")
+        if up_file:
+            with open(os.path.join(APP_DIR, up_file), encoding="utf-8-sig") as fh:
+                for schema, table, _ in created_tables(fh.read()):
+                    if schema is None:
+                        errors.append(f"[G unqualified-table] new migration {tag} creates "
+                                      f"{table} without a schema. Use public.{table} "
+                                      f"(or its intended schema) explicitly.")
 
     # Legacy hygiene warnings (informational only).
     for v, tss in sorted(by_v_all.items()):

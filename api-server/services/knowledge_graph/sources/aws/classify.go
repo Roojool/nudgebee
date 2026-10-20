@@ -11,31 +11,19 @@ import (
 // Returns nil when the row should be suppressed (eg an IAM Role that's already
 // emitted as a typed ServiceIdentity); callers must skip nil returns.
 func (s *AWSSource) createNodeFromResource(resource *sources.CloudResourceRow, req *core.SourceBuildRequest) *core.DbNode {
-	// Determine node type
 	source := "aws"
-	nodeType := s.determineNodeType(resource.Type, resource.ServiceName)
+	kind := kindFor(resource.Type, resource.ServiceName)
+	nodeType := kind.NodeType
 
-	// IAM Roles are also emitted as typed ServiceIdentity nodes via
-	// buildServiceIdentityNodes. The generic CloudResource fallback here would
-	// create a duplicate node that every IAM-role-aware edge builder skips
-	// (RUNS_AS / ASSUMES bind to ServiceIdentity via lookup.ByARN). Suppress
-	// to avoid ~50 orphan nodes per AWS account.
-	if nodeType == core.NodeTypeCloudResource &&
-		resource.ServiceName == "AWSIAM" &&
-		strings.EqualFold(resource.Type, "Role") {
+	// A resource can declare that its rows build no node of their own (IAM
+	// roles, which buildServiceIdentityNodes already emits as typed
+	// ServiceIdentity nodes) or that they build a different node altogether
+	// (IAM users, which belong on ServiceIdentity too).
+	if kind.Suppress {
 		return nil
 	}
-
-	// IAM Users belong on the ServiceIdentity NodeType for the same reason
-	// (cloud-agnostic identity), distinguished by subtype="IAMUser". The
-	// audit at #31016 found 15 IAM User nodes sitting orphan in the
-	// CloudResource catch-all per AWS account. Re-typing them gives them
-	// the same first-class semantics IAM Roles get. IAM Groups remain
-	// CloudResource — ServiceIdentity doesn't model groups today.
-	if nodeType == core.NodeTypeCloudResource &&
-		resource.ServiceName == "AWSIAM" &&
-		strings.EqualFold(resource.Type, "User") {
-		return s.createServiceIdentityFromIAMUser(resource, req)
+	if kind.Node != nil {
+		return kind.Node(s, resource, req)
 	}
 
 	// Build properties first (needed for unique key generation)
@@ -78,40 +66,10 @@ func (s *AWSSource) createNodeFromResource(resource *sources.CloudResourceRow, r
 	properties["is_active"] = resource.IsActive
 	properties["external_resource_id"] = resource.ExternalResourceID
 
-	if resource.Type == "managedinstance" {
-		properties["managed"] = true
-	}
-
-	// Add subtype for MessageQueue nodes based on service name
-	if nodeType == core.NodeTypeMessageQueue {
-		switch resource.ServiceName {
-		case "AWSQueueService":
-			properties["subtype"] = "SQS"
-		case "AmazonMSK":
-			properties["subtype"] = "MSK"
-		default:
-			properties["subtype"] = "MessageQueue"
-		}
-	}
-
-	// Add subtype for Topic nodes based on service name
-	if nodeType == core.NodeTypeTopic {
-		switch resource.ServiceName {
-		case "AmazonSNS":
-			properties["subtype"] = "SNS"
-		default:
-			properties["subtype"] = "Topic"
-		}
-	}
-
-	// Add subtype for Cache nodes based on service name
-	if nodeType == core.NodeTypeCache {
-		switch resource.ServiceName {
-		case "AmazonElastiCache":
-			properties["subtype"] = "ElastiCache"
-		default:
-			properties["subtype"] = "Cache"
-		}
+	// The concrete flavour of a shared ontology type (SQS vs MSK under
+	// MessageQueue, SNS under Topic, ElastiCache under Cache).
+	if kind.Subtype != "" {
+		properties["subtype"] = kind.Subtype
 	}
 
 	// Store identifiers
@@ -124,8 +82,8 @@ func (s *AWSSource) createNodeFromResource(resource *sources.CloudResourceRow, r
 	if len(resource.Meta) > 0 && string(resource.Meta) != "{}" {
 		var metaMap map[string]interface{}
 		if err := json.Unmarshal(resource.Meta, &metaMap); err == nil {
-			// Extract only relevant fields based on node type
-			s.extractEssentialMetadataByNodeType(properties, metaMap, nodeType, resource.ServiceName)
+			// Extract only the fields this resource declares
+			s.extractMetadataForKind(properties, metaMap, kind)
 		}
 	}
 
@@ -137,14 +95,9 @@ func (s *AWSSource) createNodeFromResource(resource *sources.CloudResourceRow, r
 		}
 	}
 
-	// Add cache_type property for ElastiCache resources
-	if resource.ServiceName == "AmazonElastiCache" {
-		properties["cache_type"] = "elasticache"
-	}
-
-	// Add queue_type property for SQS resources
-	if resource.ServiceName == "AWSQueueService" {
-		properties["queue_type"] = "sqs"
+	// Static properties the resource stamps on every one of its nodes.
+	for key, value := range kind.Props {
+		properties[key] = value
 	}
 
 	// Add subtype property for all AWS resources (only if not already set)
@@ -154,7 +107,7 @@ func (s *AWSSource) createNodeFromResource(resource *sources.CloudResourceRow, r
 
 	// Declare the concrete cloud label (specific_type). NewNode lifts this out of
 	// properties into the dedicated column.
-	properties["specific_type"] = s.determineSpecificType(resource.Type, resource.ServiceName, nodeType)
+	properties["specific_type"] = kind.specificType()
 
 	// Store AWS account number in properties for unique key generation
 	properties["account_number"] = resource.AccountNumber
@@ -245,67 +198,18 @@ func (s *AWSSource) extractDNSNameFromMetadata(metaMap map[string]interface{}) s
 	return ""
 }
 
-// extractEssentialMetadataByNodeType extracts only essential metadata fields based on node type
-// This prevents storing large metadata blobs and keeps only what's needed for each node type
-func (s *AWSSource) extractEssentialMetadataByNodeType(properties map[string]interface{}, metaMap map[string]interface{}, nodeType core.NodeType, serviceName string) {
-	// Common fields extracted for all node types
+// extractMetadataForKind extracts the metadata fields a node keeps: the ones
+// common to every type, then the ones the resource's own extractor pulls out.
+func (s *AWSSource) extractMetadataForKind(properties map[string]interface{}, metaMap map[string]interface{}, kind resourceKind) {
 	s.extractCommonMetadataFields(properties, metaMap)
 
-	// Node-type specific extraction
-	switch nodeType {
-	case core.NodeTypeDatabase:
-		s.extractDatabaseMetadata(properties, metaMap)
-	case core.NodeTypeCache:
-		s.extractCacheMetadata(properties, metaMap)
-	case core.NodeTypeComputeInstance:
-		s.extractComputeMetadata(properties, metaMap)
-	case core.NodeTypeMessageQueue:
-		s.extractQueueMetadata(properties, metaMap)
-	case core.NodeTypeTopic:
-		s.extractTopicMetadata(properties, metaMap)
-	case core.NodeTypeStorage:
-		s.extractStorageMetadata(properties, metaMap)
-		// EFS-specific metadata extraction
-		if serviceName == "AmazonEFS" {
-			s.extractEFSMetadata(properties, metaMap)
-		}
-	case core.NodeTypeLoadBalancer:
-		s.extractLoadBalancerMetadata(properties, metaMap)
-	case core.NodeTypeManagedCluster:
-		s.extractClusterMetadata(properties, metaMap)
-	case core.NodeTypeServerlessFunction:
-		s.extractLambdaMetadata(properties, metaMap)
-	case core.NodeTypeCDN:
-		s.extractCDNMetadata(properties, metaMap)
-	case core.NodeTypeDNSZone:
-		s.extractDNSZoneMetadata(properties, metaMap)
-	case core.NodeTypeContainerRegistry:
-		s.extractContainerRegistryMetadata(properties, metaMap)
-	case core.NodeTypeNetworkGateway:
-		s.extractNetworkGatewayMetadata(properties, metaMap)
-	case core.NodeTypeNetworkInterface:
-		s.extractENIMetadata(properties, metaMap)
-	case core.NodeTypeSecurityGroup:
-		s.extractSecurityGroupMetadata(properties, metaMap)
-	case core.NodeTypeBackupVault:
-		s.extractBackupVaultMetadata(properties, metaMap)
-	case core.NodeTypeBackupPolicy:
-		s.extractBackupPolicyMetadata(properties, metaMap)
-	case core.NodeTypeInfraStack:
-		// CloudFormation stack metadata (RoleARN, Parameters, Outputs)
-		s.extractCloudFormationMetadata(properties, metaMap)
-	case core.NodeTypeLogAggregator:
-		// CloudTrail-specific metadata extraction
-		if serviceName == "AWSCloudTrail" {
-			s.extractCloudTrailMetadata(properties, metaMap)
-		}
-	case core.NodeTypeCloudResource:
-		// Generic cloud resource - add specific extractors as needed
+	if kind.Extract != nil {
+		kind.Extract(s, properties, metaMap)
 	}
 
 	// Synthesize public DNS for AWS resources whose API metadata doesn't
 	// expose one (S3/SQS/SNS/DDB/ECR/Lambda/Kinesis/APIGW). Runs after the
-	// per-type extractors so anything that already wrote a real endpoint
+	// per-resource extractor so anything that already wrote a real endpoint
 	// (EFS/RDS/ElastiCache/LB/EKS/CloudFront) wins. Required for the
 	// ExternalService enricher to match cross-account on dns_name without
 	// having to extract bucket/queue identifiers from the hostname.
@@ -360,24 +264,4 @@ func (s *AWSSource) extractCommonMetadataFields(properties map[string]interface{
 	if vpcID, ok := metaMap["VpcId"].(string); ok && vpcID != "" {
 		properties["vpc_id"] = vpcID
 	}
-}
-
-// determineNodeType determines the knowledge graph node type from AWS resource type and service name
-func (s *AWSSource) determineNodeType(resourceType, serviceName string) core.NodeType {
-	resourceTypeLower := strings.ToLower(resourceType)
-
-	// First, try exact match with type + service_name combination
-	if serviceMap, exists := awsResourceTypeMap[resourceTypeLower]; exists {
-		if nodeType, found := serviceMap[serviceName]; found {
-			return nodeType
-		}
-	}
-
-	// Second, try service name fallback
-	if nodeType, exists := awsServiceFallbackMap[serviceName]; exists {
-		return nodeType
-	}
-
-	// Default fallback for unmapped resources
-	return core.NodeTypeCloudResource
 }

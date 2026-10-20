@@ -6,6 +6,12 @@ import { KubernetesTraceServiceOperation } from '@components/k8s/common/Kubernet
 import ExecutedQueryInfo from '@shared/ExecutedQueryInfo';
 import { Box } from '@mui/material';
 
+// A traces card is created per evidence slot, so its id carries that index. Anything
+// deciding "did a traces card render?" has to ask through here rather than compare the
+// id to a bare name — that comparison silently never matched. Match on the separator
+// too, so a future TracesCardSummary is not mistaken for one.
+export const isTracesCardId = (id) => typeof id === 'string' && id.startsWith('TracesCard_');
+
 class TracesCard {
   constructor(evidenceData, event, index) {
     this.id = `TracesCard_${index}`;

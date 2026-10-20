@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, memo, useMemo, useRef } from 'react';
 import PropTypes from 'prop-types';
 import { Box, Typography } from '@mui/material';
 import { Banner } from '@ui/Banner';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import PushPinIcon from '@mui/icons-material/PushPin';
 import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
 import CheckIcon from '@mui/icons-material/Check';
@@ -17,6 +17,7 @@ import AccountPickerModal from '@components/common/AccountPickerModal';
 import { Checkbox } from '@ui/Checkbox';
 import { ds } from '@utils/colors';
 import { safeJSONParse } from '@utils/common';
+import { useBrandingConfig } from '@hooks/useTenantBranding';
 
 // Pins live in localStorage keyed by account. Module-level so both the initial
 // state and the on-switch re-derive read them the same way.
@@ -330,6 +331,8 @@ TypeChipFilter.propTypes = {
 };
 
 const MemoryTab = ({ accountId }) => {
+  // Partner hostnames rename the assistant — never hardcode it (app/CLAUDE.md, Brand copy).
+  const { assistantName } = useBrandingConfig();
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [memories, setMemories] = useState([]);
@@ -597,10 +600,9 @@ const MemoryTab = ({ accountId }) => {
   return (
     <Box sx={{ p: 0 }}>
       {/* Header Section with Title and Description */}
-      <WidgetCard
+      <Card
         sx={{
           p: `${ds.space[4]} ${ds.space.mul(1, 5)}`,
-          mt: 0,
           mb: ds.space[4],
           display: 'flex',
           justifyContent: 'space-between',
@@ -624,11 +626,13 @@ const MemoryTab = ({ accountId }) => {
               color: 'var(--ds-gray-500)',
             }}
           >
-            Nubi has saved from past investigations. Pin the ones that matter most, remove anything outdated, and Nubi will use these to resolve
-            similar issues faster
+            {assistantName
+              ? `Memories ${assistantName} has saved from past investigations. Pin the ones that matter most, remove anything outdated, and ${assistantName} will use these to resolve similar issues faster.`
+              : // Branding resolves asynchronously; without a name, a brand-free sentence rather than a broken one.
+                'Memories saved from past investigations. Pin the ones that matter most, remove anything outdated, and they will be used to resolve similar issues faster.'}
           </Typography>
         </Box>
-      </WidgetCard>
+      </Card>
 
       {/* Search Bar and Summary Stats */}
       <Box

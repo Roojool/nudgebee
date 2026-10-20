@@ -1,4 +1,5 @@
-import { Grid, CircularProgress, Typography, RadioGroup, FormControlLabel, Radio, Alert, Box, IconButton } from '@mui/material';
+import { Grid, CircularProgress, Typography, RadioGroup, FormControlLabel, Radio, Box, IconButton } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { HelpOutline, InfoOutlined } from '@mui/icons-material';
 import Tooltip from '@ui/Tooltip';
 import { CollapsableCard } from '@ui/CollapsableCard';
@@ -10,7 +11,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import apiAccount from '@api1/account';
 import { Modal } from '@shared/modal';
 import { Input } from '@ui/Input';
-import { isK8sAccountNameValid } from 'src/utils/common';
+import { isK8sAccountNameValid, parseAwsRegions } from 'src/utils/common';
 import apiKubernetes1 from '@api1/kubernetes1';
 import { Button } from '@ui/Button';
 import { snackbar } from '@shared/snackbarService';
@@ -64,15 +65,6 @@ const OPTION_DESC_SX = {
   lineHeight: 1.45,
   maxWidth: '46ch',
 };
-
-// Parses the comma-separated region box into the array the API expects. An
-// empty result means "discover regions from the account", never "no regions" —
-// the latter would collect nothing while the account reported healthy.
-const parseRegions = (value) =>
-  value
-    .split(',')
-    .map((region) => region.trim())
-    .filter(Boolean);
 
 const AddAwsAccountModal = ({ open, onClose }) => {
   const [activeTab, setActiveTab] = useState(TAB_CLOUDFORMATION);
@@ -244,7 +236,7 @@ const AddAwsAccountModal = ({ open, onClose }) => {
       // Validation must bootstrap inside the allowlist: a role scoped with an
       // aws:RequestedRegion condition denies every call made outside it, so
       // validating from the us-east-1 default would fail on a working role.
-      const regions = parseRegions(regionsInput);
+      const regions = parseAwsRegions(regionsInput);
       if (regions.length > 0) {
         payload.region = regions[0];
       }
@@ -284,7 +276,7 @@ const AddAwsAccountModal = ({ open, onClose }) => {
       payload.access_key = accessKeyId;
       payload.access_secret = secretAccessKey;
     }
-    const regions = parseRegions(regionsInput);
+    const regions = parseAwsRegions(regionsInput);
     if (regions.length > 0) {
       payload.regions = regions;
     }
@@ -483,10 +475,17 @@ const AddAwsAccountModal = ({ open, onClose }) => {
         />
       </Grid>
       <Grid item>
-        <Alert severity='info' sx={{ mt: 1 }}>
-          Access keys are stored encrypted at rest. Prefer the CloudFormation flow when possible — keys grant broader access and rotation is your
-          responsibility.
-        </Alert>
+        <Box sx={{ mt: 1 }}>
+          <Banner
+            tone='info'
+            message={
+              <>
+                Access keys are stored encrypted at rest. Prefer the CloudFormation flow when possible — keys grant broader access and rotation is
+                your responsibility.
+              </>
+            }
+          />
+        </Box>
       </Grid>
     </Grid>
   );
@@ -496,12 +495,17 @@ const AddAwsAccountModal = ({ open, onClose }) => {
       <ValidationResultBanner result={validationResult} />
 
       {validationResult?.success && validationResult?.cur?.reportName && (
-        <Alert severity='success' sx={{ mt: 1 }}>
-          <Typography variant='body2'>
-            Detected Cost &amp; Usage Report: <strong>{validationResult.cur.reportName}</strong> (bucket{' '}
-            <code>{validationResult.cur.bucketName}</code>, region <code>{validationResult.cur.region}</code>).
-          </Typography>
-        </Alert>
+        <Box sx={{ mt: 1 }}>
+          <Banner
+            tone='success'
+            message={
+              <Typography variant='body2'>
+                Detected Cost &amp; Usage Report: <strong>{validationResult.cur.reportName}</strong> (bucket{' '}
+                <code>{validationResult.cur.bucketName}</code>, region <code>{validationResult.cur.region}</code>).
+              </Typography>
+            }
+          />
+        </Box>
       )}
     </Grid>
   );
@@ -666,10 +670,17 @@ const AddAwsAccountModal = ({ open, onClose }) => {
           </Box>
 
           {accessMode === 'readonly' && (
-            <Alert severity='info' sx={{ mt: 1 }}>
-              Read-only mode does not grant write permissions to your AWS account. The following features will be unavailable: CloudWatch alarm
-              creation, EventBridge real-time event tracking, and automated recommendation actions.
-            </Alert>
+            <Box sx={{ mt: 1 }}>
+              <Banner
+                tone='info'
+                message={
+                  <>
+                    Read-only mode does not grant write permissions to your AWS account. The following features will be unavailable: CloudWatch alarm
+                    creation, EventBridge real-time event tracking, and automated recommendation actions.
+                  </>
+                }
+              />
+            </Box>
           )}
         </Grid>
 

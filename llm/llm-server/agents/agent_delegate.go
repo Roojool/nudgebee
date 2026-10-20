@@ -67,6 +67,7 @@ func (t *delegateAgentTool) GetType() toolcore.NBToolType { return toolcore.NBTo
 func (t *delegateAgentTool) Description() string {
 	return `Spawn a scoped specialist sub-investigator with its own prompt, tool list, and iteration budget.
 Input: {"prompt": <brief>, "tools": [<tool names>], "max_iterations": <int>} — "tools" is required; omitting it leaves the sub-agent LLM-only, which is almost always misuse. max_iterations defaults to 5, minimum 2, maximum 15.
+When the work names a cluster or cloud account, preserve that exact target in the delegated prompt so the specialist can pass it through the targetable tool's existing per-call argument.
 USE when a specific sub-question needs 3+ tool calls to answer and would otherwise pollute your own scratchpad with serial discovery (e.g. "investigate DNS for service X", "check egress firewall for namespace Y").
 DO NOT use when 1-2 tool calls suffice — call the tool directly.
 DO NOT use to record findings — the parent agent owns investigation state. Prompts that start with "update the notebook" / "updating the notebook" are rejected at the tool boundary with an error pointing here.
@@ -670,6 +671,7 @@ func (a *dynamicReActAgent) GetSystemPrompt(ctx *security.RequestContext, _ core
 		Constraints: []string{
 			"Focus exclusively on the task described in your instructions. Do not expand scope.",
 			"Use only the tools provided to you. Do not attempt to call tools not in your tool list.",
+			"When invoking a provided agent tool, copy every explicit execution scope from your instructions into that agent tool's request, including account, cluster, project or subscription, region, namespace, time window, and resource identity. Never omit a named scope or silently replace it with a default.",
 			budgetConstraint,
 			"Report your findings with specific evidence: timestamps, metric values, log lines, or query results. Never make claims without supporting data.",
 		},

@@ -192,7 +192,7 @@ const SortablePanel: React.FC<Props> = React.memo(function SortablePanel({
                     color: ds.gray[400],
                     cursor: 'grab',
                     borderRadius: 'var(--ds-radius-sm)',
-                    p: '2px',
+                    p: ds.space[0],
                     touchAction: 'none',
                     '&:active': { cursor: 'grabbing' },
                     '&:hover': { color: ds.gray[600], background: ds.gray[100] },

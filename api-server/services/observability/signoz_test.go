@@ -84,11 +84,13 @@ func TestFlattenSignozQuery(t *testing.T) {
 					"environment": {Nq: "staging"},
 				},
 			},
+			// nin, not "!=": SigNoz's "!=" is a substring match on resource
+			// attributes. See the Nq rewrite in signozLeaf.
 			expectedClauses: []FlattenedClause{
 				{
 					Key:   map[string]string{"key": "environment"},
-					Value: "staging",
-					Op:    "!=",
+					Value: []any{"staging"},
+					Op:    "nin",
 				},
 			},
 			expectError: false,
@@ -382,7 +384,7 @@ func TestFlattenSignozQuery(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "OR clause should return error",
+			name: "OR needs more than one query",
 			queryClause: query.QueryWhereClause{
 				Or: []query.QueryWhereClause{
 					{
@@ -399,10 +401,10 @@ func TestFlattenSignozQuery(t *testing.T) {
 			},
 			expectedClauses: nil,
 			expectError:     true,
-			errorContains:   "OR operator is not supported",
+			errorContains:   "needs 2 SigNoz queries",
 		},
 		{
-			name: "NOT clause should return error",
+			name: "NOT is pushed onto the condition",
 			queryClause: query.QueryWhereClause{
 				Not: &query.QueryWhereClause{
 					Binary: query.BinaryWhereClause{
@@ -410,9 +412,11 @@ func TestFlattenSignozQuery(t *testing.T) {
 					},
 				},
 			},
-			expectedClauses: nil,
-			expectError:     true,
-			errorContains:   "NOT operator is not supported",
+			// A pushed-down NOT becomes Nq, which signozLeaf emits as nin.
+			expectedClauses: []FlattenedClause{
+				{Key: map[string]string{"key": "service"}, Value: []any{"api"}, Op: "nin"},
+			},
+			expectError: false,
 		},
 		{
 			name:            "Empty query clause",
@@ -424,7 +428,7 @@ func TestFlattenSignozQuery(t *testing.T) {
 			name: "Unsupported operator should error",
 			queryClause: query.QueryWhereClause{
 				Binary: query.BinaryWhereClause{
-					"field": {Lt: 100},
+					"field": {Between: []any{1, 2}},
 				},
 			},
 			expectedClauses: nil,
@@ -982,15 +986,37 @@ func TestConvertSigNozLogLabelValues(t *testing.T) {
 	}
 }
 
-// Test SignozSource.GetLabelMapping
+// TestSignozSource_GetLabelMapping pins the canonical -> SigNoz attribute names.
+//
+// FlattenSignozQuery passes a field straight through as an attribute key, so a
+// canonical name SigNoz does not spell the same way matches nothing and returns
+// HTTP 200 with zero rows. This test used to pin `message` as the only entry, on
+// the belief that every other canonical name was already SigNoz's spelling; a live
+// run against SigNoz v0.51 and v0.145 disproved it — `level`, `namespace`, `pod`
+// and `service` each returned 0 rows where severity_text / k8s.namespace.name /
+// k8s.pod.name / service.name returned the data.
 func TestSignozSource_GetLabelMapping(t *testing.T) {
 	s := &SignozSource{}
 	mapping := s.GetLabelMapping()
 
-	// SignozSource returns an empty map
-	assert.NotNil(t, mapping)
-	assert.Equal(t, 0, len(mapping))
-	assert.Equal(t, map[string]string{}, mapping)
+	assert.Equal(t, map[string]string{
+		"message":   "body",
+		"namespace": "k8s.namespace.name",
+		"pod":       "k8s.pod.name",
+		"container": "k8s.container.name",
+		"node":      "k8s.node.name",
+		"workload":  "k8s.deployment.name",
+		"app":       "k8s.deployment.name",
+		"cluster":   "k8s.cluster.name",
+		"host":      "host.name",
+		"hostname":  "host.name",
+		"service":   "service.name",
+		"severity":  "severity_text",
+		"level":     "severity_text",
+	}, mapping)
+
+	// Both sources share one table: SigNoz Cloud speaks the same attribute names.
+	assert.Equal(t, mapping, (&SignozSaasSource{}).GetLabelMapping())
 }
 
 // Test FlattenSignozQuery with multiple fields (order-independent)
@@ -1039,7 +1065,7 @@ func TestFlattenSignozQuery_EdgeCases(t *testing.T) {
 			queryClause: query.QueryWhereClause{
 				Binary: query.BinaryWhereClause{
 					"field1": {Eq: "value"},
-					"field2": {Gt: 100}, // Unsupported
+					"field2": {Between: []any{1, 2}}, // Unsupported
 				},
 			},
 			expectError: true, // Should error on unsupported operator

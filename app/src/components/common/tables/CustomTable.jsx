@@ -954,8 +954,13 @@ const CustomTable = ({
       // that don't set either prop get the defaults below instead of undefined,
       // so "custom" means "differs from those defaults".
       const hasCustomEmptyCopy = emptyHeading !== DEFAULT_EMPTY_HEADING || emptySubHeading !== DEFAULT_EMPTY_SUBHEADING;
+      // Carries the same `${id}-no-data` anchor the branch below has always
+      // emitted. Without it this empty state can only be found by its wording,
+      // which is copy the product owns and changes — and did, breaking every
+      // e2e test that had pinned itself to the old text.
       content = (
         <EmptyData
+          id={id}
           img={ThumbsUp}
           heading={hasCustomEmptyCopy ? emptyHeading : 'All good here!'}
           subHeading={hasCustomEmptyCopy ? emptySubHeading : 'No recommendations available'}

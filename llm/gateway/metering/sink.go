@@ -190,7 +190,7 @@ func (s *dbSink) run() {
 
 // usageColumns is the fixed column order for inserts (matches UsageEvent db tags).
 var usageColumns = []string{
-	"id", "created_at", "tenant_id", "account_id", "user_id", "token_id",
+	"id", "created_at", "tenant_id", "account_id", "user_id", "token_id", "api_key_id",
 	"session_id", "attributes",
 	"provider", "model", "requested_provider", "requested_model", "responded_model",
 	"routing_reason", "routing_rule",
@@ -225,7 +225,7 @@ func (s *dbSink) insert(evs []UsageEvent) error {
 		}
 		sb.WriteByte(')')
 		args = append(args,
-			ev.ID, ev.CreatedAt, ev.TenantID, ev.AccountID, ev.UserID, ev.TokenID,
+			ev.ID, ev.CreatedAt, ev.TenantID, ev.AccountID, ev.UserID, ev.TokenID, ev.APIKeyID,
 			ev.SessionID, ev.Attributes,
 			ev.Provider, ev.Model, ev.RequestedProvider, ev.RequestedModel, ev.RespondedModel,
 			ev.RoutingReason, ev.RoutingRule,

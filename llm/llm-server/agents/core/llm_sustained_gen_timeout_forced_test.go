@@ -64,7 +64,7 @@ func (m *streamThenHangModel) GenerateContent(ctx context.Context, messages []ll
 	if combined.StreamingFunc != nil {
 		_ = combined.StreamingFunc(ctx, []byte("I"))
 	}
-	resp := newStubThinkingResponse("next tool call: fetch_logs_v3")
+	resp := newStubThinkingResponse("next tool call: fetch_logs_direct")
 	fmt.Printf("========== [attempt %d] RESPONSE received from LLM ==========\n", call)
 	fmt.Printf("  content: %s\n\n", resp.Choices[0].Content)
 	return resp, nil

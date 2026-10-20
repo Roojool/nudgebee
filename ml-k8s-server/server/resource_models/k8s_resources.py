@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from server.resource_models.resource import Resource
 from server.resource_models.utils import convert_cpu_unit_to_cores, convert_memory_unit_to_bytes
 
@@ -30,14 +30,15 @@ class K8sContainerResourcesLimitReq(BaseModel):
 
 
 class K8sContainerResources(BaseModel):
-    limits: K8sContainerResourcesLimitReq
-    requests: K8sContainerResourcesLimitReq
+    limits: K8sContainerResourcesLimitReq = Field(default_factory=K8sContainerResourcesLimitReq)
+    requests: K8sContainerResourcesLimitReq = Field(default_factory=K8sContainerResourcesLimitReq)
 
 
 class K8sContainer(BaseModel):
     name: str
     image: str
-    resources: K8sContainerResources
+    # Kubernetes omits "resources" (or just limits/requests) when none are set.
+    resources: K8sContainerResources = Field(default_factory=K8sContainerResources)
 
 
 class K8sResource(Resource):

@@ -196,9 +196,29 @@ export async function handleGatewayRequest(req: NextApiRequest, res: NextApiResp
       // so this line joins the backend services' logs for the same request in Loki.
       const traceId = traceParent.split('-')[1] || '';
       if (totalMs > SLOW_THRESHOLD_MS) {
-        console.warn('%s', `[${opts.logPrefix}] SLOW ${operationName} ${totalMs}ms trace_id=${traceId}`, JSON.stringify(timing));
+        console.warn(
+          '%s',
+          JSON.stringify({
+            severity: 'warn',
+            prefix: opts.logPrefix,
+            operationName,
+            totalMs,
+            trace_id: traceId,
+            timing,
+          })
+        );
       } else {
-        console.log('%s', `[${opts.logPrefix}] ${operationName} ${totalMs}ms trace_id=${traceId}`, JSON.stringify(timing));
+        console.log(
+          '%s',
+          JSON.stringify({
+            severity: 'info',
+            prefix: opts.logPrefix,
+            operationName,
+            totalMs,
+            trace_id: traceId,
+            timing,
+          })
+        );
       }
       span.end();
     }

@@ -199,7 +199,10 @@ func stringArg(input core.NBToolCallRequest, key string) string {
 // relatedness questions belong there.
 type TriageExplanationTool struct{}
 
-func (t TriageExplanationTool) Name() string             { return ToolEventTriageExplanation }
+func (t TriageExplanationTool) Name() string { return ToolEventTriageExplanation }
+func (t TriageExplanationTool) GetNameAliases() []string {
+	return []string{legacyToolTriageExplanation}
+}
 func (t TriageExplanationTool) GetType() core.NBToolType { return core.NBToolTypeTool }
 
 func (t TriageExplanationTool) Description() string {
@@ -638,7 +641,10 @@ const maxAssemblyTierItems = 10
 const assemblyCaveat = "Alerts grouped around this event by timing and topology. Every entry is a " +
 	"CANDIDATE, not a confirmed relationship — verify against evidence (logs, metrics, deployments) " +
 	"before treating it as related. 'chronic' entries fire at their normal background rate for that " +
-	"subject; never present them as the cause."
+	"subject; never present them as the cause. 'co_firing' entries are other alerts in the same account " +
+	"within 30 minutes of this one with no known topology link — the weakest candidates, but check " +
+	"them when the cause tiers are empty: they are often the rest of the same outage (a host " +
+	"terminated, a dependency down) on an account whose service map has no edge between them."
 
 // assemblyEmptyCaveat replaces it when the window holds nothing besides the
 // seed, so the model states the absence instead of inventing related alerts.
@@ -656,7 +662,10 @@ const assemblyEmptyCaveat = "No other alerts were recorded around this event in 
 // (#34659), not in any stored verdict.
 type IncidentAssemblyTool struct{}
 
-func (t IncidentAssemblyTool) Name() string             { return ToolEventIncidentAssembly }
+func (t IncidentAssemblyTool) Name() string { return ToolEventIncidentAssembly }
+func (t IncidentAssemblyTool) GetNameAliases() []string {
+	return []string{legacyToolIncidentAssembly}
+}
 func (t IncidentAssemblyTool) GetType() core.NBToolType { return core.NBToolTypeTool }
 
 func (t IncidentAssemblyTool) Description() string {
@@ -711,6 +720,7 @@ type incidentAssemblyPayload struct {
 	Cause            assemblyCauseTiers `json:"cause"`
 	Impact           []any              `json:"impact"`
 	Chronic          []any              `json:"chronic"`
+	CoFiring         []any              `json:"co_firing"`
 	Window           any                `json:"window,omitempty"`
 	Truncated        map[string]any     `json:"truncated,omitempty"`
 }
@@ -742,6 +752,7 @@ func boundIncidentAssembly(data string) string {
 		SameIncident:     capTier("same_incident", assembly["same_incident"], trunc),
 		Impact:           capTier("impact", assembly["impact"], trunc),
 		Chronic:          capTier("chronic", assembly["chronic"], trunc),
+		CoFiring:         capTier("co_firing", assembly["co_firing"], trunc),
 		Window:           assembly["window"],
 	}
 	if cause, ok := assembly["cause"].(map[string]any); ok {
@@ -764,7 +775,7 @@ func boundIncidentAssembly(data string) string {
 	}
 
 	if len(out.SameIncident)+len(out.Cause.ConfigChanges)+len(out.Cause.Upstream)+
-		len(out.Impact)+len(out.Chronic) == 0 {
+		len(out.Impact)+len(out.Chronic)+len(out.CoFiring) == 0 {
 		out.Note = assemblyEmptyCaveat
 	} else {
 		out.Note = assemblyCaveat

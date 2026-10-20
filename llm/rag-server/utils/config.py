@@ -65,6 +65,17 @@ class Config:
     )  # thread pool size for parallel collection search
     reranking_enabled = os.environ.get("RAG_RERANKING_ENABLED", "false").lower() == "true"  # LLM reranking default
 
+    # Figures described in parallel during a knowledge-base load. Bounded because
+    # the load holds a worker while it runs.
+    kb_vision_concurrency = int(os.environ.get("RAG_KB_VISION_CONCURRENCY", 4))
+
+    # Page and figure caps for a PDF load. These were operator-tunable while
+    # extraction lived in llm-server (llm_server_kb_pdf_max_pages /
+    # _max_images); they stay tunable here so a large-document account can be
+    # raised without a release.
+    kb_pdf_max_pages = int(os.environ.get("RAG_KB_PDF_MAX_PAGES", 200))
+    kb_pdf_max_images = int(os.environ.get("RAG_KB_PDF_MAX_IMAGES", 25))
+
     # Cross-encoder reranker. Runs in-process, so it needs no per-account LLM
     # credential — the LLM reranker it replaces failed 100% of calls on a stale
     # key and silently returned documents unranked.
@@ -89,6 +100,35 @@ class Config:
     reranker_threshold = float(os.environ.get("RAG_RERANKER_THRESHOLD", 0.50))
     reranker_max_length = int(os.environ.get("RAG_RERANKER_MAX_LENGTH", 128))  # tokens per (query, doc) pair
     reranker_max_doc_chars = int(os.environ.get("RAG_RERANKER_MAX_DOC_CHARS", 500))  # doc chars scored
+    # Ranked mode: score every candidate, group chunks by their parent document,
+    # and return the best N documents without filtering, leaving the relevance
+    # decision to the caller that has the conversation to judge against. Off by
+    # default — turning it on changes what every KB search returns.
+    #
+    # Measured over 300 real questions against the live dev index: filtering at
+    # 0.85 delivers an answering document for 5 of 14 answerable documentation
+    # questions, while ranking and returning ten lets one reach the caller for
+    # 14 of 14. The threshold was never the binding constraint on those; it was
+    # discarding documents the caller could have used.
+    ranked_mode = os.environ.get("RAG_RANKED_MODE", "false").lower() == "true"
+    # Documents returned in ranked mode. Ten is where answer-present peaks
+    # (14/14 documentation, 119/123 overall); the pool is scored either way, so
+    # this costs nothing here and only sets how much the caller must judge.
+    ranked_limit = int(os.environ.get("RAG_RANKED_LIMIT", 10))
+    # Weight on retrieval similarity in the blended score, the rest going to the
+    # cross-encoder. Both are normalised per query first: raw similarity spans
+    # roughly 0.85-0.90 within one query's candidates, so an unnormalised blend
+    # is the cross-encoder plus a constant. At 0.5, top-3 answer-present rose
+    # from 65% to 71% over 123 answerable questions; it wins on 27 of 40
+    # held-out splits and loses on 3.
+    ranked_similarity_weight = float(os.environ.get("RAG_RANKED_SIMILARITY_WEIGHT", 0.5))
+    # Per-document cap on returned text. One document in the dev corpus is
+    # 60000 characters and would otherwise dominate a caller's whole budget.
+    ranked_max_doc_chars = int(os.environ.get("RAG_RANKED_MAX_DOC_CHARS", 15000))
+    # Fraction of retrievals that write a trace row. One row per retrieval, so
+    # this is the only bound on growth: the table this replaced reached 1.9GB
+    # over two years because nothing ever limited it and nothing ever read it.
+    trace_sample_rate = float(os.environ.get("RAG_TRACE_SAMPLE_RATE", 1.0))
     # int8 quantization: measured slower and larger on ARM (qnnpack), so it is
     # off until measured to help on the target platform (x86/fbgemm).
     reranker_quantize = os.environ.get("RAG_RERANKER_QUANTIZE", "false").lower() == "true"
@@ -120,11 +160,12 @@ class Config:
     nudgebee_encryption_key = os.environ.get("NUDGEBEE_ENCRYPTION_KEY", "")
 
     # Embeddings
-    embeddings_provider = os.environ.get("EMBEDDINGS_PROVIDER", "bedrock")
+    embeddings_provider = os.environ.get("EMBEDDINGS_PROVIDER", "ondevice")
     # Model Name for different embeddings providers
+    # Ondevice (default) - any sentence-transformers id, e.g. 'BAAI/bge-small-en-v1.5',
     # Bedrock - 'amazon.titan-embed-text-v2:0', Azure - 'text-embedding-ada-002',
     # Huggingface - 'text-embedding-ada-002', Ollama - 'nb-text-embeddings', OpenAI - 'text-embedding-ada-002'
-    embeddings_model_id = os.environ.get("EMBEDDINGS_MODEL_NAME", "amazon.titan-embed-text-v2:0")
+    embeddings_model_id = os.environ.get("EMBEDDINGS_MODEL_NAME", "BAAI/bge-small-en-v1.5")
     embeddings_api_endpoint = os.environ.get("EMBEDDINGS_PROVIDER_API_ENDPOINT", "")
     embeddings_api_key = os.environ.get("EMBEDDINGS_PROVIDER_API_KEY", "")
     embeddings_api_version = os.environ.get("EMBEDDINGS_PROVIDER_API_VERSION", "")  # Azure - '2023-05-15'
@@ -134,6 +175,10 @@ class Config:
     # Embedding output dimensions (Matryoshka truncation)
     _dimensions = os.environ.get("EMBEDDINGS_DIMENSIONS")
     embeddings_dimensions: int | None = int(_dimensions) if _dimensions else None
+
+    embedding_migration_per_collection_lock = (
+        os.environ.get("RAG_EMBEDDING_MIGRATION_PER_COLLECTION_LOCK", "true").strip().lower() == "true"
+    )
 
     # LLM
     # openai | aws_bedrock | sagemaker | azure | ollama | huggingface

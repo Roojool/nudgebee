@@ -29,44 +29,71 @@ func PromQLLabels(out OutputMetricQuery, queryKey string) []map[string]string {
 	return nil
 }
 
-// workloadMetricQueries are the per-workload series the anomaly and SLO
-// evidence cards plot. __CLUSTER__ is expanded by the relay-server on the agent
-// path and by the direct source on the user path.
-var workloadMetricQueries = map[string]string{
-	"cpu":            `sum(rate(container_cpu_usage_seconds_total{ __CLUSTER__ pod=~"%[1]s.*", namespace="%[2]s"}[5m])) by (pod,namespace)`,
-	"memory":         `sum(container_memory_usage_bytes{ __CLUSTER__ pod=~"%[1]s.*", namespace="%[2]s"}) by (pod, namespace)`,
-	"network":        `sum(rate(container_network_receive_bytes_total{ __CLUSTER__ pod=~"%[1]s.*", namespace="%[2]s"}[5m])) + sum(rate(container_network_transmit_bytes_total{ __CLUSTER__ pod=~"%[1]s.*", namespace="%[2]s"}[5m]))`,
-	"latency":        `histogram_quantile(0.99, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ actual_destination_workload_name=~"%[1]s.*", actual_destination_workload_namespace="%[2]s"}[5m])) by (le))`,
-	"error_rate":     `sum(rate(container_http_requests_duration_seconds_total_count{ __CLUSTER__ actual_destination_workload_name=~"%[1]s.*", actual_destination_workload_namespace="%[2]s"}[5m]))`,
-	"replicas":       `sum(kube_deployment_status_replicas{ __CLUSTER__ deployment=~"%[1]s.*", namespace="%[2]s"})`,
-	"cpu_throttling": `sum(rate(container_resources_cpu_throttled_seconds_total{ __CLUSTER__ container_id=~".*%[2]s/%[1]s.*"}[5m])) by (container_id)`,
+// workloadEvidenceKeys maps an evidence card to the utilisation keys that can answer
+// it, most specific first. The per-pod keys draw one line per pod; where a provider
+// has no such key the workload total is used and the chart is a single line.
+//
+// These are utilisation keys rather than PromQL so that the account's default metrics
+// provider answers, whichever it is. A provider with no equivalent for a key returns
+// nothing for it and the card carries no series, which the investigate page hides.
+var workloadEvidenceKeys = map[string][]string{
+	"cpu":            {"cpu_usage_by_pod", "cpu_usage"},
+	"memory":         {"memory_usage_by_pod", "memory_usage"},
+	"latency":        {"workload_http_latency_p99"},
+	"cpu_throttling": {"cpu_throttling"},
+	"error_rate":     {"workload_http_error_rate"},
+	"replicas":       {"replica_ready"},
 }
 
-// WorkloadMetricEvidence runs one of the workload metric queries over the window
-// and returns it as the evidence card the anomaly and SLO events persist — the
-// same card the agent's prometheus_enricher produced, so the investigate page's
-// Prometheus card keeps rendering it.
-func WorkloadMetricEvidence(ctx *security.RequestContext, accountID, workload, namespace, resourceType, title string, start, end time.Time) (map[string]any, error) {
-	template, ok := workloadMetricQueries[resourceType]
+// WorkloadMetricEvidence fetches one workload metric over the window from the
+// account's metrics provider and returns it as the evidence card the anomaly and SLO
+// events persist — the same card shape the agent's prometheus_enricher produced, so
+// the investigate page's Prometheus card keeps rendering it. "prometheus" in that
+// shape names the card's format, not where the numbers came from; metadata.query
+// carries the provider's own query for that.
+//
+// kind is the workload's Kubernetes kind. Providers that filter by a kind-specific
+// tag (Datadog's kube_deployment vs kube_stateful_set) need it; empty means deployment.
+func WorkloadMetricEvidence(ctx *security.RequestContext, accountID, workload, namespace, kind, resourceType, title string, start, end time.Time) (map[string]any, error) {
+	keys, ok := workloadEvidenceKeys[resourceType]
 	if !ok {
 		return nil, fmt.Errorf("observability: invalid workload metric %q", resourceType)
 	}
-	query := fmt.Sprintf(template, workload, namespace)
-	out, err := FetchMetricsQuery(ctx, FetchMetricsRequest{
-		AccountId:      accountID,
-		MetricProvider: integrationPrometheus,
-		Queries:        map[string]string{"A": query},
-		StartTime:      start.UnixMilli(),
-		EndTime:        end.UnixMilli(),
+	out, err := FetchMetricUtilisation(ctx, GetUtilisationTrendRequest{
+		AccountId: accountID,
+		StartTime: start.UnixMilli(),
+		EndTime:   end.UnixMilli(),
+		Request: map[string]any{
+			"workload_namespace": namespace,
+			"workload_name":      workload,
+			"kind":               workloadKindForUtilisation(kind),
+			"metrics":            keys,
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	var data map[string]any
-	if len(out.Results) == 0 {
-		data = promQLMatrixEnvelope(nil)
-	} else {
-		data = promQLSingleEnvelope(out.Results[0], false)
+
+	// The metrics layer reports a failed query per key rather than as an error, so
+	// without this a backend failure is indistinguishable from "no data".
+	for _, r := range out.Results {
+		if r.Error != nil {
+			ctx.GetLogger().Warn("workload evidence: metrics query failed",
+				"account_id", accountID, "workload", workload, "namespace", namespace,
+				"metric", r.QueryKey, "error", *r.Error)
+		}
+	}
+
+	result, found := firstResultWithSeries(out, keys)
+	data := promQLMatrixEnvelope(nil)
+	query := ""
+	if found {
+		data = promQLSingleEnvelope(result, false)
+		query = result.Query
+		if query == "" {
+			// A source that does not report its query still has to say what was asked.
+			query = result.QueryKey
+		}
 	}
 	return map[string]any{
 		"type":    "prometheus",
@@ -79,6 +106,29 @@ func WorkloadMetricEvidence(ctx *security.RequestContext, accountID, workload, n
 		"additional_info": map[string]any{"title": title},
 		"insight":         []map[string]any{},
 	}, nil
+}
+
+// firstResultWithSeries returns the result for the first of keys, in order, that came
+// back with at least one non-empty series. A key the provider has no query for is
+// simply absent from the output (or present and empty), so preference order is all
+// that is needed to fall from a per-pod key to the workload total.
+func firstResultWithSeries(out OutputMetricQuery, keys []string) (QueryResult, bool) {
+	byKey := make(map[string]QueryResult, len(out.Results))
+	for _, r := range out.Results {
+		byKey[r.QueryKey] = r
+	}
+	for _, key := range keys {
+		r, ok := byKey[key]
+		if !ok {
+			continue
+		}
+		for _, series := range r.Payload {
+			if len(series.Values) > 0 {
+				return r, true
+			}
+		}
+	}
+	return QueryResult{}, false
 }
 
 // integrationPrometheus is the provider every internal PromQL request names:

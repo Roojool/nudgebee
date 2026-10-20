@@ -36,3 +36,7 @@ Thumbs.db
 # --- QA Sheet Sync ---
 credentials/
 qa-sheet-setup-guide.html
+# --- E2E QA Automation report (generated) ---
+/e2e-report.html
+/e2e-report-history.json
+/.e2e-history/

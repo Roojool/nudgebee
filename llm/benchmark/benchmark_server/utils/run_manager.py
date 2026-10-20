@@ -530,6 +530,32 @@ def _run_after_test_teardown(ctx: dict) -> None:
         )
 
 
+def _queue_verdict_row(tr, convo_id: str) -> tuple:
+    """Mark a reconciler-finalized row "pending" and build its judge context.
+
+    The trace is fetched by the background worker, not here, so the poller
+    doesn't stall on it. The setup script isn't stored on the row, so this
+    path judges without it.
+    """
+    tr.verdict_status = "pending"
+    tr.verdict_result = None
+    tr.verdict_error = None
+    context = {
+        "test_id": tr.test_id,
+        "query": tr.query or "",
+        "expected_answer": tr.expected_answer or "",
+        "actual_answer": tr.actual_answer or "",
+        "tool_names": tr.tool_names or [],
+        "tool_calls_total": tr.tool_calls_total or 0,
+        "tool_calls_successful": tr.tool_calls_successful or 0,
+        "error_message": tr.error_message or "",
+        "error_category": tr.error_category or "",
+        "status": tr.status,
+        "tags": tr.tags or [],
+    }
+    return tr.test_index, convo_id, context
+
+
 def reconcile_waiting_tests(  # noqa: C901
     run_id: str, nudge_complete: bool = True
 ) -> dict:
@@ -566,6 +592,7 @@ def reconcile_waiting_tests(  # noqa: C901
     # seconds; don't hold the txn open for them). One entry per test the
     # reconciler finalizes that still has a live scenario.
     to_teardown = []
+    to_judge = []
     db = get_db()
     if not db:
         return outcome
@@ -646,6 +673,7 @@ def reconcile_waiting_tests(  # noqa: C901
                 outcome["completed"] += 1
                 if tr.teardown_ctx:
                     to_teardown.append(tr.teardown_ctx)
+                to_judge.append(_queue_verdict_row(tr, convo_id))
                 _fevent(
                     "reconciled",
                     run_id=run_id,
@@ -669,6 +697,7 @@ def reconcile_waiting_tests(  # noqa: C901
                 outcome["failed"] += 1
                 if tr.teardown_ctx:
                     to_teardown.append(tr.teardown_ctx)
+                to_judge.append(_queue_verdict_row(tr, convo_id))
                 _fevent(
                     "reconciled",
                     run_id=run_id,
@@ -738,6 +767,12 @@ def reconcile_waiting_tests(  # noqa: C901
     # DB session is closed so a slow after_test (kubectl) never holds the txn.
     for ctx in to_teardown:
         _run_after_test_teardown(ctx)
+
+    if to_judge:
+        from llm.agents.common.verdict_judge import submit_verdict
+
+        for test_index, convo_id, context in to_judge:
+            submit_verdict(run_id, test_index, convo_id, context, account_id=account_id)
 
     # Skip the nudge when called from inside complete_run — that path runs
     # reconcile as a precursor to its own completion check, so a recursive
@@ -969,6 +1004,7 @@ def _sweeper_loop():
                     reconcile_waiting_tests(rid)
                 except Exception:
                     logger.exception("sweeper: reconcile failed for %s", rid)
+            clear_pending_verdicts()
         except Exception:
             logger.exception("sweeper: iteration crashed")
         # Responsive to stop signal without tight loop.
@@ -1513,6 +1549,9 @@ def rerun_tests(run_id: str, test_indices: list[int]) -> dict:
                 BenchmarkTestResult.planner_relevancy: 0.0,
                 BenchmarkTestResult.score_reason: None,
                 BenchmarkTestResult.execution_trace: None,
+                BenchmarkTestResult.verdict_status: None,
+                BenchmarkTestResult.verdict_result: None,
+                BenchmarkTestResult.verdict_error: None,
                 BenchmarkTestResult.followup_request: None,
                 BenchmarkTestResult.duration_seconds: 0.0,
                 BenchmarkTestResult.setup_duration: 0.0,
@@ -1916,6 +1955,9 @@ def _get_test_results_list(run: BenchmarkRun) -> list:
                 "answer_relevancy": r.answer_relevancy or 0.0,
                 "planner_relevancy": r.planner_relevancy or 0.0,
                 "score_reason": r.score_reason or "",
+                "verdict_status": r.verdict_status,
+                "verdict_result": r.verdict_result,
+                "verdict_error": r.verdict_error or "",
                 "duration_seconds": r.duration_seconds or 0.0,
                 "followup_wait_seconds": r.followup_wait_seconds,
                 "cost": r.cost or 0.0,
@@ -2003,6 +2045,9 @@ def store_test_result(run_id: str, result: dict):
             tr.planner_relevancy = result.get("planner_relevancy", tr.planner_relevancy)
             tr.score_reason = result.get("score_reason", tr.score_reason)
             tr.execution_trace = result.get("execution_trace", tr.execution_trace)
+            tr.verdict_status = result.get("verdict_status", tr.verdict_status)
+            tr.verdict_result = result.get("verdict_result", tr.verdict_result)
+            tr.verdict_error = result.get("verdict_error", tr.verdict_error)
             tr.duration_seconds = result.get("duration_seconds", tr.duration_seconds)
             tr.followup_wait_seconds = result.get(
                 "followup_wait_seconds", tr.followup_wait_seconds
@@ -2039,6 +2084,9 @@ def store_test_result(run_id: str, result: dict):
                     tr.polling_conversation_id = None
                 tr.score_reason = None
                 tr.execution_trace = None
+                tr.verdict_status = None
+                tr.verdict_result = None
+                tr.verdict_error = None
                 tr.error_message = ""
                 tr.error_category = ""
                 tr.actual_answer = ""
@@ -2081,6 +2129,9 @@ def store_test_result(run_id: str, result: dict):
                 planner_relevancy=result.get("planner_relevancy", 0.0),
                 score_reason=result.get("score_reason", ""),
                 execution_trace=result.get("execution_trace", ""),
+                verdict_status=result.get("verdict_status"),
+                verdict_result=result.get("verdict_result"),
+                verdict_error=result.get("verdict_error"),
                 duration_seconds=result.get("duration_seconds", 0.0),
                 followup_wait_seconds=result.get("followup_wait_seconds"),
                 setup_duration=result.get("setup_duration", 0.0),
@@ -2147,6 +2198,75 @@ def get_test_followup_data(run_id: str, test_index: int) -> dict:
         db.close()
 
 
+def set_verdict(
+    run_id: str, test_index: int, conversation_id: str, fields: dict
+) -> None:
+    """Write a background verdict onto its test row.
+
+    Matched on conversation_id too: if the test was retried while the judge
+    ran, the row now belongs to a new attempt and the stale verdict is dropped.
+    """
+    db = get_db()
+    if not db:
+        return
+    try:
+        updated = (
+            db.query(BenchmarkTestResult)
+            .filter(
+                BenchmarkTestResult.run_id == run_id,
+                BenchmarkTestResult.test_index == test_index,
+                BenchmarkTestResult.conversation_id == conversation_id,
+            )
+            .update(fields, synchronize_session=False)
+        )
+        db.commit()
+        if not updated:
+            logger.info(
+                "verdict for run %s index %d dropped: row was retried",
+                run_id,
+                test_index,
+            )
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Failed to store verdict for run %s index %d", run_id, test_index
+        )
+    finally:
+        db.close()
+
+
+def clear_pending_verdicts(stale_minutes: int = 10) -> None:
+    """Un-stick rows whose background judge call died (server restart, hung call).
+
+    Only rows pending for longer than any live judge call takes, so a verdict
+    still in flight on another worker is left alone. They go back to "not
+    judged"; /re-evaluate fills them in. Called from the periodic sweeper.
+    """
+    db = get_db()
+    if not db:
+        return
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        minutes=stale_minutes
+    )
+    try:
+        cleared = (
+            db.query(BenchmarkTestResult)
+            .filter(
+                BenchmarkTestResult.verdict_status == "pending",
+                BenchmarkTestResult.updated_at < cutoff,
+            )
+            .update({"verdict_status": None}, synchronize_session=False)
+        )
+        db.commit()
+        if cleared:
+            logger.info("Cleared %d stale pending verdict(s)", cleared)
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to clear stale pending verdicts")
+    finally:
+        db.close()
+
+
 def update_test_result_scores(
     run_id: str,
     test_index: int,
@@ -2155,6 +2275,7 @@ def update_test_result_scores(
     planner_relevancy: float = None,
     score_reason: str = None,
     execution_trace: str = None,
+    verdict: dict = None,
     **kwargs,
 ):
     """Update RAGAS scores and optional token/model metrics for a test result.
@@ -2189,6 +2310,10 @@ def update_test_result_scores(
                 tr.score_reason = score_reason
             if execution_trace is not None:
                 tr.execution_trace = execution_trace
+            # Written as a set (None included) so a new verdict clears an old
+            # error and vice versa.
+            for field, val in (verdict or {}).items():
+                setattr(tr, field, val)
 
             # Token and model metrics from re-evaluation
             _TOKEN_FIELDS = {

@@ -944,8 +944,8 @@ func TestWorkflowBuilderAgent_AgenticCreateThenFix(t *testing.T) {
 
 	// The response is now a markdown summary with an auto-saved workflow link.
 	// Extract the workflow ID from the "Open in Editor" link if present.
-	if idx := strings.Index(fullResponse, "/workflow/"); idx >= 0 {
-		rest := fullResponse[idx+len("/workflow/"):]
+	if idx := strings.Index(fullResponse, "/automation/"); idx >= 0 {
+		rest := fullResponse[idx+len("/automation/"):]
 		if qIdx := strings.IndexAny(rest, "?#)"); qIdx > 0 {
 			workflowId = rest[:qIdx]
 		}
@@ -1367,7 +1367,7 @@ func TestWorkflowBuilderAgent_FinalizeWithAutoSave_SummaryResponse(t *testing.T)
 		assert.Contains(t, fullResponse, "**Tasks:**")
 		// Should contain an "Open in Editor" link if auto-save succeeded
 		if strings.Contains(fullResponse, "Open in Editor") {
-			assert.Contains(t, fullResponse, "/workflow/")
+			assert.Contains(t, fullResponse, "/automation/")
 			assert.Contains(t, fullResponse, accountId)
 			assert.Contains(t, fullResponse, "built and saved")
 			t.Log("Summary response with editor link verified")

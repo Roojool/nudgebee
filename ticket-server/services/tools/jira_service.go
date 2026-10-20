@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +11,12 @@ import (
 	"net/url"
 	"nudgebee/tickets-server/clients"
 	"nudgebee/tickets-server/models"
+	"nudgebee/tickets-server/services/cache"
 	"nudgebee/tickets-server/services/ticket"
 	"nudgebee/tickets-server/utils"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,7 +115,7 @@ func (s *JiraService) Get(ctx *gin.Context, config models.TicketConfigurations, 
 		Labels:      issue.Fields.Labels,
 		Platform:    "jira",
 		ProjectKey:  issue.Fields.Project.Key,
-		URL:         "https://" + jiraClient.GetBaseURL().Host + "/browse/" + issue.Key,
+		URL:         clients.JiraBrowseURL(jiraClient, issue.Key),
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 		Raw:         marshalToMap(issue),
@@ -138,6 +142,7 @@ func CreateJiraIssue(configuration models.TicketConfigurations, ticket models.Ti
 		return ticket, err
 	}
 
+	fields.Priority = resolveJiraPriority(jiraClient, fields.Priority)
 	issue := jira.Issue{
 		Fields: fields,
 	}
@@ -145,7 +150,11 @@ func CreateJiraIssue(configuration models.TicketConfigurations, ticket models.Ti
 	issueResp, _, err := jiraClient.Issue.Create(&issue)
 	if err != nil {
 		slog.Error("Error creating Jira issue:", "error", slog.AnyValue(err))
-		return ticket, jiraCreateError(err)
+		createErr := jiraCreateError(err)
+		if options := jiraPriorityOptions(jiraClient, err); options != "" {
+			createErr = fmt.Errorf("%w (valid priorities: %s)", createErr, options)
+		}
+		return ticket, createErr
 	}
 	slog.Info("Jira issue created:", "Key", issueResp.Key)
 
@@ -165,12 +174,43 @@ func CreateJiraIssue(configuration models.TicketConfigurations, ticket models.Ti
 	if detailedIssue.Fields.Priority != nil {
 		ticket.Severity = detailedIssue.Fields.Priority.Name
 	}
-	ticket.URL = "https://" + jiraClient.GetBaseURL().Host + "/browse/" + detailedIssue.Key
+	ticket.URL = clients.JiraBrowseURL(jiraClient, detailedIssue.Key)
 	ticket.Platform = "jira"
 	now := time.Now()
 	ticket.CreatedAt = &now
 
 	return ticket, nil
+}
+
+var jiraNumericIDRe = regexp.MustCompile(`^\d+$`)
+
+// jiraPriority sends an all-digit value as a priority ID and anything else as a
+// priority name, so create and update read the same input the same way.
+func jiraPriority(value string) *jira.Priority {
+	value = strings.TrimSpace(value)
+	if jiraNumericIDRe.MatchString(value) {
+		return &jira.Priority{ID: value}
+	}
+	return &jira.Priority{Name: value}
+}
+
+// resolveJiraPriority swaps a priority name for the instance's ID for it. Jira
+// matches a priority name case-sensitively ("Low" is accepted, "LoW" is not), so the
+// name is looked up ignoring case in the instance's priority list. Best-effort: with
+// no list or no match the name goes through unchanged and Jira gives its own error.
+func resolveJiraPriority(client *jira.Client, priority *jira.Priority) *jira.Priority {
+	if priority == nil || priority.Name == "" {
+		return priority
+	}
+	if client == nil {
+		return priority
+	}
+	for _, known := range fetchJiraPriorities(client) {
+		if known.ID != "" && strings.EqualFold(strings.TrimSpace(known.Name), strings.TrimSpace(priority.Name)) {
+			return &jira.Priority{ID: known.ID}
+		}
+	}
+	return priority
 }
 
 // buildJiraIssueFields assembles the field set sent to Jira's create API.
@@ -203,10 +243,9 @@ func buildJiraIssueFields(ticket models.Ticket, additionalFields map[string]inte
 	}
 
 	if ticket.Severity != "" {
-		// Severity carries the Jira priority ID (the create-meta option value).
-		fields.Priority = &jira.Priority{
-			ID: ticket.Severity,
-		}
+		// Severity is the create-meta option value (a priority ID) from the UI, but a
+		// priority name from workflows and the assistant; Jira accepts either.
+		fields.Priority = jiraPriority(ticket.Severity)
 	}
 
 	assignee := ticket.Assignee
@@ -342,6 +381,23 @@ func jiraCreateError(err error) error {
 		return err
 	}
 	return fmt.Errorf("jira rejected the create request: %s", strings.Join(parts, "; "))
+}
+
+// jiraPriorityOptions lists the instance's priority names, but only when Jira just
+// rejected the priority, so the common path makes no extra call.
+func jiraPriorityOptions(client *jira.Client, err error) string {
+	var jerr *jira.Error
+	if !errors.As(err, &jerr) {
+		return ""
+	}
+	if _, rejected := jerr.Errors["priority"]; !rejected {
+		return ""
+	}
+	names := make([]string, 0)
+	for _, p := range fetchJiraPriorities(client) {
+		names = append(names, p.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 func validateParentIssue(client *jira.Client, parentKey string) error {
@@ -703,7 +759,7 @@ func QueryIssueFieldDetails(ctx *gin.Context, configuration models.TicketConfigu
 	if err != nil {
 		return nil, fmt.Errorf("invalid auto-complete URL: %v", err)
 	}
-	parsedConfigURL, err := url.Parse("https://" + strings.TrimPrefix(configuration.URL, "https://"))
+	parsedConfigURL, err := url.Parse(clients.NormalizeJiraURL(configuration.URL))
 	if err != nil {
 		return nil, fmt.Errorf("invalid Jira configuration URL: %v", err)
 	}
@@ -875,7 +931,7 @@ func fetchCommentsFromJira(ticketID string, jc *jira.Client) ([]models.Comments,
 		if result.Total == 0 || len(all) >= result.Total || len(result.Comments) == 0 {
 			break
 		}
-		startAt += pageSize
+		startAt += len(result.Comments)
 	}
 
 	return all, nil
@@ -958,6 +1014,7 @@ func (s *JiraService) List(ctx *gin.Context, config models.TicketConfigurations,
 	}
 
 	jql := strings.Join(jqlParts, " AND ")
+	countJQL := jql
 
 	// Add ORDER BY
 	orderField := "created"
@@ -982,12 +1039,18 @@ func (s *JiraService) List(ctx *gin.Context, config models.TicketConfigurations,
 	)
 	if cloud {
 		var seen int
-		issues, hasMore, seen, err = searchJiraCloudPage(listContext(ctx), jiraClient, jql, params.Offset, params.Limit)
+		issues, hasMore, seen, err = searchJiraCloudPage(listContext(ctx), jiraClient, config.ID, jql, params.Offset, params.Limit)
 		if err != nil {
 			return nil, fmt.Errorf("failed to search Jira issues: %w", err)
 		}
 		if !hasMore {
 			total = seen
+		} else {
+			// The cursor API reports no total; use Jira's approximate count while
+			// more pages remain, never below what has already been served.
+			if n := jiraApproximateCount(listContext(ctx), jiraClient, config.ID, countJQL); n > 0 {
+				total = max(n, params.Offset+len(issues)+1)
+			}
 		}
 	} else {
 		var resp *jira.Response
@@ -1002,7 +1065,6 @@ func (s *JiraService) List(ctx *gin.Context, config models.TicketConfigurations,
 	}
 
 	tickets := make([]models.Ticket, 0, len(issues))
-	baseURL := "https://" + jiraClient.GetBaseURL().Host + "/browse/"
 	for _, issue := range issues {
 		var assignee string
 		if issue.Fields.Assignee != nil {
@@ -1032,7 +1094,7 @@ func (s *JiraService) List(ctx *gin.Context, config models.TicketConfigurations,
 			Severity:  priority,
 			Assignee:  assignee,
 			Platform:  "jira",
-			URL:       baseURL + issue.Key,
+			URL:       clients.JiraBrowseURL(jiraClient, issue.Key),
 			CreatedAt: createdAt,
 		})
 	}
@@ -1063,21 +1125,35 @@ type jiraSearchPage struct {
 
 // searchJiraCloudPage serves an offset/limit window from Jira Cloud's
 // cursor-paged search (rest/api/2/search/jql), which replaced the offset-paged
-// rest/api/2/search. Pages are walked from the start until the window is
-// filled or the cursor ends; hasMore reports whether anything follows the
-// window and seen is how many rows the walk covered, which is the exact total
-// once the cursor ends. Cloud may return fewer rows per page than requested,
-// so the page size is only a hint.
-func searchJiraCloudPage(ctx context.Context, jiraClient *jira.Client, jql string, offset, limit int) ([]jira.Issue, bool, int, error) {
+// rest/api/2/search. The cursor for each position it reaches is cached, so the
+// next page resumes there instead of re-walking from the first page; a cold or
+// expired cursor falls back to walking from the start. hasMore reports whether
+// anything follows the window and seen is how many rows precede the cursor,
+// which is the exact total once the cursor ends. Cloud may return fewer rows per
+// page than requested, so the page size is only a hint.
+func searchJiraCloudPage(ctx context.Context, jiraClient *jira.Client, integrationID, jql string, offset, limit int) ([]jira.Issue, bool, int, error) {
+	if token, ok := cachedJiraCursor(ctx, integrationID, jql, offset); ok {
+		issues, hasMore, seen, err := walkJiraCloud(ctx, jiraClient, integrationID, jql, offset, limit, offset, token)
+		if err == nil {
+			return issues, hasMore, seen, nil
+		}
+		slog.Warn("Jira cursor resume failed; re-walking from the first page", "offset", offset, "error", err)
+	}
+	return walkJiraCloud(ctx, jiraClient, integrationID, jql, offset, limit, 0, "")
+}
+
+// walkJiraCloud pages from position base (whose cursor is token; empty for the
+// first page) until the offset/limit window is filled or the cursor ends.
+func walkJiraCloud(ctx context.Context, jiraClient *jira.Client, integrationID, jql string, offset, limit, base int, token string) ([]jira.Issue, bool, int, error) {
 	const maxPages = 20
 	want := offset + limit
 	var collected []jira.Issue
-	token := ""
+	pos := base
 	for page := 0; page < maxPages; page++ {
 		body := map[string]interface{}{
 			"jql":        jql,
 			"fields":     []string{"summary", "status", "priority", "assignee", "created"},
-			"maxResults": want - len(collected) + 1,
+			"maxResults": want - pos,
 		}
 		if token != "" {
 			body["nextPageToken"] = token
@@ -1091,20 +1167,88 @@ func searchJiraCloudPage(ctx context.Context, jiraClient *jira.Client, jql strin
 			return nil, false, 0, err
 		}
 		collected = append(collected, result.Issues...)
+		pos = base + len(collected)
 		token = result.NextPageToken
-		if len(collected) >= want || token == "" || len(result.Issues) == 0 {
+		if token != "" {
+			storeJiraCursor(ctx, integrationID, jql, pos, token)
+		}
+		if pos >= want || token == "" || len(result.Issues) == 0 {
 			break
 		}
 	}
-	hasMore := len(collected) > want || token != ""
-	if offset >= len(collected) {
+	hasMore := pos > want || token != ""
+	rel := offset - base
+	if rel >= len(collected) {
 		if token != "" {
-			return nil, false, 0, fmt.Errorf("offset %d is beyond the %d issues reachable through cursor paging", offset, len(collected))
+			return nil, false, 0, fmt.Errorf("offset %d is beyond the %d issues reachable through cursor paging", offset, pos)
 		}
-		return nil, hasMore, len(collected), nil
+		return nil, hasMore, pos, nil
 	}
-	end := min(want, len(collected))
-	return collected[offset:end], hasMore, len(collected), nil
+	return collected[rel:min(rel+limit, len(collected))], hasMore, pos, nil
+}
+
+// jiraApproximateCount returns Jira Cloud's approximate number of issues matching
+// jql (which must not carry an ORDER BY), or 0 when it cannot be determined. The
+// count is cached briefly per (integration, jql) so paging does not repeat the call.
+func jiraApproximateCount(ctx context.Context, jiraClient *jira.Client, integrationID, jql string) int {
+	key := jiraCursorKey(integrationID, jql, -1)
+	if integrationID != "" {
+		if raw, ok := cache.Get(ctx, jiraCursorNamespace, key); ok {
+			if n, err := strconv.Atoi(string(raw)); err == nil {
+				return n
+			}
+		}
+	}
+	req, err := jiraClient.NewRequestWithContext(ctx, "POST", "rest/api/2/search/approximate-count", map[string]interface{}{"jql": jql})
+	if err != nil {
+		return 0
+	}
+	var result struct {
+		Count int `json:"count"`
+	}
+	if _, err := jiraClient.Do(req, &result); err != nil {
+		slog.Warn("Jira approximate count unavailable; reporting total as unknown", "error", err)
+		return 0
+	}
+	if integrationID != "" {
+		if err := cache.Set(ctx, jiraCursorNamespace, key, []byte(strconv.Itoa(result.Count)), jiraCursorTTL, integrationID); err != nil {
+			slog.Debug("Jira count cache write failed", "error", err)
+		}
+	}
+	return result.Count
+}
+
+// jiraCursorNamespace caches Jira Cloud nextPageTokens by (integration, jql,
+// position) so deep pages do not re-walk the result set.
+const (
+	jiraCursorNamespace = "jira_search_cursor"
+	jiraCursorTTL       = 10 * time.Minute
+)
+
+func init() {
+	cache.CreateNamespace(jiraCursorNamespace)
+}
+
+func jiraCursorKey(integrationID, jql string, pos int) string {
+	sum := sha256.Sum256([]byte(jql))
+	return fmt.Sprintf("%s:%x:%d", integrationID, sum[:8], pos)
+}
+
+func cachedJiraCursor(ctx context.Context, integrationID, jql string, pos int) (string, bool) {
+	if integrationID == "" || pos <= 0 {
+		return "", false
+	}
+	token, ok := cache.Get(ctx, jiraCursorNamespace, jiraCursorKey(integrationID, jql, pos))
+	return string(token), ok && len(token) > 0
+}
+
+func storeJiraCursor(ctx context.Context, integrationID, jql string, pos int, token string) {
+	if integrationID == "" {
+		return
+	}
+	if err := cache.Set(ctx, jiraCursorNamespace, jiraCursorKey(integrationID, jql, pos), []byte(token), jiraCursorTTL, integrationID); err != nil {
+		slog.Debug("Jira cursor cache write failed", "error", err)
+	}
 }
 
 // Update updates fields on a Jira issue. Status changes go through the
@@ -1125,7 +1269,7 @@ func (s *JiraService) Update(ctx *gin.Context, config models.TicketConfiguration
 	update := make(map[string]interface{})
 
 	if updateFields.Severity != "" {
-		update["priority"] = map[string]string{"name": updateFields.Severity}
+		update["priority"] = resolveJiraPriority(jiraClient, jiraPriority(updateFields.Severity))
 	}
 
 	if assignees := updateFields.AssigneeList(); len(assignees) > 0 {
@@ -1178,6 +1322,13 @@ func (s *JiraService) Transition(ctx *gin.Context, config models.TicketConfigura
 		return fmt.Errorf("failed to create Jira client: %w", err)
 	}
 
+	return transitionJiraIssue(jiraClient, ticketID, status)
+}
+
+// transitionJiraIssue moves the issue to status. Jira never offers a transition to
+// the status an issue is already in, so that case is a successful no-op and a
+// re-run of a workflow does not fail on an already-settled ticket.
+func transitionJiraIssue(jiraClient *jira.Client, ticketID string, status string) error {
 	// Get available transitions
 	transitions, _, err := jiraClient.Issue.GetTransitions(ticketID)
 	if err != nil {
@@ -1186,7 +1337,7 @@ func (s *JiraService) Transition(ctx *gin.Context, config models.TicketConfigura
 
 	// Find matching transition
 	var transitionID string
-	statusLower := strings.ToLower(status)
+	statusLower := strings.ToLower(strings.TrimSpace(status))
 	for _, t := range transitions {
 		if strings.ToLower(t.Name) == statusLower || strings.ToLower(t.To.Name) == statusLower {
 			transitionID = t.ID
@@ -1195,6 +1346,12 @@ func (s *JiraService) Transition(ctx *gin.Context, config models.TicketConfigura
 	}
 
 	if transitionID == "" {
+		if issue, _, getErr := jiraClient.Issue.Get(ticketID, &jira.GetQueryOptions{Fields: "status"}); getErr == nil &&
+			issue.Fields != nil && issue.Fields.Status != nil &&
+			strings.ToLower(strings.TrimSpace(issue.Fields.Status.Name)) == statusLower {
+			slog.Info("Jira issue already in target status, nothing to do", "ticketID", ticketID, "status", status)
+			return nil
+		}
 		availableStatuses := make([]string, len(transitions))
 		for i, t := range transitions {
 			availableStatuses[i] = t.To.Name

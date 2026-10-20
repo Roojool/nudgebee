@@ -96,8 +96,8 @@ export async function pickPopulatedStatus(locators: ResolutionsLocators): Promis
   return null;
 }
 
-// aria-pressed is what WidgetCard exposes for "this card is the active filter", and unlike
-// the row count it is in step with the click rather than with the refetch behind it.
+// aria-pressed is what ds/Card's `pressed` exposes for "this card is the active filter", and
+// unlike the row count it is in step with the click rather than with the refetch behind it.
 export async function expectCardPressed(card: Locator): Promise<void> {
   await expect(card).toHaveAttribute("aria-pressed", "true", { timeout: 30000 });
 }

@@ -423,6 +423,25 @@ export function moduleScope(module: string): ModuleScope {
 
 export type Classification = { module: string; class: PermissionClass };
 
+// A scoped API key (user_auths.scopes) must never reach an action that mints or
+// manages credentials, sessions or role assignments: a key limited to `users:Write`
+// could otherwise call users_create_token and mint itself an unrestricted key.
+// Keyed on the name pattern rather than a list, so an action added later with
+// `token`/`session`/`role` in its name is refused by default — the gap a hand-kept
+// list would open. The cost is that a few harmless reads (roles_list) are refused
+// too; a full-access key still reaches them.
+const TOKEN_SCOPE_BLOCKED_PATTERN = /(^|_)(tokens?|sessions?|roles?|credentials?|passwords?)(_|$)/;
+const TOKEN_SCOPE_BLOCKED_MODULES = new Set<string>(['customroles', 'userroles', 'userauths', 'auth', 'signup', 'roles']);
+
+export function isTokenScopeBlockedAction(name: string): boolean {
+  if (TOKEN_SCOPE_BLOCKED_PATTERN.test(name)) return true;
+  if (TOKEN_SCOPE_BLOCKED_MODULES.has(normalizeModule(name.split('_')[0]))) return true;
+  // Also the module the classifier settles on, so a MODULE_OVERRIDES entry that re-homes
+  // an action into one of these modules cannot slip past the prefix check above.
+  const classified = classifyAction(name);
+  return !!classified && TOKEN_SCOPE_BLOCKED_MODULES.has(classified.module);
+}
+
 // Classify an action name into a (module, class) permission. Returns null when
 // the action cannot be confidently classified (gate fails closed).
 export function classifyAction(name: string): Classification | null {

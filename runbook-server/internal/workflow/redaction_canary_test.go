@@ -68,9 +68,11 @@ func resolveParams(t *testing.T, params map[string]any) map[string]any {
 // the canary, as "<taskID>.<field>".
 func findCanary(tasks []model.TaskExecutionDetails, out *[]string) {
 	for _, task := range tasks {
-		for field, surface := range map[string]map[string]any{
+		for field, surface := range map[string]any{
 			"input":           task.Input,
 			"rendered_params": task.RenderedParams,
+			"output":          task.Output,
+			"error":           task.Error,
 		} {
 			if surface == nil {
 				continue
@@ -104,9 +106,8 @@ func TestTemplatingActuallyResolvesTheCanary(t *testing.T) {
 // secret, read the execution back the way the API does, and grep every param
 // surface for the canary. Zero hits is the pass condition.
 //
-// Scope note: task Output is deliberately not covered here. A task that echoes
-// a secret into its own output is a separate exposure that needs value-based
-// scrubbing, which is not part of this change.
+// Error is covered too: credential values in error text are scrubbed to ***.
+// Output is the author's and is left as is.
 func TestProcessWorkflowHistoryLeaksNoResolvedSecretIntoParams(t *testing.T) {
 	dc := converter.GetDefaultDataConverter()
 	mockTemporalClient := new(MockTemporalClient)
@@ -162,13 +163,14 @@ func TestProcessWorkflowHistoryLeaksNoResolvedSecretIntoParams(t *testing.T) {
 func TestCanaryFindsALeakWhenRedactionIsAbsent(t *testing.T) {
 	resolved := resolveParams(t, canaryDefinition().Tasks[0].Params)
 	unredacted := []model.TaskExecutionDetails{
-		{ID: "notify", Input: resolved, RenderedParams: resolved},
+		{ID: "notify", Input: resolved, RenderedParams: resolved, Output: secretCanary, Error: secretCanary},
 	}
 
 	var leaks []string
 	findCanary(unredacted, &leaks)
 
-	assert.ElementsMatch(t, []string{"notify.input", "notify.rendered_params"}, leaks)
+	assert.ElementsMatch(t,
+		[]string{"notify.input", "notify.rendered_params", "notify.output", "notify.error"}, leaks)
 }
 
 // TestRedactSecretsFromTasksClearsEveryCanarySurface drives the redactor
@@ -182,6 +184,8 @@ func TestRedactSecretsFromTasksClearsEveryCanarySurface(t *testing.T) {
 			ID:             "notify",
 			Input:          resolved,
 			RenderedParams: resolved,
+			Output:         map[string]any{"stdout": secretCanary},
+			Error:          "failed with " + secretCanary,
 			Children: []model.TaskExecutionDetails{
 				{ID: "notify", Input: resolved, RenderedParams: resolved},
 			},
@@ -189,10 +193,13 @@ func TestRedactSecretsFromTasksClearsEveryCanarySurface(t *testing.T) {
 	}
 
 	RedactSecretsFromTasks(tasks, def)
+	ScrubTaskValues(tasks, SecretValues(map[string]any{"k": secretCanary}))
 
+	// The output is the author's: a step that prints a credential shows it.
 	var leaks []string
 	findCanary(tasks, &leaks)
-	assert.Empty(t, leaks, "resolved secret reached these param surfaces: %v", leaks)
+	assert.Equal(t, []string{"notify.output"}, leaks, "resolved secret reached these surfaces: %v", leaks)
+	assert.Equal(t, "failed with ***", tasks[0].Error)
 
 	// The scalar, the map-nested value and the slice-nested value each blanked.
 	assert.Equal(t, RedactedValue, tasks[0].RenderedParams["auth_token"])

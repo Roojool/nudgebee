@@ -1,51 +1,80 @@
 package vmpackage
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log/slog"
 
+	"nudgebee/services/common"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/relay"
 
 	"github.com/google/uuid"
 )
 
-// resolveDatasourceKey resolves a datasource identifier to the agent-side
-// datasource_key. Local copy of eventrule/playbooks/proxy_datasource.go's
-// unexported function of the same name — not imported, since that package's
-// init() registers every playbook action, unnecessary weight for one lookup
-// query. Unlike the original, this scopes the lookup to the calling
-// account+tenant via integrations: datasourceID is caller-supplied RPC
-// input, and without this join a caller could resolve another tenant's
-// integration UUID to its datasource_key.
-func resolveDatasourceKey(logger *slog.Logger, accountID, tenantID, datasourceID string) (string, error) {
+// scanDatasource is a caller-supplied datasource_id resolved for the manual
+// single-VM scan: the forager-side datasource_key, and the account whose
+// proxy agent serves it. The relay routes by AgentAccountID, which differs
+// from the scanned account when the datasource reaches that account through
+// a link_role='discovery_target' link — the same split ScanDiscoveryDatasource
+// makes between ds.AccountID (relay) and ds.TargetAccountID (findings).
+type scanDatasource struct {
+	Key            string `db:"datasource_key"`
+	AgentAccountID string `db:"agent_account_id"`
+}
+
+// resolveScanDatasource resolves a datasource identifier to its agent-side
+// datasource_key, scoped to the calling account+tenant: datasourceID is
+// caller-supplied RPC input, and without the scoping a caller could resolve
+// another tenant's integration UUID to its datasource_key.
+//
+// Account scoping goes through integrations_cloud_accounts — integrations has
+// no account_id column (dropped in V573). An integration matches when it is
+// linked to accountID as either the agent's own account ('own') or its scan
+// target ('discovery_target'), the same two roles the account-scan path
+// (ListDiscoveryDatasourcesForAccount) accepts. When an integration has
+// several 'own' links (same datasource name reported from several accounts),
+// the one for accountID is preferred so the relay reaches the local agent.
+//
+// No silent fallback to the integration id: forager knows datasources only by
+// key, so falling back just turns a lookup miss into forager's opaque
+// "datasource <uuid> not found".
+func resolveScanDatasource(accountID, tenantID, datasourceID string) (scanDatasource, error) {
 	if _, err := uuid.Parse(datasourceID); err != nil {
-		// Not a UUID — assume it's already a datasource_key.
-		return datasourceID, nil
+		// Not a UUID — assume it's already a datasource_key, served by the
+		// caller's own account's agent.
+		return scanDatasource{Key: datasourceID, AgentAccountID: accountID}, nil
 	}
 
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
-		return "", fmt.Errorf("failed to get database manager: %w", err)
+		return scanDatasource{}, fmt.Errorf("failed to get database manager: %w", err)
 	}
 
-	var datasourceKey string
-	err = dbms.Db.Get(&datasourceKey,
-		`SELECT icv.value
-		 FROM integration_config_values icv
-		 JOIN integrations i ON i.id = icv.integration_id
-		 WHERE icv.integration_id = $1 AND icv.name = 'datasource_key'
-		   AND i.account_id = $2 AND i.tenant_id = $3`,
+	var ds scanDatasource
+	err = dbms.Db.Get(&ds,
+		`SELECT icv.value AS datasource_key, own.cloud_account_id::varchar AS agent_account_id
+		 FROM integrations i
+		 JOIN integration_config_values icv ON icv.integration_id = i.id AND icv.name = 'datasource_key'
+		 JOIN integrations_cloud_accounts own ON own.integration_id = i.id AND own.link_role = 'own'
+		 WHERE i.id = $1 AND i.tenant_id = $3
+		   AND i.type = 'discovery' AND i.status = 'enabled'
+		   AND EXISTS (
+		       SELECT 1 FROM integrations_cloud_accounts link
+		       WHERE link.integration_id = i.id AND link.cloud_account_id = $2
+		         AND link.link_role IN ('own', 'discovery_target'))
+		 ORDER BY (own.cloud_account_id = $2) DESC, own.id
+		 LIMIT 1`,
 		datasourceID, accountID, tenantID)
-	if err != nil {
-		// Fallback: use the integration ID itself as the datasource key.
-		// Logged since this also masks real DB outages as confusing
-		// downstream relay errors.
-		logger.Warn("vmpackage: resolve datasource_key failed, falling back to integration id", "datasource_id", datasourceID, "error", err)
-		return datasourceID, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return scanDatasource{}, common.ErrorBadRequest(fmt.Sprintf(
+			"vmpackage: datasource %s is not an enabled discovery datasource linked to this account", datasourceID))
 	}
-	return datasourceKey, nil
+	if err != nil {
+		return scanDatasource{}, fmt.Errorf("vmpackage: resolve datasource %s: %w", datasourceID, err)
+	}
+	return ds, nil
 }
 
 // discoveryContentPackVersion pins the forager content pack this action
@@ -116,7 +145,7 @@ type discoverySweepResponse struct {
 // returns its unwrapped response map. Shared by every discovery_* action —
 // unlike fetchDiscoveryInventory, callers here already hold a resolved
 // datasourceKey (the cron resolves it once per integration, not per call)
-// rather than a caller-supplied datasource_id needing resolveDatasourceKey's
+// rather than a caller-supplied datasource_id needing resolveScanDatasource's
 // UUID-vs-key branching.
 func discoveryProxyCall(accountID, datasourceKey, action string, params map[string]any, timeoutSeconds int) (map[string]any, error) {
 	result, err := relay.ExecuteProxy(accountID, action, datasourceKey, params, timeoutSeconds)
@@ -127,19 +156,14 @@ func discoveryProxyCall(accountID, datasourceKey, action string, params map[stri
 }
 
 // fetchDiscoveryInventory runs forager's discovery_inventory content-pack
-// action against ip and returns its one target entry. datasourceID scopes
-// the network (CIDR + SSH creds) the relay routes through; targets narrows
-// forager's own multi-host scan down to the single VM this call is about,
-// which is also what makes parseDiscoveryInventoryResult's Targets[0] valid.
-func fetchDiscoveryInventory(logger *slog.Logger, accountID, tenantID, datasourceID, ip string) (discoveryTarget, error) {
+// action against ip and returns its one target entry. ds scopes the network
+// (CIDR + SSH creds) the relay routes through; targets narrows forager's own
+// multi-host scan down to the single VM this call is about, which is also
+// what makes parseDiscoveryInventoryResult's Targets[0] valid.
+func fetchDiscoveryInventory(ds scanDatasource, ip string) (discoveryTarget, error) {
 	var target discoveryTarget
 
-	datasourceKey, err := resolveDatasourceKey(logger, accountID, tenantID, datasourceID)
-	if err != nil {
-		return target, fmt.Errorf("vmpackage: resolve datasource: %w", err)
-	}
-
-	result, err := discoveryProxyCall(accountID, datasourceKey, "discovery_inventory",
+	result, err := discoveryProxyCall(ds.AgentAccountID, ds.Key, "discovery_inventory",
 		map[string]any{
 			"targets":              []string{ip},
 			"content_pack_version": discoveryContentPackVersion,

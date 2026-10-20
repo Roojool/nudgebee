@@ -1,4 +1,5 @@
 import { hasCliCommand } from './cliCommands';
+import { k8sActionFor } from './k8sActions';
 /**
  * The per-row quick actions every recommendation listing shares — Optimize and
  * Ask Nubi as icon buttons, ticket / dismiss / CLI behind the overflow menu.
@@ -49,7 +50,7 @@ interface RowActionsProps {
 }
 
 const RowActions = memo(({ rowId, rec, ticketId, assistantName, onAskNubi, onResolve, onCreateTicket, onCopyCli, onDismiss }: RowActionsProps) => {
-  const showResolve = rec.rule_name === 'pod_right_sizing' && hasWriteAccess(rec.account_id);
+  const showResolve = (rec.rule_name === 'pod_right_sizing' || k8sActionFor(rec) != null) && hasWriteAccess(rec.account_id);
   const showCopyCli = hasCliCommand(rec);
   // Only offer what the backend legality matrix accepts: dismiss from Open,
   // reactivate from Dismissed. Other statuses (InProgress, Closed, Archive) get

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"nudgebee/services/internal/database"
+	"nudgebee/services/internal/database/pgbatch"
 	"nudgebee/services/relay"
 	"nudgebee/services/security"
 
@@ -171,7 +172,7 @@ func persistCertificates(ctx *security.RequestContext, account ScanAccount, recs
 		})
 	}
 
-	if _, err := dbms.Db.NamedExec(
+	if err := pgbatch.NamedExec(dbms.Db,
 		`INSERT INTO recommendation
 		   (status, tenant_id, cloud_account_id, recommendation, severity, category, rule_name,
 		    estimated_savings, recommendation_action, resource_id, account_object_id, updated_at,

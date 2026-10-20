@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Chip } from '@mui/material';
+import { Box } from '@mui/material';
 import apiCloudAccount from '@api1/cloud-account';
 import apiUser from '@api1/user';
 import Datetime from '@shared/format/Datetime';
 import Text from '@shared/format/Text';
 import { ds } from '@utils/colors';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
+import { Label } from '@ui/Label';
 import CustomTable2 from '@shared/tables/CustomTable2';
 import { usePagination } from '@hooks/usePagination';
 import CommandExecutionDetail, { CommandEntry } from './CommandExecutionDetail';
@@ -61,9 +62,9 @@ const CommandDetail = (_option: any, drilldownQuery: any) => {
   const commands = Array.isArray(attr.commands) ? attr.commands : [];
 
   return (
-    <WidgetCard sx={{ mt: 0 }}>
+    <Card sx={{ padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
       <CommandExecutionDetail commands={commands} status={drilldownQuery?.status} />
-    </WidgetCard>
+    </Card>
   );
 };
 
@@ -108,18 +109,7 @@ function buildRows(audits: AuditRow[], userMap: Record<string, UserSummary>): an
         ),
       },
       {
-        component: (
-          <Chip
-            label={isSuccess ? 'Success' : 'Failed'}
-            size='small'
-            sx={{
-              fontSize: ds.text.caption,
-              height: ds.space.mul(0, 10),
-              backgroundColor: isSuccess ? ds.green[100] : ds.red[100],
-              color: isSuccess ? ds.green[700] : ds.red[700],
-            }}
-          />
-        ),
+        component: <Label tone={isSuccess ? 'success' : 'critical'}>{isSuccess ? 'Success' : 'Failed'}</Label>,
       },
       {
         component: <Text value={displayUser} showAutoEllipsis />,

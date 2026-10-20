@@ -220,7 +220,7 @@ func (e *LoadBalancerPodTargetEnricher) enrichLoadBalancerWithTargets(
 
 	// Step 1.5: Read LoadBalancer tags to check for Kubernetes service mapping
 	var k8sServiceName, k8sNamespace string
-	tags, tagsErr := flow_sources.FetchLoadBalancerTags(reqCtx, awsAccountID, arn, e.topology)
+	tags, tagsErr := flow_sources.FetchLoadBalancerTags(reqCtx, awsAccountID, region, arn, e.topology)
 	if tagsErr != nil {
 		e.logger.Debug("Failed to query LoadBalancer tags",
 			"lb_name", lbNode.Properties["name"],
@@ -277,7 +277,7 @@ func (e *LoadBalancerPodTargetEnricher) enrichLoadBalancerWithTargets(
 			CloudAccountID: k8sAccountID,
 			TenantID:       tenantID,
 			Level:          "Tenant",
-			Source:         "cloud",
+			Source:         e.GetName(),
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		}
@@ -297,6 +297,12 @@ func (e *LoadBalancerPodTargetEnricher) enrichLoadBalancerWithTargets(
 				"ingress_service", k8sServiceName)
 		} else if ingressBackendNodes != nil {
 			nodes = append(nodes, ingressBackendNodes...)
+			// The shared resolver stamps its edges "cloud", which the centralized
+			// external-service enricher also uses. Claim them under this enricher's
+			// name so a scoped build can sweep them without touching the others.
+			for _, backendEdge := range ingressBackendEdges {
+				backendEdge.Source = e.GetName()
+			}
 			resultEdges = append(resultEdges, ingressBackendEdges...)
 			e.logger.Info("Resolved Ingress backend services",
 				"ingress_service", k8sServiceName,
@@ -629,7 +635,7 @@ func (e *LoadBalancerPodTargetEnricher) enrichLoadBalancerWithTargets(
 			CloudAccountID: awsAccountID,
 			TenantID:       tenantID,
 			Level:          "Tenant",
-			Source:         "cloud",
+			Source:         e.GetName(),
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		}

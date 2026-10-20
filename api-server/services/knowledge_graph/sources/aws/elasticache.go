@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 )
 
 // elastiCacheClusterSchema — concrete schema for ElastiCache clusters.
@@ -131,4 +132,36 @@ func (s *AWSSource) createElastiCacheEdges(nodes []*core.DbNode, lookup *sources
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	elastiCacheRows := resourceKind{
+		Service:      "AmazonElastiCache",
+		NodeType:     core.NodeTypeCache,
+		SpecificType: "ElastiCacheCluster",
+		Subtype:      "ElastiCache",
+		Props:        map[string]interface{}{"cache_type": "elasticache"},
+		Extract:      (*AWSSource).extractCacheMetadata,
+	}
+	registerKind(elastiCacheRows)
+	registerKind(elastiCacheRows.withTypes("cluster"))
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// ElastiCache clusters attach to their VPC, subnets and security groups.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeCache, Name: "elasticache",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createElastiCacheEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Cache clusters have no edges of their own.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"ElastiCacheCluster"},
+		Creatable:     true,
+	}, nil)
 }

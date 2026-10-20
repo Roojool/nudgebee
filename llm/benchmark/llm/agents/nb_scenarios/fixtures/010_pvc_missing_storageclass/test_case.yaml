@@ -1,0 +1,5 @@
+user_prompt: "analytics-db in benchmark-scenarios is Pending. is it a storage problem?"
+expected_output:
+  - The response must identify that the pod is Pending because its PersistentVolumeClaim analytics-data is unbound / Pending.
+  - The response must state the PVC references StorageClass fast-ssd-v9, which does not exist in the cluster.
+tags: [kubernetes, rca, scenario, easy]

@@ -390,7 +390,7 @@ const CloudRightSizingEvidence = ({ recommendation, ruleName, estimatedSavings, 
                     borderBottom: idx < alternateInstances.length - 1 ? `1px solid ${ds.gray[200]}` : 'none',
                   }}
                 >
-                  <Typography sx={{ fontSize: ds.text.small, color: ds.gray[700], fontFamily: 'monospace' }}>{instanceType}</Typography>
+                  <Typography sx={{ fontSize: ds.text.small, color: ds.gray[700], fontFamily: ds.font.mono }}>{instanceType}</Typography>
                   {price != null && (
                     <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.green[600] }}>
                       ${Number(price).toFixed(4)}/hr
@@ -518,7 +518,7 @@ const parseRecFields = (rec: any): { metricObjects: MetricObj[]; scalarFields: S
 const _MetricSummaryBox = ({ label, value, color }: { label: string; value: string; color: string }) => (
   <Box sx={{ textAlign: 'center', p: ds.space[1], borderRadius: ds.radius.sm, backgroundColor: 'white' }}>
     <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500] }}>{label}</Typography>
-    <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color, fontFamily: 'monospace' }}>{value}</Typography>
+    <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color, fontFamily: ds.font.mono }}>{value}</Typography>
   </Box>
 );
 

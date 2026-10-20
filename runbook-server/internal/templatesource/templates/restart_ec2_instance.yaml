@@ -22,6 +22,10 @@ definition:
       type: "string"
       description: "EC2 instance ID (e.g. i-0abc123)"
       required: true
+    - id: "region"
+      type: "string"
+      description: "AWS region (e.g. us-east-1)"
+      required: true
     - id: "account_id"
       type: "string"
       description: "Cloud account ID"
@@ -36,14 +40,14 @@ definition:
     - id: "reboot"
       type: "cloud.aws.cli"
       params:
-        command: "aws ec2 reboot-instances --instance-ids {{ Inputs.instance_id }}"
+        command: "aws ec2 reboot-instances --instance-ids {{ Inputs.instance_id }} --region {{ Inputs.region }}"
         account_id: "{{ Inputs.account_id }}"
       depends_on:
         - "approve"
     - id: "verify"
       type: "cloud.aws.cli"
       params:
-        command: "aws ec2 describe-instance-status --instance-ids {{ Inputs.instance_id }} --query InstanceStatuses[0].{State:InstanceState.Name,SystemStatus:SystemStatus.Status,InstanceStatus:InstanceStatus.Status}"
+        command: "aws ec2 describe-instance-status --instance-ids {{ Inputs.instance_id }} --query InstanceStatuses[0].{State:InstanceState.Name,SystemStatus:SystemStatus.Status,InstanceStatus:InstanceStatus.Status} --region {{ Inputs.region }}"
         account_id: "{{ Inputs.account_id }}"
       depends_on:
         - "reboot"
@@ -55,6 +59,12 @@ template_variables:
     required: true
     type: "string"
     placeholder: "i-0abc123def456"
+  - id: "region"
+    input_ref: "region"
+    display_name: "AWS Region"
+    required: true
+    type: "string"
+    placeholder: "us-east-1"
   - id: "account_id"
     input_ref: "account_id"
     display_name: "Account"

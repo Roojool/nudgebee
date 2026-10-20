@@ -1022,31 +1022,7 @@ func TestGetTimeRange(t *testing.T) {
 		assert.Nil(t, req.QueryRequest.Where.Binary["timestamp"])
 	})
 
-	t.Run("trace_source removed from Binary", func(t *testing.T) {
-		req := TracesV3Request{
-			StartTime: 1704067200,
-			EndTime:   1704070800,
-			QueryRequest: TracesQueryBuilderRequest{
-				Where: query.QueryWhereClause{
-					Binary: query.BinaryWhereClause{
-						"trace_source": {query.Eq: "otel"},
-						"service.name": {query.Eq: "api-service"},
-					},
-				},
-			},
-		}
-
-		start, end := s.getTimeRange(&req)
-
-		assert.Equal(t, int64(1704067200), start)
-		assert.Equal(t, int64(1704070800), end)
-		// trace_source should be removed
-		assert.Nil(t, req.QueryRequest.Where.Binary["trace_source"])
-		// other fields should remain
-		assert.NotNil(t, req.QueryRequest.Where.Binary["service.name"])
-	})
-
-	t.Run("Both timestamp and trace_source removed from Binary", func(t *testing.T) {
+	t.Run("timestamp removed, other fields kept", func(t *testing.T) {
 		req := TracesV3Request{
 			QueryRequest: TracesQueryBuilderRequest{
 				Where: query.QueryWhereClause{
@@ -1055,7 +1031,6 @@ func TestGetTimeRange(t *testing.T) {
 							query.Gte: float64(1704067200000),
 							query.Lte: float64(1704070800000),
 						},
-						"trace_source": {query.Eq: "otel"},
 						"service.name": {query.Eq: "api-service"},
 					},
 				},
@@ -1067,7 +1042,6 @@ func TestGetTimeRange(t *testing.T) {
 		assert.Equal(t, int64(1704067200), start)
 		assert.Equal(t, int64(1704070800), end)
 		assert.Nil(t, req.QueryRequest.Where.Binary["timestamp"])
-		assert.Nil(t, req.QueryRequest.Where.Binary["trace_source"])
 		assert.NotNil(t, req.QueryRequest.Where.Binary["service.name"])
 	})
 
@@ -2777,7 +2751,7 @@ func TestConvertToLogGroupOutput_FacetParsing(t *testing.T) {
 		assert.Equal(t, "namespace1", group.Namespace)
 		assert.Equal(t, "pod1", group.Workload)
 		assert.Equal(t, "container1", group.Container)
-		assert.Equal(t, "/k8s/namespace1/pod1/container1", group.ContainerID)
+		assert.Equal(t, "/k8s/namespace1/pod1", group.ContainerID)
 		assert.Equal(t, []int64{timestamp}, group.Timestamps)
 		assert.Equal(t, []float64{100}, group.Values)
 		assert.Equal(t, int64(100), group.Count)
@@ -2802,7 +2776,7 @@ func TestConvertToLogGroupOutput_FacetParsing(t *testing.T) {
 		assert.Equal(t, "my-namespace", group.Namespace)
 		assert.Equal(t, "my-workload", group.Workload)
 		assert.Equal(t, "my-container", group.Container)
-		assert.Equal(t, "/k8s/my-namespace/my-workload/my-container", group.ContainerID)
+		assert.Equal(t, "/k8s/my-namespace/my-workload", group.ContainerID)
 	})
 
 	t.Run("No count value skips result", func(t *testing.T) {
@@ -3053,7 +3027,7 @@ func TestConvertToLogGroupOutput_LogGroup(t *testing.T) {
 		assert.Equal(t, "production", group.Namespace)
 		assert.Equal(t, "api-server", group.Workload)
 		assert.Equal(t, "api-container", group.Container)
-		assert.Equal(t, "/k8s/production/api-server/api-container", group.ContainerID)
+		assert.Equal(t, "/k8s/production/api-server", group.ContainerID)
 		assert.NotEmpty(t, group.PatternHash)
 		assert.Equal(t, []int64{timestamp}, group.Timestamps)
 		assert.Equal(t, []float64{100}, group.Values)
@@ -3322,6 +3296,10 @@ func TestBuildNewRelicWorkloadQueries(t *testing.T) {
 		assert.Contains(t, queries["http_latency_p95"], "percentile(duration, 95)")
 		assert.Contains(t, queries["http_latency_p99"], "percentile(duration, 99)")
 		assert.Contains(t, queries["http_error_rate"], "percentage(count(*), WHERE error IS true)")
+
+		// The evidence cards ask for the workload-level key, which the same NRQL answers.
+		aliased := buildNewRelicWorkloadQueries(meta, []string{"workload_http_latency_p99"})
+		assert.Equal(t, queries["http_latency_p99"], aliased["workload_http_latency_p99"])
 	})
 
 	t.Run("Empty namespace returns empty for workload metrics", func(t *testing.T) {

@@ -608,7 +608,7 @@ const apiCloudAccount = {
       }
       const where: any = {
         account: { _eq: accountId },
-        status: { _eq: 'Active' },
+        status: { _in: ['Active', 'Inactive'] },
         tags: { _is_null: false },
       };
       if (serviceName) {
@@ -648,7 +648,7 @@ const apiCloudAccount = {
       }
       const where: any = {
         account: { _eq: accountId },
-        status: { _eq: 'Active' },
+        status: { _in: ['Active', 'Inactive'] },
         tags: { _has_key: tagKey },
       };
       if (serviceName) {
@@ -1155,6 +1155,10 @@ const apiCloudAccount = {
       }
 
       const sn = data.service_name.toLowerCase();
+      // GCP reports cpu/memory utilization as a 0–1 fraction while AWS/Azure already
+      // return 0–100 percent, so GCP fractions are scaled ×100. Keyed off the provider,
+      // not the value magnitude. Mirrors useLiveResourceMetrics.ts.
+      const isGcpFraction = sn.includes('compute engine');
       let metricNames: string[] = [];
       if (sn.includes('amazon') || sn.includes('ec2')) {
         metricNames = ['CPUUtilization'];
@@ -1234,6 +1238,9 @@ mutation CloudMetrics($request: CloudMetricsRequestInput!) {
           let finalValue = value;
           if (CPU_NAMES.includes(item.name)) {
             key = 'cpu';
+            if (isGcpFraction) {
+              finalValue = Math.round(value * 10000) / 100;
+            }
           } else if (MEMORY_NAMES.includes(item.name)) {
             key = 'memory';
             // Azure returns 'Available Memory Bytes' (raw bytes, not %).
@@ -1247,6 +1254,9 @@ mutation CloudMetrics($request: CloudMetricsRequestInput!) {
                 // Can't convert without total memory — skip this metric
                 continue;
               }
+            } else if (isGcpFraction) {
+              // GCP 'memory/utilization' is a 0–1 fraction; scale to percent.
+              finalValue = Math.round(value * 10000) / 100;
             }
           } else {
             continue;

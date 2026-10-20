@@ -1,6 +1,9 @@
 package triage
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestAssembleTiers covers the tiering rules directly (the replay harness scores
 // them end-to-end against the labelled corpus; this pins each rule in the triage
@@ -134,5 +137,37 @@ func TestAssembleTiersMutualEdgeKeepsImpactAfterRoot(t *testing.T) {
 	// The ambiguity is surfaced rather than hidden, so the UI can say which it is.
 	if rel := RelationTo(seed, cands[0], dependsOn); rel != RelationMutual {
 		t.Errorf("relation: got %q, want %q", rel, RelationMutual)
+	}
+}
+
+// On an account whose service map has no edge between the pieces of one outage,
+// AssembleTiers drops every other subject; CoFiring returns the ones close in time.
+func TestCoFiring(t *testing.T) {
+	seed := AlertIdentity{ID: "seed", SubjectType: "cloudwatch", SubjectName: "order-service", AggregationKey: "order-service-down"}
+	rates := map[string]Rate{
+		"|nginx|nginx-down": {Expected: 2, Observed: 2}, // chronic
+	}
+	cands := []AlertIdentity{
+		{ID: "ec2-terminated", SubjectType: "ec2", SubjectName: "i-0650", AggregationKey: "EC2 State-change", TsOffsetS: -2},
+		{ID: "alb-5xx", SubjectType: "alb", SubjectName: "orders-alb", AggregationKey: "alb-5xx", TsOffsetS: 90},
+		{ID: "sg-change", SubjectType: "sg", SubjectName: "sg-1", IsConfigChange: true, FindingType: "configuration_change", TsOffsetS: -600},
+		{ID: "deploy-after", SubjectType: "ecs", SubjectName: "billing", IsConfigChange: true, FindingType: "configuration_change", TsOffsetS: 300},
+		{ID: "far", SubjectType: "rds", SubjectName: "db", AggregationKey: "cpu-high", TsOffsetS: -CoFiringWindowSeconds - 1},
+		{ID: "chronic", SubjectName: "nginx", AggregationKey: "nginx-down", TsOffsetS: 30},
+		{ID: "anomaly", SubjectName: "billing", AggregationKey: "Anomaly", FindingType: "Anomaly", TsOffsetS: 30},
+		{ID: "same-subject", SubjectType: "cloudwatch", SubjectName: "order-service", AggregationKey: "order-service-latency", TsOffsetS: 30},
+		{ID: "already-tiered", SubjectType: "ec2", SubjectName: "i-other", AggregationKey: "cpu", TsOffsetS: 10},
+	}
+	tiers := map[string]string{"same-subject": TierCore, "already-tiered": TierCause}
+
+	got := CoFiring(seed, cands, tiers, rates)
+
+	var ids []string
+	for _, c := range got {
+		ids = append(ids, c.ID)
+	}
+	want := []string{"ec2-terminated", "alb-5xx", "sg-change"}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Errorf("CoFiring = %v, want %v (nearest first; far, chronic, derived, same-subject, tiered and post-root config changes excluded)", ids, want)
 	}
 }

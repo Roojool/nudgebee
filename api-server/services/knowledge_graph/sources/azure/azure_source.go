@@ -45,7 +45,7 @@ var DefaultAzureServiceTypeFilter = map[string][]string{
 	"microsoft.compute/locations":         {}, // location-level diagnostics rows
 
 	// Compute storage artifacts — not topology nodes. Without an explicit entry in
-	// azureTypeToNodeType these fall through determineNodeType to the coarse
+	// kind of their own these fall through determineNodeType to the coarse
 	// "microsoft.compute" → ComputeInstance prefix fallback, polluting the VM set.
 	// Worse, AKS/Databricks per-pod volumes (osdisk / containerrootvolume /
 	// scratchvolume) are ephemeral: each build sees fresh GUIDs, so the old set is
@@ -318,38 +318,9 @@ func (s *AzureSource) convertResourcesToGraph(reqCtx *security.RequestContext, r
 	// Step 4: Create edges
 	edges := make([]*core.DbEdge, 0)
 
-	for nodeType, nodeList := range lookup.ByNodeType {
-		switch nodeType {
-		case core.NodeTypeVPC:
-			// VNet nodes: create edges to subnets + VNet↔VNet peering
-			edges = append(edges, s.createVNetEdges(nodeList, lookup, req)...)
-			edges = append(edges, s.createVNetPeeringEdges(nodeList, req)...)
-
-		case core.NodeTypeComputeInstance:
-			edges = append(edges, s.createVMEdges(nodeList, lookup, req)...)
-
-		case core.NodeTypeManagedCluster:
-			edges = append(edges, s.createAKSEdges(nodeList, lookup, req)...)
-
-		case core.NodeTypeSubnet:
-			edges = append(edges, s.createSubnetEdges(nodeList, lookup, req)...)
-
-		case core.NodeTypeNetworkInterface:
-			edges = append(edges, s.createNICEdges(nodeList, lookup, req)...)
-
-		case core.NodeTypeSecurityGroup:
-			// NSG edges are created from the resources that reference them
-			continue
-
-		case core.NodeTypeDatabase:
-			// Default VNet attachment (as the default case) + SQL server↔database containment.
-			edges = append(edges, s.createDefaultVNetEdges(nodeList, lookup, req)...)
-			edges = append(edges, s.createSQLServerDatabaseEdges(nodeList, req)...)
-
-		default:
-			edges = append(edges, s.createDefaultVNetEdges(nodeList, lookup, req)...)
-		}
-	}
+	// Ask each resource for the edges of its own nodes. Every builder is
+	// registered by its resource file; see dispatch.go.
+	edges = append(edges, s.buildEdges(nodes, lookup, req)...)
 
 	// Step 5: Derive cross-resource edges from the embedded resource IDs in each
 	// resource's ARG meta (LoadBalancer frontend/backend, etc.) — connects
@@ -371,133 +342,6 @@ func (s *AzureSource) convertResourcesToGraph(reqCtx *security.RequestContext, r
 	// them.
 
 	return nodes, edges
-}
-
-// azureTypeToNodeType maps lowercase resource type strings to NodeTypes.
-// Handles both singular (VirtualMachine) and plural (virtualmachines) forms
-// since the DB stores plural lowercase types from Azure Resource Graph.
-var azureTypeToNodeType = map[string]core.NodeType{
-	// Compute
-	"virtualmachine":          core.NodeTypeComputeInstance,
-	"virtualmachines":         core.NodeTypeComputeInstance,
-	"virtualmachinescalesets": core.NodeTypeComputeInstance,
-
-	// Container orchestration
-	"managedcluster":  core.NodeTypeManagedCluster,
-	"managedclusters": core.NodeTypeManagedCluster,
-
-	// Networking
-	"virtualnetwork":        core.NodeTypeVPC,
-	"virtualnetworks":       core.NodeTypeVPC,
-	"subnet":                core.NodeTypeSubnet,
-	"subnets":               core.NodeTypeSubnet,
-	"loadbalancer":          core.NodeTypeLoadBalancer,
-	"loadbalancers":         core.NodeTypeLoadBalancer,
-	"applicationgateway":    core.NodeTypeLoadBalancer,
-	"applicationgateways":   core.NodeTypeLoadBalancer,
-	"networksecuritygroup":  core.NodeTypeSecurityGroup,
-	"networksecuritygroups": core.NodeTypeSecurityGroup,
-	"publicipaddress":       core.NodeTypePublicIP,
-	"publicipaddresses":     core.NodeTypePublicIP,
-	"networkinterface":      core.NodeTypeNetworkInterface,
-	"networkinterfaces":     core.NodeTypeNetworkInterface,
-	"natgateway":            core.NodeTypeNetworkGateway,
-	"natgateways":           core.NodeTypeNetworkGateway,
-	"routetable":            core.NodeTypeRouteTable,
-	"routetables":           core.NodeTypeRouteTable,
-	"privateendpoint":       core.NodeTypePrivateEndpoint,
-	"privateendpoints":      core.NodeTypePrivateEndpoint,
-	"frontdoor":             core.NodeTypeCDN,
-	"frontdoors":            core.NodeTypeCDN,
-
-	// Databases
-	"sqldatabase":      core.NodeTypeDatabase,
-	"databases":        core.NodeTypeDatabase, // microsoft.sql/servers type=databases
-	"sqlserver":        core.NodeTypeDatabase,
-	"servers":          core.NodeTypeDatabase, // microsoft.sql/servers type=servers
-	"cosmosdbaccount":  core.NodeTypeDatabase,
-	"databaseaccounts": core.NodeTypeDatabase,
-	"flexibleservers":  core.NodeTypeDatabase, // microsoft.dbforpostgresql|dbformysql|dbformariadb/flexibleServers
-
-	// Cache
-	"rediscache": core.NodeTypeCache,
-	"redis":      core.NodeTypeCache,
-
-	// Storage
-	"storageaccount":  core.NodeTypeStorage,
-	"storageaccounts": core.NodeTypeStorage,
-
-	// Serverless
-	"functionapp": core.NodeTypeServerlessFunction,
-	"sites":       core.NodeTypeServerlessFunction, // microsoft.web/sites
-
-	// Messaging
-	"servicebusnamespace": core.NodeTypeMessageQueue,
-	"namespaces":          core.NodeTypeMessageQueue, // microsoft.servicebus/namespaces
-	"eventhubnamespace":   core.NodeTypeMessageQueue,
-
-	// Security
-	"vault":  core.NodeTypeSecretVault,
-	"vaults": core.NodeTypeSecretVault,
-
-	// Container Registry
-	"containerregistry": core.NodeTypeContainerRegistry,
-	"registries":        core.NodeTypeContainerRegistry,
-
-	// DNS
-	"dnszone":         core.NodeTypeDNSZone,
-	"dnszones":        core.NodeTypeDNSZone,
-	"privatednszone":  core.NodeTypeDNSZone,
-	"privatednszones": core.NodeTypeDNSZone,
-
-	// CDN
-	"cdnprofile": core.NodeTypeCDN,
-	"profiles":   core.NodeTypeCDN, // microsoft.cdn/profiles
-
-	// Identity
-	"userassignedidentities": core.NodeTypeServiceIdentity, // microsoft.managedidentity/userassignedidentities
-
-	// Messaging — EventGrid
-	"systemtopics": core.NodeTypeTopic, // microsoft.eventgrid/systemtopics
-
-	// Container orchestration — Azure Container Instances
-	"containergroups": core.NodeTypeWorkload, // microsoft.containerinstance/containergroups
-
-	// AI
-	"botservices": core.NodeTypeAIService, // microsoft.botservice/botservices
-}
-
-// azureServicePrefixToNodeType maps the provider prefix from service_name to NodeTypes.
-// service_name in DB is like "microsoft.compute/virtualmachines" — we extract the provider prefix.
-var azureServicePrefixToNodeType = map[string]core.NodeType{
-	"microsoft.compute":           core.NodeTypeComputeInstance,
-	"microsoft.containerservice":  core.NodeTypeManagedCluster,
-	"microsoft.network":           core.NodeTypeCloudResource,
-	"microsoft.sql":               core.NodeTypeDatabase,
-	"microsoft.documentdb":        core.NodeTypeDatabase,
-	"microsoft.cache":             core.NodeTypeCache,
-	"microsoft.storage":           core.NodeTypeStorage,
-	"microsoft.web":               core.NodeTypeServerlessFunction,
-	"microsoft.servicebus":        core.NodeTypeMessageQueue,
-	"microsoft.eventhub":          core.NodeTypeMessageQueue,
-	"microsoft.keyvault":          core.NodeTypeSecretVault,
-	"microsoft.containerregistry": core.NodeTypeContainerRegistry,
-	"microsoft.cdn":               core.NodeTypeCDN,
-	// Managed databases (flexible-server PaaS) — also caught by the "flexibleservers"
-	// type entry, but the prefix keeps classification correct if the type segment shifts.
-	"microsoft.dbforpostgresql": core.NodeTypeDatabase,
-	"microsoft.dbformysql":      core.NodeTypeDatabase,
-	"microsoft.dbformariadb":    core.NodeTypeDatabase,
-	// AI / ML / analytics compute
-	"microsoft.cognitiveservices":       core.NodeTypeAIService,
-	"microsoft.machinelearningservices": core.NodeTypeAIService,
-	"microsoft.databricks":              core.NodeTypeAIService,
-	// Arc-enabled (hybrid) servers are compute hosts
-	"microsoft.hybridcompute": core.NodeTypeComputeInstance,
-	// Logic Apps are serverless workflow executions
-	"microsoft.logic": core.NodeTypeServerlessFunction,
-	// Communication Services (email/SMS/chat delivery)
-	"microsoft.communication": core.NodeTypeEmailService,
 }
 
 // Edge creation methods

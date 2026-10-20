@@ -1,0 +1,5 @@
+user_prompt: "checkout-api in benchmark-scenarios is Running but never becomes Ready. why?"
+expected_output:
+  - The response must identify that the readiness probe is failing.
+  - The response must point out the probe targets port 8081 while the container listens on port 80 (nginx), i.e. the probe port is wrong.
+tags: [kubernetes, rca, scenario, medium]

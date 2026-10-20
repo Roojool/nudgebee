@@ -1,8 +1,9 @@
 import React from 'react';
-import { Box, Typography, Alert, CircularProgress } from '@mui/material';
+import { Box, Typography, CircularProgress } from '@mui/material';
 import CodeMirror from '@uiw/react-codemirror';
 import { json } from '@codemirror/lang-json';
 import { Button } from '@ui/Button';
+import { Banner } from '@ui/Banner';
 import CopyButton from '@components/common/buttons/CopyButton';
 
 interface JsonEditorTabProps {
@@ -77,11 +78,17 @@ const JsonEditorTab: React.FC<JsonEditorTabProps> = ({
 
       {/* Error Alert */}
       {parseError && (
-        <Alert severity='error' sx={{ mb: 2 }}>
-          <Typography variant='body2' sx={{ fontSize: 'var(--ds-text-body)' }}>
-            <strong>JSON Parse Error:</strong> {parseError}
-          </Typography>
-        </Alert>
+        <Box sx={{ mb: 2 }}>
+          <Banner
+            tone='critical'
+            surface='section'
+            message={
+              <>
+                <strong>JSON Parse Error:</strong> {parseError}
+              </>
+            }
+          />
+        </Box>
       )}
 
       {/* Revert banner - shows after LLM apply */}

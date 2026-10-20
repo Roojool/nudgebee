@@ -80,6 +80,11 @@ func TestOpenObserve_ConfigSchema_StreamsAreOptionalWithDefaults(t *testing.T) {
 	// Streams are not credentials — they must not be encrypted at rest.
 	assert.False(t, schema.Properties["openobserve_log_stream"].IsEncrypted)
 	assert.False(t, schema.Properties["openobserve_trace_stream"].IsEncrypted)
+
+	// The form skips validation on an edit that changes no testable field, so a stream
+	// that is not testable could be renamed to anything without ValidateConfig seeing it.
+	assert.True(t, schema.Properties["openobserve_log_stream"].IsTestable)
+	assert.True(t, schema.Properties["openobserve_trace_stream"].IsTestable)
 }
 
 func TestOpenObserve_ConfigSchema_PasswordIsEncrypted(t *testing.T) {
@@ -356,4 +361,111 @@ func TestOpenObserve_TestConnection_URLNormalized(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, strings.HasSuffix(gotPath, "/api/default/streams"),
 		"expected path to end with /api/default/streams, got %s", gotPath)
+}
+
+// ----- stream checks ----------------------------------------------------------
+
+// A stream name GetOpenObserveConfigs would refuse fails every query for the account,
+// metrics included, so it is rejected on save. Blank keeps the default.
+func TestOpenObserve_ValidateConfig_RejectsUnusableStreamNames(t *testing.T) {
+	cfg := validOpenObserveCfg()
+	cfg["openobserve_log_stream"] = "app-logs"
+	cfg["openobserve_trace_stream"] = `default" --`
+	joined := joinErrors(OpenObserve{}.ValidateConfig(nil, openobserveCfg(cfg), "acc-1"))
+	assert.Contains(t, joined, `openobserve_log_stream "app-logs" is not a valid OpenObserve stream name`)
+	assert.Contains(t, joined, "openobserve_trace_stream")
+
+	cfg["openobserve_log_stream"] = " app_logs "
+	cfg["openobserve_trace_stream"] = ""
+	assert.Empty(t, OpenObserve{}.ValidateConfig(nil, openobserveCfg(cfg), "acc-1"))
+}
+
+func TestOpenObserve_ImplementsConnectionNoter(t *testing.T) {
+	var _ core.ConnectionNoter = OpenObserve{}
+}
+
+// openObserveStreamsServer answers /streams?type=<t> from a type -> names table.
+func openObserveStreamsServer(t *testing.T, streams map[string][]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/default/streams", r.URL.Path)
+		streamType := r.URL.Query().Get("type")
+		var list []string
+		for _, name := range streams[streamType] {
+			list = append(list, `{"name":"`+name+`","stream_type":"`+streamType+`"}`)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"list":[` + strings.Join(list, ",") + `]}`))
+	}))
+}
+
+// A mistyped stream passes the connection test — OpenObserve answers a search on it with
+// "stream not found", which reads as an empty window — so the test card names it.
+func TestOpenObserve_ConnectionNotes_ConfiguredStreamMissing(t *testing.T) {
+	srv := openObserveStreamsServer(t, map[string][]string{
+		"logs":   {"triggers", "default", "k8s_events"},
+		"traces": {"default"},
+	})
+	defer srv.Close()
+
+	cfg := validOpenObserveCfg()
+	cfg["openobserve_url"] = srv.URL
+	cfg["openobserve_log_stream"] = "defualt"
+	notes := OpenObserve{}.ConnectionNotes(nil, openobserveCfg(cfg), "acc-1")
+
+	require.Len(t, notes, 1)
+	assert.Equal(t, `Log stream "defualt" was not found in organization "default", so log searches will come back empty. `+
+		`Set openobserve_log_stream to one of this organization's log streams: default, k8s_events, triggers.`, notes[0])
+}
+
+func TestOpenObserve_ConnectionNotes_Quiet(t *testing.T) {
+	for name, tc := range map[string]struct {
+		streams map[string][]string
+		cfg     map[string]string
+	}{
+		"defaults exist":             {map[string][]string{"logs": {"default"}, "traces": {"default"}}, nil},
+		"custom streams exist":       {map[string][]string{"logs": {"app_logs"}, "traces": {"spans"}}, map[string]string{"openobserve_log_stream": "app_logs", "openobserve_trace_stream": "spans"}},
+		"org sends no traces":        {map[string][]string{"logs": {"default"}}, nil},
+		"nothing ingested yet":       {map[string][]string{}, nil},
+		"blank stream means default": {map[string][]string{"logs": {"default"}, "traces": {"default"}}, map[string]string{"openobserve_log_stream": " "}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := openObserveStreamsServer(t, tc.streams)
+			defer srv.Close()
+			cfg := validOpenObserveCfg()
+			cfg["openobserve_url"] = srv.URL
+			for k, v := range tc.cfg {
+				cfg[k] = v
+			}
+			assert.Empty(t, OpenObserve{}.ConnectionNotes(nil, openobserveCfg(cfg), "acc-1"))
+		})
+	}
+}
+
+// A stream of the wrong type is as good as missing: a logs stream cannot answer traces.
+func TestOpenObserve_ConnectionNotes_StreamOfWrongType(t *testing.T) {
+	srv := openObserveStreamsServer(t, map[string][]string{
+		"logs":   {"default", "app_logs"},
+		"traces": {"default"},
+	})
+	defer srv.Close()
+
+	cfg := validOpenObserveCfg()
+	cfg["openobserve_url"] = srv.URL
+	cfg["openobserve_trace_stream"] = "app_logs"
+	notes := OpenObserve{}.ConnectionNotes(nil, openobserveCfg(cfg), "acc-1")
+
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], `Trace stream "app_logs" was not found`)
+	assert.Contains(t, notes[0], "trace streams: default.")
+}
+
+func TestSummarizeOpenObserveStreams(t *testing.T) {
+	assert.Equal(t, "a, b", summarizeOpenObserveStreams([]string{"b", "a"}))
+
+	var many []string
+	for i := 0; i < 13; i++ {
+		many = append(many, string(rune('a'+i)))
+	}
+	assert.Equal(t, "a, b, c, d, e, f, g, h, i, j and 3 more", summarizeOpenObserveStreams(many))
 }

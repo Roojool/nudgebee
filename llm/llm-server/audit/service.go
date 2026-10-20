@@ -11,6 +11,21 @@ import (
 	"nudgebee/llm/security"
 )
 
+// normalizeAuditUserIds collapses the system-user sentinel to "" so audits from
+// automated runs store user_id NULL. The sentinel is uuid.Nil, which the UserId
+// field's uuid4 tag rejects; doing it here keeps every producer from repeating it.
+func normalizeAuditUserIds(auditRequest *AuditRequest) {
+	if auditRequest == nil {
+		return
+	}
+	systemUserId := security.GetSystemUserId()
+	for i := range auditRequest.Audits {
+		if auditRequest.Audits[i].UserId == systemUserId {
+			auditRequest.Audits[i].UserId = ""
+		}
+	}
+}
+
 func validateAuditRequest(auditRequest *AuditRequest) error {
 	if auditRequest == nil {
 		return common.ErrorBadRequest("audit: auditRequest is required")
@@ -32,6 +47,8 @@ func validateAuditRequest(auditRequest *AuditRequest) error {
 }
 
 func CreateAudit(context *security.RequestContext, auditRequest *AuditRequest) error {
+
+	normalizeAuditUserIds(auditRequest)
 
 	err := validateAuditRequest(auditRequest)
 	if err != nil {

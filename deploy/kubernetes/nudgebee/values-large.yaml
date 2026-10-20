@@ -1,0 +1,204 @@
+# Large tier — for estates up to ~80 monitored clusters / 2,000 nodes / 300,000
+# pods / 500 cloud accounts.
+#
+#   helm upgrade --install nudgebee ./nudgebee -f values-large.yaml
+#
+# Anchored on the largest deployment we run, measured over 7 days: 77 connected
+# clusters, 1,763 nodes, 282,432 pods, 433 cloud accounts, 149 tenants. That
+# deployment consumed 21.1 GiB average / 32.3 GiB peak memory and 1.11 cores
+# average / 6.61 cores peak across all services.
+#
+# This tier is the edge of what has been measured. Beyond these numbers the
+# figures below are extrapolation, not observation — if your estate is larger,
+# treat this file as a starting point and hold a load test before committing to
+# it. Notably, memory does NOT scale linearly with the estate: 3x the pods
+# (94,000 -> 282,000) cost 1.9x the memory, because most services are flat and
+# only four track estate size.
+#
+# Plan for roughly 8 CPU / 48 GiB of schedulable capacity for the control plane at
+# this tier, excluding the database.
+
+global:
+  sizingProfile: large
+
+app:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 1000m, memory: 1.5Gi }
+    requests: { cpu: 200m, memory: 500Mi }
+
+services-server:
+  replicaCount: 3
+  resources:
+    # The 6-hourly finops-score recompute is the sizing driver, not steady state
+    # (90-240Mi). Re-measured over 8 days on the largest deployment: 4 episodes a
+    # day, ~110 minutes each, on a strict 6h schedule, peaking 6.3-7.9Gi. 11 of 26
+    # pods in the window crossed 6Gi — every replica that lives through a cycle
+    # gets there, so this is the normal shape, not an outlier.
+    #
+    # 12Gi, not 8Gi. An 8Gi ceiling sits 285Mi above the highest sample in an
+    # 8-day window on a workload that reaches it four times a day; that is not a
+    # buffer. This deployment currently runs a manually-raised 20Gi limit, which is
+    # why it has not been OOM-killing. If the batch-recompute streaming fix lands,
+    # this comes back down.
+    #
+    # The request is set from p95 (4495Mi measured), like the CPU requests, not
+    # from the 514Mi average. This container is above 2Gi for roughly 30% of the
+    # day; an average-derived request would leave it running far above its own
+    # reservation most of the time, which is both the first thing evicted under
+    # node pressure and the preferred node-OOM victim. Raising the limit without
+    # raising the request would have traded a cgroup OOMKill for an eviction.
+    #
+    # This is the most expensive line in this file: 5Gi x 3 replicas = 15GiB
+    # reserved. It comes back down when the recompute is made to stream.
+    limits: { cpu: 2000m, memory: 12Gi }
+    requests: { cpu: 300m, memory: 5Gi }
+
+k8s-collector:
+  resources:
+    limits: { cpu: 2000m, memory: 3Gi }
+    requests: { cpu: 400m, memory: 500Mi }
+  dualMode:
+    worker:
+      replicaCount: 2
+      resources:
+        # Containment budget for the known worker leak. Measured 439Mi -> 1051Mi
+        # over 7 days per pod with zero reclaim; 3Gi holds roughly a month of
+        # growth. Alert on the restart. See docs/sizing-and-tiers.md.
+        limits: { cpu: 2000m, memory: 3Gi }
+        requests: { cpu: 300m, memory: 1Gi }
+
+relay-server:
+  replicaCount: 2
+  resources:
+    # Still cheap at 77 attached clusters — 39Mi average. Agent connections scale
+    # almost for free; this is headroom for reconnect storms and for the
+    # large-payload reply path, not for growth.
+    # Held at the Medium request for monotonicity. Large's own p95 is lower
+    # (82Mi) — agent count does not drive this, payload size does.
+    limits: { cpu: 1000m, memory: 2Gi }
+    requests: { cpu: 150m, memory: 500Mi }
+
+cloud-collector-server:
+  replicaCount: 2
+  resources:
+    # The one genuinely CPU-hungry service: 373m average with a 2.6-core peak
+    # sweeping 433 cloud accounts. Still no CPU limit, on purpose.
+    # Memory request from p95, held at the Medium figure for monotonicity —
+    # the driver is the largest single account's billing report, not estate size,
+    # and the busiest Medium install measures higher than Large. See #38972.
+    limits: { memory: 6Gi }
+    requests: { cpu: 500m, memory: 1Gi }
+
+ml-k8s-server:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 3000m, memory: 6Gi }
+    requests: { cpu: 600m, memory: 2Gi }
+
+llm-server:
+  replicaCount: 2
+  resources:
+    # Steady state is ~130Mi; a single pod was measured spiking to 2.9Gi
+    # marshalling a large conversation. The limit covers the spike.
+    limits: { cpu: 2000m, memory: 4Gi }
+    requests: { cpu: 150m, memory: 500Mi }
+
+llm-gateway:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 1000m, memory: 1Gi }
+    requests: { cpu: 150m, memory: 250Mi }
+
+rag-server:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 3000m, memory: 5Gi }
+    requests: { cpu: 400m, memory: 2Gi }
+
+nudgebee-qdrant-server:
+  resources:
+    # 1079Mi average / 1620Mi peak measured at this scale — the old 1Gi chart
+    # limit was below the average here and was live-OOMing.
+    limits: { cpu: 2000m, memory: 3Gi }
+    requests: { cpu: 250m, memory: 1.5Gi }
+
+notifications:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 1000m, memory: 1Gi }
+    requests: { cpu: 250m, memory: 500Mi }
+
+cost-server:
+  resources:
+    limits: { cpu: 1000m, memory: 2Gi }
+    requests: { cpu: 150m, memory: 250Mi }
+
+ticket-server:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 500m, memory: 500Mi }
+    requests: { cpu: 100m, memory: 100Mi }
+
+workflow-server:
+  replicaCount: 2
+  resources:
+    limits: { cpu: 1000m, memory: 1Gi }
+    requests: { cpu: 150m, memory: 250Mi }
+
+# Bundled dependencies. At this tier the database is normally external
+# (postgresql.enabled=false) — it is 60-80% of the total resource bill and wants
+# its own tuning, backups and failover. The figures below are a floor for anyone
+# still running it in-chart, not a recommendation to do so.
+postgresql:
+  primary:
+    resources:
+      limits: { cpu: 4000m, memory: 8Gi }
+      requests: { cpu: 1000m, memory: 4Gi }
+
+rabbitmq:
+  resources:
+    limits: { cpu: 1000m, memory: 1Gi }
+    requests: { cpu: 150m, memory: 250Mi }
+
+temporal:
+  server:
+    frontend:
+      replicaCount: 2
+      resources:
+        limits: { cpu: 1000m, memory: 1Gi }
+        requests: { cpu: 150m, memory: 250Mi }
+      additionalEnv:
+        # 90% of the 1Gi limit above.
+        - name: GOMEMLIMIT
+          value: '921MiB'
+    matching:
+      replicaCount: 2
+      resources:
+        limits: { cpu: 1000m, memory: 1Gi }
+        requests: { cpu: 150m, memory: 250Mi }
+      additionalEnv:
+        # 90% of the 1Gi limit above.
+        - name: GOMEMLIMIT
+          value: '921MiB'
+    worker:
+      replicaCount: 2
+      resources:
+        limits: { cpu: 1000m, memory: 1Gi }
+        requests: { cpu: 150m, memory: 250Mi }
+      additionalEnv:
+        # 90% of the 1Gi limit above.
+        - name: GOMEMLIMIT
+          value: '921MiB'
+    history:
+      # 2350Mi average / 2558Mi peak measured, and still climbing at the end of
+      # the window — Temporal's in-memory caches fill toward their ceiling rather
+      # than settling. Size from the ceiling, not the average.
+      replicaCount: 2
+      resources:
+        limits: { cpu: 2000m, memory: 5Gi }
+        requests: { cpu: 200m, memory: 2.5Gi }
+      additionalEnv:
+        # 90% of the 5Gi limit above.
+        - name: GOMEMLIMIT
+          value: '4608MiB'

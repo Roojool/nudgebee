@@ -10,8 +10,9 @@
  *   size        = 'sm' | 'md'
  *                 (sm=4px is appropriate for dense data surfaces too — KPI
  *                 tiles, util tables — where the bar sits under a number)
- *   tone        = 'neutral' | 'success' | 'warning' | 'critical'
- *                 (auto-resolved from `thresholds` + `value`)
+ *   tone        = 'neutral' | 'success' | 'warning' | 'critical' | 'info'
+ *                 (auto-resolved from `thresholds` + `value`; `info` is manual-only —
+ *                 no threshold ever resolves to it, same as `neutral`)
  *   composition = 'bar' | 'bar+label' | 'label+bar+value'
  *                 (auto from `label` + `showValue` props)
  *
@@ -28,7 +29,7 @@ import * as React from 'react';
 import { Box } from '@mui/material';
 
 export type ProgressBarSize = 'sm' | 'md';
-export type ProgressBarTone = 'neutral' | 'success' | 'warning' | 'critical';
+export type ProgressBarTone = 'neutral' | 'success' | 'warning' | 'critical' | 'info';
 
 export interface ProgressBarThresholds {
   /** Below this %, tone is `success`. */
@@ -68,6 +69,7 @@ const TONE_FILL: Record<ProgressBarTone, string> = {
   success: 'var(--ds-green-500)',
   warning: 'var(--ds-amber-500)',
   critical: 'var(--ds-red-500)',
+  info: 'var(--ds-blue-500)',
 };
 
 const SIZE_TOKENS: Record<ProgressBarSize, { trackHeight: string; fontSize: string; labelWidth: string; valueMinWidth: string; gap: string }> = {

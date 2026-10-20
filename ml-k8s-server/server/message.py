@@ -227,6 +227,11 @@ class VerticalRightsizingRequest(MlMessageAbstract):
     # Elasticsearch connection for metrics_provider == "ES"; api-server resolves and
     # sends it the same way it sends the Datadog keys above.
     elasticsearch: Optional[Dict[str, Any]] = None
+    # Set only when the account's own default metrics provider cannot answer the
+    # rightsizing keys at all and its agent can. api-server decides that and sends
+    # both fields or neither; this service forwards them without interpreting them.
+    metric_provider: Optional[str] = None
+    metric_provider_source: Optional[str] = None
     exchange: str = QueueConfig.ML_RECOMMENDATION_EXCHANGE
     queue: str = QueueConfig.ML_RECOMMENDATION_QUEUE
 
@@ -250,6 +255,8 @@ class VerticalRightsizingRequest(MlMessageAbstract):
                     datadog_app_key=self.datadog_app_key,
                     datadog_site=self.datadog_site,
                     elasticsearch=self.elasticsearch,
+                    metric_provider=self.metric_provider,
+                    metric_provider_source=self.metric_provider_source,
                 )
             )
             logger.info(
@@ -272,6 +279,8 @@ class VerticalRightsizingRequest(MlMessageAbstract):
             "datadog_app_key": self.datadog_app_key,
             "datadog_site": self.datadog_site,
             "elasticsearch": self.elasticsearch,
+            "metric_provider": self.metric_provider,
+            "metric_provider_source": self.metric_provider_source,
         }
 
 

@@ -87,6 +87,112 @@ func TestRecommendationGroupings_VMPackageFieldsUseVulnerabilityJoin(t *testing.
 	assert.Contains(t, sql, "r1.recommendation - 'package_version'")
 }
 
+// See the DefGenerator comment: severity pushdown is only safe for
+// rule_name='image_scan'.
+func TestRecommendationGroupings_SeverityPushdownGatedToImageScanOnly(t *testing.T) {
+	displayCols := cols("count", "resource_cloud_service", "severity")
+
+	pushedDown := QueryRequest{
+		Table:   "recommendation_groupings_v2",
+		Columns: displayCols,
+		Where: QueryWhereClause{Binary: BinaryWhereClause{
+			"rule_name": {Eq: "image_scan"},
+			"severity":  {Eq: "High"},
+		}},
+	}
+	sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", pushedDown, table_metadata["recommendation_groupings_v2"])
+	require.NoError(t, err)
+	assert.Contains(t, sql, "r.severity = 'High'", "rule_name='image_scan' should push severity into the CTE")
+
+	notPushedCases := []struct {
+		name       string
+		ruleFilter map[BinaryWhereClauseType]any
+	}{
+		{"rule_name IN list including other rules", map[BinaryWhereClauseType]any{In: []any{"image_scan", "vm_package_vulnerability"}}},
+		{"rule_name = vm_package_vulnerability", map[BinaryWhereClauseType]any{Eq: "vm_package_vulnerability"}},
+		{"no rule_name filter at all", nil},
+	}
+	for _, tc := range notPushedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := BinaryWhereClause{"severity": {Eq: "High"}}
+			if tc.ruleFilter != nil {
+				binary["rule_name"] = tc.ruleFilter
+			}
+			request := QueryRequest{
+				Table:   "recommendation_groupings_v2",
+				Columns: displayCols,
+				Where:   QueryWhereClause{Binary: binary},
+			}
+			sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendation_groupings_v2"])
+			require.NoError(t, err)
+			assert.NotContains(t, sql, "r.severity", "severity must stay out of the CTE unless rule_name is exactly 'image_scan'")
+		})
+	}
+}
+
+// See the DefGenerator comment: status/rule_name pushdown is only safe on the
+// fast path, or for rule_name='image_scan'.
+func TestRecommendationGroupings_StatusAndRuleNamePushdownGatedToWindowSafety(t *testing.T) {
+	displayCols := cols("count", "resource_cloud_service", "status", "rule_name")
+
+	windowedCases := []struct {
+		name   string
+		where  BinaryWhereClause
+		wantIn string // a literal expected to survive somewhere (outer WHERE)
+	}{
+		{"status filter on a windowed request", BinaryWhereClause{"status": {Eq: "Archive"}}, "Archive"},
+		{"rule_name filter (not image_scan) on a windowed request", BinaryWhereClause{"rule_name": {Eq: "vm_package_vulnerability"}}, "vm_package_vulnerability"},
+	}
+	for _, tc := range windowedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Not route()+GenerateSqlQuery: Where.Binary is a map, so route()'s
+			// call would consume the filter before this one runs.
+			request := QueryRequest{
+				Table:   "recommendation_groupings_v2",
+				Columns: displayCols,
+				Where:   QueryWhereClause{Binary: tc.where},
+			}
+			sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendation_groupings_v2"])
+			require.NoError(t, err)
+			require.Contains(t, sql, "ROW_NUMBER", "expected this request shape to take a windowed (lean/full) path")
+			// (bare "r.status" also appears in the window's own ORDER BY tie-break)
+			assert.NotContains(t, sql, "r.status = 'Archive'", "status must stay out of the CTE's WHERE on a windowed path")
+			assert.NotContains(t, sql, "r.rule_name", "rule_name must stay out of the CTE on a windowed path unless it's exactly 'image_scan'")
+			assert.Contains(t, sql, tc.wantIn, "the filter must still be applied somewhere (the outer WHERE), not silently dropped")
+		})
+	}
+
+	t.Run("rule_name='image_scan' is still pushed on a windowed request", func(t *testing.T) {
+		request := QueryRequest{
+			Table:   "recommendation_groupings_v2",
+			Columns: displayCols,
+			Where:   QueryWhereClause{Binary: BinaryWhereClause{"rule_name": {Eq: "image_scan"}}},
+		}
+		sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendation_groupings_v2"])
+		require.NoError(t, err)
+		require.Contains(t, sql, "ROW_NUMBER", "expected this request shape to take a windowed (lean/full) path")
+		assert.Contains(t, sql, "r.rule_name = 'image_scan'")
+	})
+
+	t.Run("status and rule_name both push down on the fast path", func(t *testing.T) {
+		request := QueryRequest{
+			Table:   "recommendation_groupings_v2",
+			Columns: cols("count"),
+			Where: QueryWhereClause{Binary: BinaryWhereClause{
+				"status":    {Eq: "Archive"},
+				"rule_name": {Eq: "vm_package_vulnerability"},
+				"severity":  {Eq: "High"},
+			}},
+		}
+		sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendation_groupings_v2"])
+		require.NoError(t, err)
+		require.NotContains(t, sql, "ROW_NUMBER", "expected this request shape to take the fast path")
+		assert.Contains(t, sql, "r.status = 'Archive'")
+		assert.Contains(t, sql, "r.rule_name = 'vm_package_vulnerability'")
+		assert.Contains(t, sql, "r.severity = 'High'")
+	})
+}
+
 // Regression test for a missing-comma bug in the fast path's SELECT list: when
 // a request needs the vulnerabilities join (package_name/vuln_id/recommendation)
 // but no join- or window-requiring column, the fast path used to splice vulnCols

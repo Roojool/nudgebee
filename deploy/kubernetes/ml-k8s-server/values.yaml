@@ -92,17 +92,35 @@ ingress:
 # -- Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/).
 # See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#resources) for details.
 # @default -- No requests or limits.
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Memory grows with the number of workloads analysed: 818Mi-1.75Gi average and
+# 1.4-4.4Gi peak across measured deployments. It is bursty but bounded — the
+# process does release (sawtooth, not a ramp) — so the limit carries the headroom
+# and the request tracks the average.
+# The 4Gi limit is unchanged from before. Measurement alone would have justified
+# 3Gi at Small, but a 4.4Gi peak was measured on a medium estate and OOM-killed
+# there, and lowering a ceiling is not something this chart does — see the
+# "never lower a memory limit" rule in docs/sizing-and-tiers.md.
+# values-medium/large.yaml raise it to 5Gi/6Gi.
+# CPU: p95 is 338-681m with brief 1.7-core peaks; the old 1200m request reserved
+# more than the p95 of the largest deployment.
+#
+# NOTE — the memory request below is NOT what a default install actually gets.
+# PR #37330 added an umbrella-level override in nudgebee/values.yaml pinning this
+# service to request = limit = 4Gi (Guaranteed QoS) after a live OOM, and a parent
+# chart's values beat a subchart's. So at Small the effective request is 4Gi, not
+# the 1.5Gi here; values-medium/large.yaml are read after the umbrella and do take
+# effect, which leaves Small reserving MORE memory than Medium or Large. That
+# inversion is known and deliberate for now — see "Known tier inversion" in
+# docs/sizing-and-tiers.md. Do not "fix" the numbers here without also removing
+# the umbrella override, or you will just move the surprise somewhere else.
 resources:
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
   limits:
     cpu: '2000m'
     memory: '4Gi'
   requests:
-    cpu: '1200m'
-    memory: '1Gi'
+    cpu: '200m'
+    memory: '1.5Gi'
 
 # -- Autoscaling by resources
 autoscaling:

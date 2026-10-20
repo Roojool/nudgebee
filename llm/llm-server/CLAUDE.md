@@ -250,7 +250,7 @@ See [docs/caching.md](docs/caching.md) for the ReAct3 planner message layout, ca
 
 ## Planner Versions
 
-ReAct and Orchestrating agents use **ReAct4** (`planner_react_4.go`) by default when the selected provider/model supports native tools. `LLM_SERVER_REACT4_ENABLED=false` is the rollback path, and unsupported models fall back to **ReAct3** (`planner_react_3.go`). The older `planner_react_2.go` and `planner_rewoo_2.go` were deleted; shared compatibility symbols live in `planner_react_shared.go`.
+ReAct and Orchestrating agents use **ReAct4** (`planner_react_4.go`) by default when the selected provider/model supports native tools (via `LLM_SERVER_PLANNER_ENGINE=auto`). `LLM_SERVER_PLANNER_ENGINE=react3` is the rollback path, and unsupported models fall back to **ReAct3** (`planner_react_3.go`). The older `planner_react_2.go` and `planner_rewoo_2.go` were deleted; shared compatibility symbols live in `planner_react_shared.go`.
 
 For agent files, `_2` / `V2` suffixes mark genuinely versioned agents where both versions still coexist:
 

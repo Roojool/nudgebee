@@ -23,19 +23,45 @@ type UpdateAlertRuleRequest struct {
 	Duration       string                 `json:"duration"`
 	Enabled        bool                   `json:"enabled"`
 	ProviderConfig map[string]interface{} `json:"provider_config"`
+	// SetEnabled turns the rule on or off. Enabled above is not used for that:
+	// older api-servers send enabled=true on every threshold edit, which would
+	// silently re-enable a disabled rule.
+	SetEnabled *bool `json:"set_enabled,omitempty"`
+	// Restore carries the "previous" values of an earlier update, for a revert.
+	Restore map[string]any `json:"restore,omitempty"`
 }
 
 // UpdateAlertRuleResponse is returned to the api-server.
 type UpdateAlertRuleResponse struct {
 	ExternalRuleId string `json:"external_rule_id"`
 	Status         string `json:"status"`
+	// Previous holds the provider values this update replaced (pass them back
+	// as Restore to undo it).
+	Previous map[string]any `json:"previous,omitempty"`
 }
 
-// UpdateAlertRule applies a threshold (and optional duration) change to a cloud provider's
-// alert rule. Currently implemented for AWS CloudWatch (idempotent PutMetricAlarm via
-// describe-then-reput). GCP/Azure return a clear not-implemented error so the api-server can
-// continue with the local DB update.
+// alertRuleChangeFromRequest collects what the request asks to change. A request
+// with only a duration is valid: duration-only suggestions send no threshold.
+func alertRuleChangeFromRequest(req UpdateAlertRuleRequest) providers.AlertRuleChange {
+	change := providers.AlertRuleChange{
+		DurationMinutes: intFromConfig(req.ProviderConfig, "duration_minutes"),
+		Enabled:         req.SetEnabled,
+		Restore:         req.Restore,
+	}
+	if threshold, ok := floatFromConfig(req.ProviderConfig, "threshold"); ok {
+		change.Threshold = &threshold
+	}
+	return change
+}
+
+// UpdateAlertRule applies a threshold / window / enabled change to a cloud provider's
+// alert rule and returns the values it replaced.
 func UpdateAlertRule(ctx *security.RequestContext, req UpdateAlertRuleRequest) (UpdateAlertRuleResponse, error) {
+	change := alertRuleChangeFromRequest(req)
+	if err := change.Validate(); err != nil {
+		return UpdateAlertRuleResponse{}, err
+	}
+
 	acct, providerName, err := getAccount(ctx, req.AccountId)
 	if err != nil {
 		return UpdateAlertRuleResponse{}, fmt.Errorf("failed to get account: %w", err)
@@ -59,53 +85,38 @@ func UpdateAlertRule(ctx *security.RequestContext, req UpdateAlertRuleRequest) (
 			return UpdateAlertRuleResponse{}, fmt.Errorf("could not resolve CloudWatch alarm region/name (arn=%q, name=%q)", arn, req.Name)
 		}
 
-		threshold, ok := floatFromConfig(req.ProviderConfig, "threshold")
-		if !ok {
-			return UpdateAlertRuleResponse{}, fmt.Errorf("threshold missing from provider_config")
-		}
-		durationMin := intFromConfig(req.ProviderConfig, "duration_minutes")
-
-		if err := aws.UpdateCloudWatchAlarmThreshold(ctx.GetContext(), acct, alarmName, region, threshold, durationMin); err != nil {
+		previous, err := aws.UpdateCloudWatchAlarmThreshold(ctx.GetContext(), acct, alarmName, region, change)
+		if err != nil {
 			return UpdateAlertRuleResponse{}, err
 		}
-		return UpdateAlertRuleResponse{ExternalRuleId: arn, Status: "updated"}, nil
+		return UpdateAlertRuleResponse{ExternalRuleId: arn, Status: "updated", Previous: previous}, nil
 
 	case "gcp":
 		policyName := req.ExternalRuleId
 		if policyName == "" {
 			return UpdateAlertRuleResponse{}, fmt.Errorf("external_rule_id (alert policy name) is required for GCP")
 		}
-		threshold, ok := floatFromConfig(req.ProviderConfig, "threshold")
-		if !ok {
-			return UpdateAlertRuleResponse{}, fmt.Errorf("threshold missing from provider_config")
-		}
-		durationMin := intFromConfig(req.ProviderConfig, "duration_minutes")
-
 		cloudCtx := providers.NewCloudProviderContextWithLogger(ctx.GetContext(), ctx.GetLogger())
-		if err := gcloud.UpdateGCPAlertPolicyThreshold(cloudCtx, acct, policyName, threshold, durationMin); err != nil {
+		previous, err := gcloud.UpdateGCPAlertPolicyThreshold(cloudCtx, acct, policyName, change)
+		if err != nil {
 			return UpdateAlertRuleResponse{}, err
 		}
-		return UpdateAlertRuleResponse{ExternalRuleId: policyName, Status: "updated"}, nil
+		return UpdateAlertRuleResponse{ExternalRuleId: policyName, Status: "updated", Previous: previous}, nil
 
 	case "azure":
 		resourceID := req.ExternalRuleId
 		if resourceID == "" {
-			return UpdateAlertRuleResponse{}, fmt.Errorf("external_rule_id (alert resource id) is required for Azure")
+			return UpdateAlertRuleResponse{}, fmt.Errorf("external_rule_id (alert resource id or name) is required for Azure")
 		}
-		threshold, ok := floatFromConfig(req.ProviderConfig, "threshold")
-		if !ok {
-			return UpdateAlertRuleResponse{}, fmt.Errorf("threshold missing from provider_config")
-		}
-		durationMin := intFromConfig(req.ProviderConfig, "duration_minutes")
-
 		cloudCtx := providers.NewCloudProviderContextWithLogger(ctx.GetContext(), ctx.GetLogger())
-		if err := azure.UpdateAzureMetricAlertThreshold(cloudCtx, acct, resourceID, threshold, durationMin); err != nil {
+		previous, err := azure.UpdateAzureMetricAlertThreshold(cloudCtx, acct, resourceID, change)
+		if err != nil {
 			return UpdateAlertRuleResponse{}, err
 		}
-		return UpdateAlertRuleResponse{ExternalRuleId: resourceID, Status: "updated"}, nil
+		return UpdateAlertRuleResponse{ExternalRuleId: resourceID, Status: "updated", Previous: previous}, nil
 
 	default:
-		return UpdateAlertRuleResponse{}, fmt.Errorf("alert rule update not yet supported for provider %q", providerName)
+		return UpdateAlertRuleResponse{}, fmt.Errorf("%w: alert rule update not yet supported for provider %q", providers.ErrAlertRuleChangeUnsupported, providerName)
 	}
 }
 

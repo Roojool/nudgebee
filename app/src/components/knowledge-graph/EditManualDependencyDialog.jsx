@@ -13,7 +13,8 @@
 // number of fields.
 
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Typography, Divider } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import PropTypes from 'prop-types';
 import { Modal } from '@ui/Modal';
@@ -522,7 +523,7 @@ const EditManualDependencyDialog = ({ open, row, onClose, onSaved }) => {
             accountOptions={accountOptions}
             cloudAccounts={cloudAccounts}
           />
-          <Divider orientation='vertical' flexItem sx={{ alignSelf: 'stretch' }} />
+          <Divider orientation='vertical' sx={{ mx: 0 }} />
           <EndpointColumn
             label='Destination'
             fields={form}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 )
 
 // s3BucketSchema — concrete schema for S3 buckets. Encryption/versioning flags drive
@@ -28,24 +29,8 @@ var s3BucketSchema = core.SpecificTypeSchema{
 
 func init() { core.RegisterSpecificTypeSchema(s3BucketSchema) }
 
-// extractStorageMetadata extracts essential fields for S3 buckets, EBS volumes, and EBS snapshots
-func (s *AWSSource) extractStorageMetadata(properties map[string]interface{}, metaMap map[string]interface{}) {
-	// Check service_name and subtype to differentiate between S3, EBS volumes, and snapshots
-	serviceName, _ := properties["service_name"].(string)
-	subtype, _ := properties["subtype"].(string)
-
-	if serviceName == "AmazonEC2" {
-		if subtype == "snapshot" {
-			// EBS snapshot metadata extraction
-			s.extractSnapshotMetadata(properties, metaMap)
-			return
-		}
-		// EBS volume metadata extraction
-		s.extractEBSMetadata(properties, metaMap)
-		return
-	}
-
-	// S3 bucket metadata extraction (default)
+// extractS3Metadata extracts essential fields for S3 buckets.
+func (s *AWSSource) extractS3Metadata(properties map[string]interface{}, metaMap map[string]interface{}) {
 	// Bucket name (critical identifier)
 	if bucketName, ok := metaMap["Name"].(string); ok && bucketName != "" {
 		properties["bucket_name"] = bucketName
@@ -227,4 +212,39 @@ func (s *AWSSource) createS3Edges(nodes []*core.DbNode, lookup *sources.NodeLook
 // Used by createS3Edges for the NotificationConfiguration → SNS/SQS path.
 func (s *AWSSource) getS3MetaFromCache(node *core.DbNode) (map[string]interface{}, bool) {
 	return s.metaFromCache(node, "storage")
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	s3Rows := resourceKind{
+		Service:      "AmazonS3",
+		NodeType:     core.NodeTypeStorage,
+		SpecificType: "S3Bucket",
+		Extract:      (*AWSSource).extractS3Metadata,
+	}
+	registerKind(s3Rows)
+	registerKind(s3Rows.withTypes("storage"))
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// S3 buckets send event notifications to SNS, SQS and Lambda.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeStorage, Name: "s3",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createS3Edges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Buckets own their event-notification
+// edges, read from the bucket's own row, and can be created from it.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"S3Bucket"},
+		Creatable:     true,
+		Context:       []core.NodeType{core.NodeTypeTopic, core.NodeTypeMessageQueue, core.NodeTypeServerlessFunction},
+		Signature:     signature(edgeKind(core.RelationshipPublishesTo, "s3_event_notification")),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createS3Edges([]*core.DbNode{node}, lookup, req), nil
+	})
 }

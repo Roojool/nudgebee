@@ -34,6 +34,9 @@ type UsageEvent struct {
 	AccountID string `db:"account_id"`
 	UserID    string `db:"user_id"`
 	TokenID   string `db:"token_id"`
+	// APIKeyID is the user_auths row id of the key used. Stable across renames, so
+	// per-key spend reads join on this rather than on token_id (a name).
+	APIKeyID string `db:"api_key_id"`
 
 	// SessionID groups requests into a round/conversation. Client-supplied only
 	// (correlation header or body metadata.user_id); empty when absent.
@@ -103,6 +106,7 @@ type EventInput struct {
 	AccountID string
 	UserID    string
 	TokenID   string
+	APIKeyID  string
 }
 
 // NewEvent builds a UsageEvent from what the edge observed plus core's extracted
@@ -130,6 +134,7 @@ func NewEvent(in EventInput) UsageEvent {
 		AccountID:  in.AccountID,
 		UserID:     in.UserID,
 		TokenID:    in.TokenID,
+		APIKeyID:   in.APIKeyID,
 
 		RequestedProvider: in.RequestedProvider,
 		RequestedModel:    in.RequestedModel,

@@ -16,7 +16,7 @@ import ThreeDotsMenu from '@ui/ThreeDotsMenu';
 import apiWorkflow from '@api1/workflow';
 import { hasPermission, hasWriteAccess, isTenantAdmin } from '@lib/auth';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
-import { DeleteIconRed, EditNewIcon } from '@assets';
+import { DeleteIconRed, EditIcon } from '@assets';
 import { ds } from 'src/utils/colors';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 
@@ -316,7 +316,7 @@ const ConfigurationManager: React.FC<ConfigurationManagerProps> = ({ accountOpti
       {
         label: 'Edit',
         id: 'edit',
-        icon: EditNewIcon,
+        icon: EditIcon,
       },
       {
         label: 'Delete',

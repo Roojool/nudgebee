@@ -39,14 +39,15 @@ func TestUserAuthsValidator_ValidToken(t *testing.T) {
 	raw := "abcdef0123456789" // stand-in raw PAT
 	mock.ExpectQuery("FROM user_auths").
 		WithArgs(sha256hex(raw)).
-		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "user", "name"}).
-			AddRow("tenant-1", "user-1", "my-cli-token"))
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "user", "name", "api_key_id"}).
+			AddRow("tenant-1", "user-1", "my-cli-token", "token-key-uuid"))
 
 	id, ok := v.Validate(raw)
 	require.True(t, ok)
 	assert.Equal(t, "tenant-1", id.TenantID)
 	assert.Equal(t, "user-1", id.UserID)
 	assert.Equal(t, "my-cli-token", id.TokenID)
+	assert.Equal(t, "token-key-uuid", id.APIKeyID)
 	assert.Equal(t, sha256hex(raw), recordedHash)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
@@ -153,6 +154,38 @@ func TestUserAuthsValidator_DBError_FailsClosed(t *testing.T) {
 
 func TestUserAuthsValidator_RequiresToken(t *testing.T) {
 	assert.True(t, (&userAuthsValidator{}).RequiresToken())
+}
+
+func TestUserAuthsValidator_ReturnsAPIKeyID(t *testing.T) {
+	v, mock := mockValidator(t)
+	v.recordAccess = func(db *common.DatabaseManager, hash string) {}
+	raw := "sk-nb-gw-abcdef0123456789"
+	mock.ExpectQuery("FROM user_auths").
+		WithArgs(sha256hex(raw)).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "user", "name", "api_key_id"}).
+			AddRow("tenant-1", "user-1", "claude-code", "key-uuid-1"))
+
+	id, ok := v.Validate(raw)
+	require.True(t, ok)
+	assert.Equal(t, "key-uuid-1", id.APIKeyID)
+	assert.Equal(t, "claude-code", id.TokenID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserAuthsValidator_QueryFiltersGatewayKinds(t *testing.T) {
+	v, mock := mockValidator(t)
+	v.recordAccess = func(db *common.DatabaseManager, hash string) {}
+	raw := "sk-nb-platform-only"
+	// A platform key never matches: the WHERE clause admits only the two kinds that reach
+	// the gateway, so the row set is empty. An all-access ('all') key is admitted by the same
+	// clause — this asserts the clause itself, which is what keeps the two lists in step.
+	mock.ExpectQuery(`kind IN \('gateway', 'all'\)`).
+		WithArgs(sha256hex(raw)).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "user", "name", "api_key_id"}))
+
+	_, ok := v.Validate(raw)
+	assert.False(t, ok)
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 type assertErr struct{}

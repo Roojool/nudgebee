@@ -123,7 +123,7 @@ func (m LLM) ConfigSchema() core.IntegrationSchema {
 				Type: core.ToolSchemaTypeBoolean,
 				// An account may have several enabled LLM configs; this marks the
 				// one used when a request doesn't pin a specific config.
-				Description:      "Make this the default LLM config for the selected accounts",
+				Description:      "Default LLM provider: used for requests that do not pick a provider and linked to accounts added later",
 				Default:          false,
 				AutoGenerateFunc: "",
 				Priority:         23,

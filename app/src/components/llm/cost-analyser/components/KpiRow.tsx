@@ -2,12 +2,16 @@
  * KpiRow — the Overview KPI strip (spec §4a). Each card shows a value (and, where
  * a prior period exists, a delta beside it) so the strip reads as a set. The
  * Total AI cost card is the `hero` and shows the all-in figure (token + prorated
- * cache storage); a dedicated Cache storage card breaks out the storage portion.
+ * cache storage) — except cache storage is account-wide and drops out of that
+ * figure whenever a Source/Agent/Status/User filter is active (#37832), since it
+ * can't be scoped to match. A dedicated Cache storage card, labeled
+ * "Account-wide", always breaks out the storage portion on its own.
  */
 import * as React from 'react';
 import { Box } from '@mui/material';
 import { Stat, type StatDelta } from '@ui/Stat';
 import { Card } from '@ui/Card';
+import { Label } from '@ui/Label';
 import { fmtCost, fmtTokens, type KpiTotals } from '../format';
 
 interface KpiRowProps {
@@ -15,6 +19,10 @@ interface KpiRowProps {
   previous: KpiTotals;
   /** Cache-lifecycle storage cost (prorated) — token cost lives in `current.totalCost`. */
   storageCost?: number;
+  /** True when a Source/Agent/Status/User filter is active. Cache storage is
+   * account+model-scoped only, so it's excluded from the hero total under one
+   * of these (see #37832) rather than silently overstating a filtered figure. */
+  hasIncompatibleFilters?: boolean;
 }
 
 function pctDelta(now: number, before: number): number {
@@ -35,7 +43,7 @@ function pctDeltaProps(pct: number, tone: StatDelta['tone']): StatDelta {
 
 const cardSx = { flex: '1 1 180px', minWidth: 160 } as const;
 
-export function KpiRow({ current, previous, storageCost = 0 }: KpiRowProps) {
+export function KpiRow({ current, previous, storageCost = 0, hasIncompatibleFilters = false }: KpiRowProps) {
   const costDelta = pctDelta(current.totalCost, previous.totalCost);
   const avgDelta = pctDelta(current.avgCostPerRun, previous.avgCostPerRun);
   const runsDelta = pctDelta(current.runs, previous.runs);
@@ -46,8 +54,10 @@ export function KpiRow({ current, previous, storageCost = 0 }: KpiRowProps) {
   const cacheSavingsDelta = pctDelta(current.cacheSavingsUsd, previous.cacheSavingsUsd);
   // All-in = token cost + prorated cache-storage cost. The hero shows this so
   // the headline isn't under-reporting; the storage portion is broken out in the
-  // dedicated storage card.
-  const allInCost = current.totalCost + storageCost;
+  // dedicated storage card. Storage is account+model-scoped only, so it's left
+  // out under a Source/Agent/Status/User filter instead of overstating that
+  // filtered total (#37832).
+  const allInCost = current.totalCost + (hasIncompatibleFilters ? 0 : storageCost);
 
   return (
     <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-3)' }} id='cost-kpi-row'>
@@ -60,8 +70,9 @@ export function KpiRow({ current, previous, storageCost = 0 }: KpiRowProps) {
           delta={pctDeltaProps(costDelta, costDelta > 0 ? 'waste' : 'savings')}
           deltaPlacement='inline'
           info={{
-            tooltip:
-              'All-in AI spend over the selected window: token usage cost plus prorated cache-storage cost. Token cost follows the current filters; storage is scoped by account + model only.',
+            tooltip: hasIncompatibleFilters
+              ? 'Token usage cost for the current filters. Cache storage is excluded here because it is account-wide and cannot be scoped by source/agent/status/user — see the Cache storage card.'
+              : 'All-in AI spend over the selected window: token usage cost plus prorated cache-storage cost. Token cost follows the current filters; storage is scoped by account + model only.',
           }}
         />
       </Card>
@@ -70,6 +81,11 @@ export function KpiRow({ current, previous, storageCost = 0 }: KpiRowProps) {
         <Stat
           label='Cache storage'
           value={fmtCost(storageCost)}
+          headerRight={
+            <Label tone='neutral' size='sm'>
+              Account-wide
+            </Label>
+          }
           info={{
             tooltip:
               'Prorated cache-lifecycle storage cost over the window. Scoped by account + model only — not affected by source/user/agent/status filters.',

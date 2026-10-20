@@ -22,11 +22,22 @@ func mockLLMConfigDB(t *testing.T) (*common.DatabaseManager, sqlmock.Sqlmock) {
 }
 
 // expectSelect queues the integration-selection query (step 1), returning one
-// row per enabled LLM integration linked to the account.
+// row per enabled LLM integration linked to the account. None of them is the
+// tenant default; use expectSelectWithTenantDefault for that.
 func expectSelect(mock sqlmock.Sqlmock, integrations ...[2]any) {
-	rows := sqlmock.NewRows([]string{"id", "default_llm_provider"})
+	rows := make([][3]any, 0, len(integrations))
 	for _, integ := range integrations {
-		rows.AddRow(integ[0], integ[1])
+		rows = append(rows, [3]any{integ[0], integ[1], false})
+	}
+	expectSelectWithTenantDefault(mock, rows...)
+}
+
+// expectSelectWithTenantDefault is expectSelect with the tenant_default column
+// (id, account-link flag, tenant default) set per row.
+func expectSelectWithTenantDefault(mock sqlmock.Sqlmock, integrations ...[3]any) {
+	rows := sqlmock.NewRows([]string{"id", "default_llm_provider", "tenant_default"})
+	for _, integ := range integrations {
+		rows.AddRow(integ[0], integ[1], integ[2])
 	}
 	mock.ExpectQuery("integrations_cloud_accounts").WillReturnRows(rows)
 }
@@ -59,20 +70,22 @@ func TestFetchLLMIntegrationConfigByAccount_PrefersFlaggedDefault(t *testing.T) 
 	require.NotContains(t, cfg, "llm_model_name", "keys from the non-default config must not appear")
 }
 
-// A single UNFLAGGED integration must NOT act as the account default: a config
-// saved without marking default cannot silently capture the account's LLM
-// traffic. Pre-V840 accounts carry the flag via that migration's backfill;
-// anything unflagged resolves ENV until its operator marks it default.
-func TestFetchLLMIntegrationConfigByAccount_SingleUnflaggedConfigFallsThrough(t *testing.T) {
+// A single UNFLAGGED integration resolves as the account's provider: linking
+// exactly one provider to an account is the operator's choice for it, so the
+// default checkbox only matters once an account has several.
+func TestFetchLLMIntegrationConfigByAccount_SingleUnflaggedConfigResolves(t *testing.T) {
 	dbManager, mock := mockLLMConfigDB(t)
 
 	expectSelect(mock, [2]any{"int-a", false})
-	// No config-value query may run — the resolver falls through to ENV.
+	expectConfig(mock, "int-a",
+		[2]string{"llm_provider", "openai"},
+		[2]string{"llm_provider_api_key", "key-openai"})
 
 	cfg, err := fetchLLMIntegrationConfigByAccount(nil, dbManager, "acct-single")
 
 	require.NoError(t, err)
-	require.Nil(t, cfg, "an unflagged config must never resolve as the account default")
+	require.Equal(t, "openai", cfg["llm_provider"])
+	require.Equal(t, "key-openai", cfg["llm_provider_api_key"])
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -107,6 +120,40 @@ func TestFetchLLMIntegrationConfigByAccount_MultipleWithNoDefaultFallsThrough(t 
 	require.NoError(t, err, "no DB default means ENV, which is a normal state")
 	require.Nil(t, cfg)
 	require.NoError(t, mock.ExpectationsWereMet(), "config values must not be read when no integration is chosen")
+}
+
+// Several unflagged links where one is the tenant default resolve to it: the
+// integrations list already shows that provider as "Default" for the account.
+func TestFetchLLMIntegrationConfigByAccount_MultipleUnflaggedPrefersTenantDefault(t *testing.T) {
+	dbManager, mock := mockLLMConfigDB(t)
+
+	expectSelectWithTenantDefault(mock, [3]any{"int-a", false, false}, [3]any{"int-b", false, true})
+	expectConfig(mock, "int-b",
+		[2]string{"llm_provider", "googleai"},
+		[2]string{"llm_provider_api_key", "key-google"})
+
+	cfg, err := fetchLLMIntegrationConfigByAccount(nil, dbManager, "acct-tenant-default")
+
+	require.NoError(t, err)
+	require.Equal(t, "googleai", cfg["llm_provider"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// The account's own flag still beats the tenant default, so changing the
+// tenant default never re-routes an account that picked a provider.
+func TestFetchLLMIntegrationConfigByAccount_AccountFlagBeatsTenantDefault(t *testing.T) {
+	dbManager, mock := mockLLMConfigDB(t)
+
+	expectSelectWithTenantDefault(mock, [3]any{"int-a", true, false}, [3]any{"int-b", false, true})
+	expectConfig(mock, "int-a",
+		[2]string{"llm_provider", "openai"},
+		[2]string{"llm_provider_api_key", "key-openai"})
+
+	cfg, err := fetchLLMIntegrationConfigByAccount(nil, dbManager, "acct-own-default")
+
+	require.NoError(t, err)
+	require.Equal(t, "openai", cfg["llm_provider"])
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // Two rows flagged default can only happen if something raced the exclusivity

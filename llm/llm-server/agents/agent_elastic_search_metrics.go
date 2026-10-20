@@ -395,6 +395,7 @@ func (e ElasticSearchMetricsAgent) buildSystemPrompt(
 	instructions := []string{
 		"**Your Primary Goal:** Answer user questions about metrics stored in Elasticsearch / Opensearch.",
 		"**Your Method:** Construct an Elasticsearch DSL query (JSON) and execute it via `es_metrics_query`. You MUST provide both `index` (the index pattern) and `query` (the DSL body) fields in the tool input.",
+		"If the user supplies an exact Elasticsearch field path, use it verbatim in the first query. The short `metric` labels in tool output are a projection of results, not evidence that the source index uses those labels as field paths.",
 		fmt.Sprintf("**Target Indices:** You MUST only query these metric indices: '%s'. NEVER query log indices (e.g. 'fluentk8-*', 'logs-*', 'logs-kubernetes.*', 'logs-apm.*', 'logs-aws.cloudtrail-*').", strings.Join(availableIndices, ", ")),
 	}
 
@@ -444,6 +445,185 @@ func (e ElasticSearchMetricsAgent) buildSystemPrompt(
 		)
 	}
 
+	instructions = append(instructions, esSchemaGuidance(schemas, targets, timestampField, fallbackIndex)...)
+
+	// Timestamp rule — tailored to the account's schemas.
+	tsRule := buildTimestampRule(schemas, timestampField)
+	instructions = append(instructions,
+		"**Time Range:** "+tsRule+" Default to `now-1h` if the user does not specify.",
+		"**Self-Correction (when `es_metrics_query` returns empty `payload`):**",
+		"  1. Widen the time range: `now-1h` → `now-6h` → `now-24h`.",
+		"  2. Remove filters one by one — keep only the metric filter + time range first.",
+		"  3. Verify you used the correct timestamp field for this index's schema.",
+		"  4. Verify field naming conventions (`.keyword` suffix / `exists` filter) match the schema.",
+		"  5. Try a different (more specific) index pattern.",
+		"  NEVER retry the same query unchanged. Maximum 4 retries total.",
+		"Keep earlier positive results when a later query returns zero. Report the conflicting query outcomes and their exact filters; a later zero does not erase previously observed matches.",
+		"**Query errors:** An `es_metrics_query` error means the query did not establish whether matching metrics exist. If the error says invalid DSL, replace placeholder or fabricated keys with real Elasticsearch clauses (for example `query.bool.filter` containing `term`, `exists`, or `range` objects), then execute the corrected query. Do not repeat the same invalid query. If a corrected query still cannot be executed, say that the query failed and do not claim the index has no data.",
+		"**Final Answer:** Summarize metric values (peak / avg / latest) in a concise SRE-style report. Do NOT return the raw DSL.",
+	)
+
+	// --- Constraints (schema-aware) ---
+	constraints := []string{
+		"You MUST execute every query via `es_metrics_query` before answering.",
+		"For custom/non-standard metrics with no user-supplied exact field path, discover field names via a `size:1` sample document or `metrics_labels_list` BEFORE writing the final query.",
+		tsRule,
+		"NEVER use `size:0` or `aggs` in queries — use filter queries only.",
+		"NEVER return the generated DSL as the final answer — users want metric values.",
+		"NEVER query log-specific indices for metric data.",
+		// `__name__` is OURS, not the model's invention: for Beats-family indices the
+		// backend flattens each numeric field into a series and labels it `__name__` with
+		// that field's path. So results advertise `__name__` while no such field is
+		// queryable, and a `term` filter on it silently matches nothing — 13 times in one
+		// traced investigation. Forbidding it outright (the previous wording) stopped
+		// nothing, because it named no replacement. Explain the translation instead.
+		"`__name__` in a RESULT is not a queryable field — it is the metric's fully-qualified field path. To select that metric, use an `exists` filter on the path itself (e.g. `{\"exists\":{\"field\":\"kubernetes.pod.cpu.usage.nanocores\"}}`), never `{\"term\":{\"__name__\":...}}`. On OTel indices, which do have a real metric-name field, filter `name.keyword` instead.",
+		// Sampling first is cheaper and more reliable than any built-in field list: it
+		// returns only fields this account actually populates. Measured on a customer
+		// estate: one sampled document is ~4KB and names every metric in its dataset,
+		// against ~400KB for the full mapping, most of which is unpopulated template.
+		"When you do not know an index's fields, FETCH A SAMPLE FIRST: `{\"query\":{\"match_all\":{}},\"size\":2}` with a recent time range. The `__name__` values in the result are this environment's real metric paths and the label keys are its real dimensions. Prefer them over any field name you assume.",
+		"Do not ask the user for clarification — make the best assumption and proceed.",
+	}
+	if schemas[schemaOTel] {
+		constraints = append(constraints,
+			fmt.Sprintf("OTel schema (`%s`): ALWAYS append `.keyword` to text fields in `term` filters. NEVER use `__name__` — use `name.keyword` instead.", indexFor(schemaOTel)),
+		)
+	}
+	if schemas[schemaElasticK8s] || schemas[schemaCloudWatch] {
+		constraints = append(constraints,
+			"Elastic Agent / CloudWatch schemas: filter by `exists` on the value path; do NOT append `.keyword` to dimension fields — they are already keyword-mapped.",
+		)
+	}
+
+	// --- Examples (only for detected schemas) ---
+	var examples []core.NBAgentPromptExample
+
+	if schemas[schemaOTel] {
+		examples = append(examples,
+			core.NBAgentPromptExample{
+				Question: "Average CPU usage of all pods in namespace default over the last 30 minutes",
+				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
+					{
+						Tool:        tools.ToolMetricsList,
+						Input:       indexExemplar,
+						Explanation: "Discover available metric names (e.g. container.cpu.usage, k8s.pod.cpu.usage).",
+					},
+					{
+						Tool:        tools.ToolESMetricsQuery,
+						Input:       fmt.Sprintf(`{"index":"%s","query":{"query":{"bool":{"filter":[{"term":{"name.keyword":"container.cpu.usage"}},{"term":{"attributes.resource.attributes.k8s@namespace@name.keyword":"default"}},{"range":{"%s":{"gte":"now-30m"}}}]}}}}`, indexFor(schemaOTel), tsFor(schemaOTel, esTimestampOTel)),
+						Explanation: fmt.Sprintf("Filter by name.keyword and namespace with attributes.resource.attributes. prefix. Range on `%s` for this account.", tsFor(schemaOTel, esTimestampOTel)),
+					},
+				},
+				Explanation: fmt.Sprintf("OTel schema: use name.keyword for metric name, attributes.resource.attributes.* prefix for K8s dimensions, `%s` for timestamp.", tsFor(schemaOTel, esTimestampOTel)),
+			},
+		)
+	}
+
+	if schemas[schemaElasticK8s] {
+		examples = append(examples,
+			core.NBAgentPromptExample{
+				Question: "Container CPU usage in namespace production over the last hour",
+				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
+					{
+						Tool:        tools.ToolESMetricsQuery,
+						Input:       fmt.Sprintf(`{"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.container.cpu.usage.nanocores"}},{"term":{"kubernetes.namespace":"production"}},{"range":{"%s":{"gte":"now-1h"}}}]}}}}`, indexFor(schemaElasticK8s), tsFor(schemaElasticK8s, esTimestampECS)),
+						Explanation: fmt.Sprintf("Elastic Agent K8s: filter by exists on the value path, `%s` for time range, no .keyword on dimension fields.", tsFor(schemaElasticK8s, esTimestampECS)),
+					},
+				},
+				Explanation: fmt.Sprintf("Elastic Agent K8s schema: metric = exists filter on value path; `%s`; dimensions are already keyword-mapped.", tsFor(schemaElasticK8s, esTimestampECS)),
+			},
+			core.NBAgentPromptExample{
+				Question: "Deployment replica counts in namespace production",
+				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
+					{
+						Tool:        tools.ToolESMetricsQuery,
+						Input:       fmt.Sprintf(`{"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.deployment.replicas.available"}},{"term":{"kubernetes.namespace":"production"}},{"range":{"%s":{"gte":"now-15m"}}}]}}}}`, indexFor(schemaElasticK8s), tsFor(schemaElasticK8s, esTimestampECS)),
+						Explanation: "State metrics live in dedicated state_<resource>-* indices. Filter by exists on the value path.",
+					},
+				},
+				Explanation: "State metrics: one index per K8s resource type; filter by exists on the replica/status value path.",
+			},
+		)
+	}
+
+	if schemas[schemaCloudWatch] {
+		examples = append(examples,
+			core.NBAgentPromptExample{
+				Question: "EC2 CPU utilization for instance i-0123abcd over the last 30 minutes",
+				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
+					{
+						Tool:        tools.ToolESMetricsQuery,
+						Input:       fmt.Sprintf(`{"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"aws.ec2.metrics.CPUUtilization.avg"}},{"term":{"aws.dimensions.InstanceId":"i-0123abcd"}},{"range":{"%s":{"gte":"now-30m"}}}]}}}}`, indexFor(schemaCloudWatch), tsFor(schemaCloudWatch, esTimestampECS)),
+						Explanation: fmt.Sprintf("CloudWatch: value at aws.<svc>.metrics.<MetricName>.<stat>; dimension under aws.dimensions.*; `%s`.", tsFor(schemaCloudWatch, esTimestampECS)),
+					},
+				},
+				Explanation: "CloudWatch schema: metric paths include statistic suffix (avg/max/min/sum/count); dimensions under aws.dimensions.*.",
+			},
+		)
+	}
+
+	return core.NBAgentPrompt{
+		Role:         "an SRE expert specializing in Elasticsearch / Opensearch metric analysis in Kubernetes environments",
+		Instructions: instructions,
+		Constraints:  constraints,
+		ToolUsage: map[string][]string{
+			tools.ToolESMetricsQuery: {
+				"Executes an Elasticsearch DSL query against the metrics API.",
+				"Input: JSON object with `index` (index pattern) and `query` (DSL body with filter queries — NO aggs or size:0).",
+				"Output: Metric time-series results (timestamps and values) extracted from document hits.",
+			},
+			tools.ToolMetricsList: {
+				"Lists available metric names in an Elasticsearch index.",
+				fmt.Sprintf("Input: index pattern (e.g. '%s').", indexExemplar),
+				"Output: Distinct metric names. Use to discover available metrics before querying.",
+			},
+			tools.ToolMetricsLabelsList: {
+				"Fetches available field names and types for an index pattern.",
+				"Input: index pattern.",
+				"Output: Field names and data types. Use to discover correct field names before querying.",
+			},
+		},
+		Examples:     examples,
+		OutputFormat: "Markdown SRE-style summary highlighting key metric values (peak / avg / latest) and any anomalies. Do not include raw DSL.",
+		Rag: core.NBAgentPromptRag{
+			Module: "elasticsearch_metrics",
+		},
+	}
+}
+
+// esSchemaGuidance returns the schema-specific half of the ES metrics prompt: the
+// routing table, the per-schema field catalogues, and the query-shape rules. It is
+// shared by the executing agent (buildSystemPrompt) and the generation-only query
+// writer (ESMetricsQueryAgent) so every field name is spelled in exactly one place.
+// Two prompts carrying their own copies is how one of them ends up naming a field
+// this account does not have — the failure the schema detection exists to prevent.
+//
+// fallbackIndex is used when a schema has no resolved target, matching the caller's
+// own fallback so the guidance never names an index the account cannot query.
+func esSchemaGuidance(
+	schemas map[esMetricSchema]bool,
+	targets map[esMetricSchema]schemaTarget,
+	timestampField string,
+	fallbackIndex string,
+) []string {
+	indexFor := func(sc esMetricSchema) string {
+		if t, ok := targets[sc]; ok && t.index != "" {
+			return t.index
+		}
+		return fallbackIndex
+	}
+	tsFor := func(sc esMetricSchema, dflt string) string {
+		if t, ok := targets[sc]; ok && t.timestamp != "" {
+			return t.timestamp
+		}
+		if timestampField != "" {
+			return timestampField
+		}
+		return dflt
+	}
+
+	var instructions []string
 	// --- Schema routing table (only rows for detected schemas) ---
 	if len(schemas) > 0 {
 		instructions = append(instructions,
@@ -578,147 +758,7 @@ func (e ElasticSearchMetricsAgent) buildSystemPrompt(
 		"**Query Patterns:** Use `bool`/`filter` queries only. Do NOT use `size:0` or `aggs` — the backend extracts time-series from document hits, not aggregation results.",
 	)
 
-	// Timestamp rule — tailored to the account's schemas.
-	tsRule := buildTimestampRule(schemas, timestampField)
-	instructions = append(instructions,
-		"**Time Range:** "+tsRule+" Default to `now-1h` if the user does not specify.",
-		"**Self-Correction (when `es_metrics_query` returns empty `payload`):**",
-		"  1. Widen the time range: `now-1h` → `now-6h` → `now-24h`.",
-		"  2. Remove filters one by one — keep only the metric filter + time range first.",
-		"  3. Verify you used the correct timestamp field for this index's schema.",
-		"  4. Verify field naming conventions (`.keyword` suffix / `exists` filter) match the schema.",
-		"  5. Try a different (more specific) index pattern.",
-		"  NEVER retry the same query unchanged. Maximum 4 retries total.",
-		"**Final Answer:** Summarize metric values (peak / avg / latest) in a concise SRE-style report. Do NOT return the raw DSL.",
-	)
-
-	// --- Constraints (schema-aware) ---
-	constraints := []string{
-		"You MUST execute every query via `es_metrics_query` before answering.",
-		"For custom/non-standard metrics, you MUST discover field names via a `size:1` sample document or `metrics_labels_list` BEFORE writing the final query.",
-		tsRule,
-		"NEVER use `size:0` or `aggs` in queries — use filter queries only.",
-		"NEVER return the generated DSL as the final answer — users want metric values.",
-		"NEVER query log-specific indices for metric data.",
-		// `__name__` is OURS, not the model's invention: for Beats-family indices the
-		// backend flattens each numeric field into a series and labels it `__name__` with
-		// that field's path. So results advertise `__name__` while no such field is
-		// queryable, and a `term` filter on it silently matches nothing — 13 times in one
-		// traced investigation. Forbidding it outright (the previous wording) stopped
-		// nothing, because it named no replacement. Explain the translation instead.
-		"`__name__` in a RESULT is not a queryable field — it is the metric's fully-qualified field path. To select that metric, use an `exists` filter on the path itself (e.g. `{\"exists\":{\"field\":\"kubernetes.pod.cpu.usage.nanocores\"}}`), never `{\"term\":{\"__name__\":...}}`. On OTel indices, which do have a real metric-name field, filter `name.keyword` instead.",
-		// Sampling first is cheaper and more reliable than any built-in field list: it
-		// returns only fields this account actually populates. Measured on a customer
-		// estate: one sampled document is ~4KB and names every metric in its dataset,
-		// against ~400KB for the full mapping, most of which is unpopulated template.
-		"When you do not know an index's fields, FETCH A SAMPLE FIRST: `{\"query\":{\"match_all\":{}},\"size\":2}` with a recent time range. The `__name__` values in the result are this environment's real metric paths and the label keys are its real dimensions. Prefer them over any field name you assume.",
-		"Do not ask the user for clarification — make the best assumption and proceed.",
-	}
-	if schemas[schemaOTel] {
-		constraints = append(constraints,
-			fmt.Sprintf("OTel schema (`%s`): ALWAYS append `.keyword` to text fields in `term` filters. NEVER use `__name__` — use `name.keyword` instead.", indexFor(schemaOTel)),
-		)
-	}
-	if schemas[schemaElasticK8s] || schemas[schemaCloudWatch] {
-		constraints = append(constraints,
-			"Elastic Agent / CloudWatch schemas: filter by `exists` on the value path; do NOT append `.keyword` to dimension fields — they are already keyword-mapped.",
-		)
-	}
-
-	// --- Examples (only for detected schemas) ---
-	var examples []core.NBAgentPromptExample
-
-	if schemas[schemaOTel] {
-		examples = append(examples,
-			core.NBAgentPromptExample{
-				Question: "Average CPU usage of all pods in namespace default over the last 30 minutes",
-				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
-					{
-						Tool:        tools.ToolMetricsList,
-						Input:       indexExemplar,
-						Explanation: "Discover available metric names (e.g. container.cpu.usage, k8s.pod.cpu.usage).",
-					},
-					{
-						Tool:        tools.ToolESMetricsQuery,
-						Input:       fmt.Sprintf(`{"index":"%s","query":{"query":{"bool":{"filter":[{"term":{"name.keyword":"container.cpu.usage"}},{"term":{"attributes.resource.attributes.k8s@namespace@name.keyword":"default"}},{"range":{"%s":{"gte":"now-30m"}}}]}}}}`, indexFor(schemaOTel), tsFor(schemaOTel, esTimestampOTel)),
-						Explanation: fmt.Sprintf("Filter by name.keyword and namespace with attributes.resource.attributes. prefix. Range on `%s` for this account.", tsFor(schemaOTel, esTimestampOTel)),
-					},
-				},
-				Explanation: fmt.Sprintf("OTel schema: use name.keyword for metric name, attributes.resource.attributes.* prefix for K8s dimensions, `%s` for timestamp.", tsFor(schemaOTel, esTimestampOTel)),
-			},
-		)
-	}
-
-	if schemas[schemaElasticK8s] {
-		examples = append(examples,
-			core.NBAgentPromptExample{
-				Question: "Container CPU usage in namespace production over the last hour",
-				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
-					{
-						Tool:        tools.ToolESMetricsQuery,
-						Input:       fmt.Sprintf(`{"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.container.cpu.usage.nanocores"}},{"term":{"kubernetes.namespace":"production"}},{"range":{"%s":{"gte":"now-1h"}}}]}}}}`, indexFor(schemaElasticK8s), tsFor(schemaElasticK8s, esTimestampECS)),
-						Explanation: fmt.Sprintf("Elastic Agent K8s: filter by exists on the value path, `%s` for time range, no .keyword on dimension fields.", tsFor(schemaElasticK8s, esTimestampECS)),
-					},
-				},
-				Explanation: fmt.Sprintf("Elastic Agent K8s schema: metric = exists filter on value path; `%s`; dimensions are already keyword-mapped.", tsFor(schemaElasticK8s, esTimestampECS)),
-			},
-			core.NBAgentPromptExample{
-				Question: "Deployment replica counts in namespace production",
-				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
-					{
-						Tool:        tools.ToolESMetricsQuery,
-						Input:       fmt.Sprintf(`{"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.deployment.replicas.available"}},{"term":{"kubernetes.namespace":"production"}},{"range":{"%s":{"gte":"now-15m"}}}]}}}}`, indexFor(schemaElasticK8s), tsFor(schemaElasticK8s, esTimestampECS)),
-						Explanation: "State metrics live in dedicated state_<resource>-* indices. Filter by exists on the value path.",
-					},
-				},
-				Explanation: "State metrics: one index per K8s resource type; filter by exists on the replica/status value path.",
-			},
-		)
-	}
-
-	if schemas[schemaCloudWatch] {
-		examples = append(examples,
-			core.NBAgentPromptExample{
-				Question: "EC2 CPU utilization for instance i-0123abcd over the last 30 minutes",
-				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
-					{
-						Tool:        tools.ToolESMetricsQuery,
-						Input:       fmt.Sprintf(`{"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"aws.ec2.metrics.CPUUtilization.avg"}},{"term":{"aws.dimensions.InstanceId":"i-0123abcd"}},{"range":{"%s":{"gte":"now-30m"}}}]}}}}`, indexFor(schemaCloudWatch), tsFor(schemaCloudWatch, esTimestampECS)),
-						Explanation: fmt.Sprintf("CloudWatch: value at aws.<svc>.metrics.<MetricName>.<stat>; dimension under aws.dimensions.*; `%s`.", tsFor(schemaCloudWatch, esTimestampECS)),
-					},
-				},
-				Explanation: "CloudWatch schema: metric paths include statistic suffix (avg/max/min/sum/count); dimensions under aws.dimensions.*.",
-			},
-		)
-	}
-
-	return core.NBAgentPrompt{
-		Role:         "an SRE expert specializing in Elasticsearch / Opensearch metric analysis in Kubernetes environments",
-		Instructions: instructions,
-		Constraints:  constraints,
-		ToolUsage: map[string][]string{
-			tools.ToolESMetricsQuery: {
-				"Executes an Elasticsearch DSL query against the metrics API.",
-				"Input: JSON object with `index` (index pattern) and `query` (DSL body with filter queries — NO aggs or size:0).",
-				"Output: Metric time-series results (timestamps and values) extracted from document hits.",
-			},
-			tools.ToolMetricsList: {
-				"Lists available metric names in an Elasticsearch index.",
-				fmt.Sprintf("Input: index pattern (e.g. '%s').", indexExemplar),
-				"Output: Distinct metric names. Use to discover available metrics before querying.",
-			},
-			tools.ToolMetricsLabelsList: {
-				"Fetches available field names and types for an index pattern.",
-				"Input: index pattern.",
-				"Output: Field names and data types. Use to discover correct field names before querying.",
-			},
-		},
-		Examples:     examples,
-		OutputFormat: "Markdown SRE-style summary highlighting key metric values (peak / avg / latest) and any anomalies. Do not include raw DSL.",
-		Rag: core.NBAgentPromptRag{
-			Module: "elasticsearch_metrics",
-		},
-	}
+	return instructions
 }
 
 // buildTimestampRule returns a concise timestamp rule tailored to the active schemas.
@@ -819,13 +859,41 @@ func (e ElasticSearchMetricsAgent) UpdateToolResponseForPlanner(toolRequest core
 		}
 
 		query, _ := result["query"].(string)
+		note, _ := result["note"].(string)
+		docsMatched, hasMatchCount := result["docs_matched"].(float64)
 		payload, ok := result["payload"].([]any)
 		if !ok || len(payload) == 0 {
-			fmt.Fprintf(&sb, "Query: %s\nResult: No data found (empty payload)\n\n", query)
+			fmt.Fprintf(&sb, "Query: %s\n", query)
+			if hasMatchCount && docsMatched >= 0 {
+				fmt.Fprintf(&sb, "Result: Elasticsearch reports %.0f matching documents (the count may be a lower bound); no metric series returned.\n", docsMatched)
+				if docsMatched == 0 {
+					sb.WriteString("A zero match for this query does not establish that the index has no relevant data.\n")
+				}
+			} else {
+				sb.WriteString("Result: No metric series returned; document match count unavailable.\n")
+			}
+			if note != "" {
+				fmt.Fprintf(&sb, "Note: %s\n", note)
+			}
+			sb.WriteString("\n")
 			continue
 		}
 
-		fmt.Fprintf(&sb, "Query: %s\nSeries count: %d\n", query, len(payload))
+		fmt.Fprintf(&sb, "Query: %s\n", query)
+		if totalSeries, ok := result["total_series"].(float64); ok && totalSeries > float64(len(payload)) {
+			fmt.Fprintf(&sb, "Series count: %.0f (showing %d)\n", totalSeries, len(payload))
+		} else {
+			fmt.Fprintf(&sb, "Series count: %d\n", len(payload))
+		}
+		if hasMatchCount && docsMatched >= 0 {
+			fmt.Fprintf(&sb, "Elasticsearch reports %.0f matching documents (the count may be a lower bound).\n", docsMatched)
+		}
+		if note != "" {
+			fmt.Fprintf(&sb, "Note: %s\n", note)
+		}
+		if cappedNotice, _ := result["capped_notice"].(string); cappedNotice != "" {
+			fmt.Fprintf(&sb, "Limit: %s\n", cappedNotice)
+		}
 
 		maxSeries := 5
 		if len(payload) > maxSeries {

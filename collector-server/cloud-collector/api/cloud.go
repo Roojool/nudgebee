@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"nudgebee/collector/cloud/account"
 	"nudgebee/collector/cloud/audit"
 	"nudgebee/collector/cloud/common"
@@ -119,6 +120,8 @@ type cliCredentialsResponse struct {
 	Env       map[string]string `json:"env"`
 	ExpiresAt string            `json:"expires_at,omitempty"`
 }
+
+var executeCliCommandV2 = account.ExecuteCliCommandV2
 
 // maxBatchCommands caps the number of commands in a single execute_cli_batch call.
 // Recommendation resolution scripts rarely exceed 5 steps; 10 covers the most complex cases.
@@ -858,6 +861,36 @@ func handleCloudProviderApis(r *gin.Engine, tracer *trace.Tracer, meter *metric.
 		c.JSON(200, buildApiResponse(response))
 	})
 
+	// execute_cli_v2 is the workspace-shim contract. Unlike the legacy
+	// endpoint, a non-zero CLI exit is returned as a successful HTTP response
+	// with its exact process status; only validation, authentication, account,
+	// or executor failures use a non-2xx response.
+	groupV2.POST("/execute_cli_v2", func(c *gin.Context) {
+		request := executeCommand{}
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, err))
+			return
+		}
+		if err := common.ValidateStruct(request); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, err))
+			return
+		}
+		ctx, cancel, err := buildContextFromGin(c, logger, tracer, meter, request.AccountId)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, err))
+			return
+		}
+		if cancel != nil {
+			defer cancel()
+		}
+		result, err := executeCliCommandV2(ctx, request.AccountId, request.Command)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, buildApiResponse(nil, err))
+			return
+		}
+		c.JSON(http.StatusOK, buildApiResponse(result))
+	})
+
 	groupV2.POST("/execute_cli_batch", func(c *gin.Context) {
 		request := executeBatchCommand{}
 		err := c.ShouldBindJSON(&request)
@@ -1132,12 +1165,17 @@ func handleCloudProviderApis(r *gin.Engine, tracer *trace.Tracer, meter *metric.
 		resp, err := account.UpdateAlertRule(ctx, request)
 		if err != nil {
 			ctx.GetLogger().Error("error updating alert rule", "error", err)
-			c.JSON(500, buildApiResponse(nil, err))
+			status := 500
+			if errors.Is(err, providers.ErrAlertRuleChangeUnsupported) {
+				status = 400
+			}
+			c.JSON(status, buildApiResponse(nil, err))
 			return
 		}
 		c.JSON(200, buildApiResponse(map[string]interface{}{
 			"external_rule_id": resp.ExternalRuleId,
 			"status":           resp.Status,
+			"previous":         resp.Previous,
 		}))
 	})
 

@@ -43,6 +43,9 @@ type RemediationGenerateRequest struct {
 	// An action with no command can only be carried out through one of these, so an empty list means
 	// no such action is actionable, whatever the model proposes.
 	AvailableArtifacts []string `json:"available_artifacts"`
+	// AlertRule is the rule the event came from and what may be changed on it; an
+	// action may propose one of those changes (see remediation_alert_rule.go).
+	AlertRule *RemediationAlertRule `json:"alert_rule,omitempty"`
 }
 
 // Confidence is the model's 0-100 self-reported estimate. The model is unreliable about the exact
@@ -157,6 +160,9 @@ type RemediationAction struct {
 	ExecuteCommand  string     `json:"execute_command"`
 	VerifyCommand   string     `json:"verify_command"`
 	RollbackCommand string     `json:"rollback_command"`
+	// AlertRuleChange, when set, is a change to the alert rule itself, applied from
+	// the card rather than by a command.
+	AlertRuleChange *AlertRuleChange `json:"alert_rule_change,omitempty"`
 }
 
 // Action kinds. A fix removes the root cause; a mitigation restores service with the cause still
@@ -176,7 +182,7 @@ const maxMitigationConfidence = 50
 // free text from the LLM, so anything that isn't recognizably a fix is treated as a mitigation:
 // the safe default is to under-claim, since presenting a mitigation as a fix is the failure mode
 // that misleads an operator.
-func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
+func normalizePlan(plan *RemediationPlan, availableArtifacts []string, alertRule *RemediationAlertRule) {
 	// An action inherits the uncertainty of the hypothesis it addresses: if the cause is only 95%
 	// likely, no action against it can be more than 95% likely to resolve the incident. The model
 	// scores the two independently and routinely emits a 100% action under a 95% hypothesis, which
@@ -186,9 +192,12 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
 		hypConfidence[strings.ToLower(strings.TrimSpace(h.Hypothesis))] = h.Confidence
 	}
 
+	// The alert-rule controls admit only actions that carry alert_rule_change; every
+	// other command-less action still needs a prepared artifact (a code fix, a
+	// threshold suggestion). One flag for all of them would let unprepared work back in.
 	hasArtifact := false
 	for _, a := range availableArtifacts {
-		if strings.TrimSpace(a) != "" {
+		if name := strings.TrimSpace(a); name != "" && name != artifactAlertRule {
 			hasArtifact = true
 			break
 		}
@@ -197,6 +206,11 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
 	kept := plan.Actions[:0]
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
+		// A rule change's kind follows from what it does, not from the model's label, and
+		// must be set before the mitigation cap below reads it.
+		if a.AlertRuleChange != nil {
+			a.Kind = alertRuleActionKind(strings.ToLower(strings.TrimSpace(a.AlertRuleChange.Operation)))
+		}
 		if strings.EqualFold(strings.TrimSpace(a.Kind), RemediationKindFix) {
 			a.Kind = RemediationKindFix
 		} else {
@@ -210,6 +224,21 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
 		// than leaving the value alone.
 		if ceiling, ok := hypConfidence[strings.ToLower(strings.TrimSpace(a.Hypothesis))]; ok && a.Confidence > ceiling {
 			a.Confidence = ceiling
+		}
+
+		if a.AlertRuleChange != nil {
+			if reason := checkAlertRuleChange(a.AlertRuleChange, alertRule); reason != "" {
+				plan.Dropped = append(plan.Dropped, DroppedAction{Action: a.Action, Reason: reason})
+				continue
+			}
+			a.Kind = alertRuleActionKind(a.AlertRuleChange.Operation)
+			if a.Kind == RemediationKindMitigation && int(a.Confidence) > maxMitigationConfidence {
+				a.Confidence = Confidence(maxMitigationConfidence)
+			}
+			// Applied from the card, not by a command.
+			a.ExecuteCommand, a.VerifyCommand, a.RollbackCommand = "", "", ""
+			kept = append(kept, *a)
+			continue
 		}
 
 		if strings.TrimSpace(a.ExecuteCommand) == "" {
@@ -228,6 +257,11 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
 		kept = append(kept, *a)
 	}
 	plan.Actions = kept
+
+	// Deterministic command contract. Runs after kind and confidence are canonical (so a demotion
+	// here is not undone) and before ranking (so a demoted action also moves down the list). See
+	// remediation_validate.go for why these are checks rather than additional prompt rules.
+	validatePlanCommands(plan)
 
 	// Rank by what the action is worth, not by how confident the model felt: anything that removes
 	// the cause outranks anything that merely restores service, however reliable the latter is. The
@@ -251,6 +285,8 @@ type RemediationPlan struct {
 	Summary    string                  `json:"summary"`
 	Hypotheses []RemediationHypothesis `json:"hypotheses"`
 	Actions    []RemediationAction     `json:"actions"`
+	// Dropped lists alert-rule actions the server removed and why. Not rendered.
+	Dropped []DroppedAction `json:"dropped,omitempty"`
 }
 
 // RemediationExecuteRequest is the payload for ai_remediation_execute (one command per play-button click).
@@ -331,8 +367,18 @@ func processRemediationGenerate(c *gin.Context, tracer trace.Tracer, meter metri
 	// an EC2 instance, and what stops an `aws` command going out without --region and failing with
 	// "You must specify a region" having done nothing.
 	humanContent := investigationContext
+	var preamble []string
 	if account := describeRemediationAccount(request.AccountId, request.EventId); account != "" {
-		humanContent = account + "\n\n" + investigationContext
+		preamble = append(preamble, account)
+	}
+	// The rest of what a runnable, non-repeating plan needs and the prose does not carry: how long
+	// this has been going on, exactly what to act on, the target's current configuration, and what
+	// has already been tried. See remediation_context.go.
+	if facts := buildRemediationFacts(ctx, request.AccountId, request.EventId); facts != "" {
+		preamble = append(preamble, facts)
+	}
+	if len(preamble) > 0 {
+		humanContent = strings.Join(preamble, "\n\n") + "\n\n" + investigationContext
 	}
 
 	resp, err := agentcore.GenerateAndTrackLLMContent(ctx, sc.GetUserId(), request.AccountId, "", "", "", false, []llms.MessageContent{
@@ -357,7 +403,10 @@ func processRemediationGenerate(c *gin.Context, tracer trace.Tracer, meter metri
 		return
 	}
 
-	normalizePlan(&plan, request.AvailableArtifacts)
+	normalizePlan(&plan, request.AvailableArtifacts, request.AlertRule)
+	for _, d := range plan.Dropped {
+		ctx.GetLogger().Info("remediation_generate: dropped alert-rule action", "action", d.Action, "reason", d.Reason)
+	}
 
 	// Persist the plan so it survives reload (best-effort — a DB hiccup must not fail generation).
 	persistRemediationPlan(ctx, request.AccountId, request.EventId, plan)
@@ -416,11 +465,58 @@ func processRemediationGet(c *gin.Context, tracer trace.Tracer, meter metric.Met
 		c.JSON(200, buildApiResponse(plan, nil))
 		return
 	}
+	// When this event has no plan of its own, the lookup falls back to the newest plan saved for the
+	// same alert - one generated from an earlier firing's investigation. The panel treats any plan it
+	// gets back as already generated, so restoring that one shows the operator another incident's root
+	// cause, confidence and commands, and never builds a plan for this incident. Returning no plan here
+	// makes the panel generate one from this event's own investigation.
+	if !planSavedForEvent(saved, request.EventId) {
+		c.JSON(200, buildApiResponse(plan, nil))
+		return
+	}
+	// A plan is built from the investigation and its report. When either was re-run after the
+	// plan was saved, the plan describes the previous analysis (dev event db61122a: the report
+	// said "configuration error", the restored plan still said "undetermined"). Returning no plan
+	// makes the panel build one from the current analysis, as above.
+	var inputs []*events.EventAnalysis
+	for _, t := range []events.EventAnalysisType{events.AnalysisTypeInvestigation, events.AnalysisTypeDetailedResponse} {
+		a, aErr := repo.GetEventAnalysis(ctx, request.EventId, info.Fingerprint, info.AggregationKey, request.AccountId, t)
+		if aErr != nil {
+			ctx.GetLogger().Warn("remediation_get: unable to read analysis to check the plan's age", "error", aErr, "analysis_type", t)
+			continue
+		}
+		if a != nil {
+			inputs = append(inputs, a)
+		}
+	}
+	if planOlderThanAnalysis(saved, inputs...) {
+		ctx.GetLogger().Info("remediation_get: saved plan predates the current analysis, regenerating")
+		c.JSON(200, buildApiResponse(plan, nil))
+		return
+	}
 	if err := json.Unmarshal([]byte(saved.Analysis), &plan); err != nil {
 		ctx.GetLogger().Warn("remediation_get: failed to parse saved plan", "error", err)
 		plan = RemediationPlan{}
 	}
 	c.JSON(200, buildApiResponse(plan, nil))
+}
+
+// planSavedForEvent reports whether a stored plan was generated for eventId. A row with no event id
+// cannot be attributed to any incident, so it is not restored either.
+func planSavedForEvent(saved *events.EventAnalysis, eventId string) bool {
+	owner := strings.TrimSpace(saved.RelatedEventId)
+	return owner != "" && strings.EqualFold(owner, strings.TrimSpace(eventId))
+}
+
+// planOlderThanAnalysis reports whether a completed analysis the plan was built from was
+// updated after the plan was saved.
+func planOlderThanAnalysis(plan *events.EventAnalysis, inputs ...*events.EventAnalysis) bool {
+	for _, a := range inputs {
+		if a != nil && a.Status == string(events.AnalysisStatusCompleted) && a.UpdatedAt.After(plan.UpdatedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // persistRemediationPlan upserts the plan into event_log_analysis under the `remediation` analysis
@@ -477,34 +573,8 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "command is required"}}))
 		return
 	}
-	if len(command) > maxRemediationCommandLen {
-		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command is too long"}}))
-		return
-	}
-	// Checked before the metacharacter guard: that guard is quote-aware for cloud CLI commands, and
-	// stripping quoted content is only sound once the quotes are known to be balanced. An unbalanced
-	// quote would otherwise let the stripper swallow the rest of the command, metacharacters included.
-	if isStructurallyTruncated(command) {
-		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command has unbalanced quotes or braces and looks truncated; regenerate the plan"}}))
-		return
-	}
-	cloudCliTool := tools.CloudCliToolFor(command)
-	// A remediation command is a single invocation. Reject shell metacharacters up front: they let a
-	// single string smuggle a second command (e.g. "kubectl get pods; kubectl delete ns prod") past
-	// the safety blocklist while the shell on the workspace pod still evaluates it. This also blunts
-	// indirect prompt injection, since the plan is seeded from attacker-influencable investigation text.
-	//
-	// Cloud CLI commands are checked with quoted content removed. JMESPath carries ( ) | inside
-	// --query arguments routinely ("Reservations[].Instances[?State.Name=='running']"), and rejecting
-	// those leaves the cloud plan unable to express most of what it needs. Quoted text cannot start a
-	// second command precisely because it stays quoted, so only unquoted metacharacters are a smuggling
-	// risk — and those the stripped check still catches.
-	metaCheckTarget := command
-	if cloudCliTool != "" {
-		metaCheckTarget = tools.StripQuotedContentForShellCheck(command)
-	}
-	if containsShellMetacharacters(metaCheckTarget) {
-		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command contains shell metacharacters (; & | < > ( ) ` $ or newlines) and was rejected; run a single command"}}))
+	if reason := remediationCommandRejection(command); reason != "" {
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: reason}}))
 		return
 	}
 
@@ -522,6 +592,18 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	if sc == nil || (!sc.HasAccountAccess(request.AccountId, security.SecurityAccessTypeCreate) &&
 		!grantedRun(sc, request.AccountId, moduleAiMisc)) {
 		c.JSON(403, buildApiResponse(nil, []error{errors.New("remediation: write access is required to run remediation commands")}))
+		return
+	}
+
+	// A stand-in value must never reach the cluster. The generation prompt asks the model to emit a
+	// clearly-named placeholder rather than a secret, and the panel runs what it is given verbatim:
+	// the audit found `kubectl set env deployment/app-prod GITHUB_WEBHOOK_SECRET=
+	// GITHUB_WEBHOOK_SECRET_PLACEHOLDER` offered as a fix against production, which would have
+	// replaced a live secret with that literal string and rolled the deployment. normalizePlan
+	// already demotes such an action off the fix ranking; this is the block that makes it safe.
+	if commandHasPlaceholder(command) {
+		ctx.GetLogger().Warn("remediation_execute: command carries a placeholder value", "command", command)
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: this command contains a placeholder value and was not run. Substitute the real value and run it yourself — applying it as written would overwrite the setting with the placeholder text."}}))
 		return
 	}
 
@@ -593,12 +675,29 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	// all, so running its output through parseRelayExecResult never parsed and every cloud command
 	// was recorded "outcome unverified" even when the outcome was stated plainly.
 	exitCodeReported := false
+	var exitErr *tools.RelayCommandExitError
 	if ranOnWorkspace {
 		response.Stdout, response.Stderr, response.ExitCode, response.Success, exitCodeReported = workspaceOutcome(execErr, raw)
 		if execErr != nil {
 			ctx.GetLogger().Error("remediation_execute: command failed")
 			response.Error = execErr.Error()
 		}
+	} else if errors.As(execErr, &exitErr) {
+		// The command ran and the relay reported a non-zero exit: a definitive failure
+		// with a real exit code, not a transport error.
+		stdout, stderr, _, parsed := parseRelayExecResult(raw)
+		if !parsed {
+			stdout = raw
+		}
+		response.Stdout = stdout
+		response.Stderr = stderr
+		response.ExitCode = exitErr.ExitCode
+		response.Success = false
+		response.Error = stderr
+		if response.Error == "" {
+			response.Error = exitErr.Error()
+		}
+		exitCodeReported = true
 	} else if execErr != nil {
 		// Transport failure — the command may not have run at all.
 		ctx.GetLogger().Error("remediation_execute: command failed")
@@ -645,6 +744,48 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 		persistRemediationVerification(ctx, request.EventId, request.ExecuteCommand, command, response, exitCodeReported)
 	}
 	c.JSON(200, buildApiResponse(response, nil))
+}
+
+// remediationCommandRejection returns why the Run button refuses this command before it runs, or ""
+// when it goes through. Plan generation checks every command with it as well (validatePlanCommands),
+// so the panel is not handed a command its own executor rejects. Account-scoped checks — RBAC, the
+// account's provider — need a request, so they stay in processRemediationExecute.
+func remediationCommandRejection(command string) string {
+	if len(command) > maxRemediationCommandLen {
+		return "remediation: command is too long"
+	}
+	// Checked before the metacharacter guard: that guard is quote-aware for cloud CLI commands, and
+	// stripping quoted content is only sound once the quotes are known to be balanced. An unbalanced
+	// quote would otherwise let the stripper swallow the rest of the command, metacharacters included.
+	if isStructurallyTruncated(command) {
+		return "remediation: command has unbalanced quotes or braces and looks truncated; regenerate the plan"
+	}
+	// A remediation command is a single invocation. Reject shell metacharacters up front: they let a
+	// single string smuggle a second command (e.g. "kubectl get pods; kubectl delete ns prod") past
+	// the safety blocklist while the shell on the workspace pod still evaluates it. This also blunts
+	// indirect prompt injection, since the plan is seeded from attacker-influencable investigation text.
+	//
+	// Cloud CLI commands are checked with quoted content removed. JMESPath carries ( ) | inside
+	// --query arguments routinely ("Reservations[].Instances[?State.Name=='running']"), and rejecting
+	// those leaves the cloud plan unable to express most of what it needs. Quoted text cannot start a
+	// second command precisely because it stays quoted, so only unquoted metacharacters are a smuggling
+	// risk — and those the stripped check still catches.
+	metaCheckTarget := command
+	if tools.CloudCliToolFor(command) != "" {
+		metaCheckTarget = tools.StripQuotedContentForShellCheck(command)
+	}
+	if containsShellMetacharacters(metaCheckTarget) {
+		return "remediation: command contains shell metacharacters (; & | < > ( ) ` $ or newlines) and was rejected; run a single command"
+	}
+	// The kubectl relay applies its own grammar (ExecuteContainerJob), stricter than the guard above:
+	// it also rejects unquoted { }, so `-o jsonpath={.spec.replicas}` fails there as a transport
+	// error. Run the same check here so the refusal says why, and so generation can drop the command.
+	if fields := strings.Fields(command); len(fields) > 0 && fields[0] == "kubectl" {
+		if err := tools.ValidateKubectlRelayCommand(command); err != nil {
+			return "remediation: " + err.Error()
+		}
+	}
+	return ""
 }
 
 // isVerifySlot reports whether this run is an action's verify command.

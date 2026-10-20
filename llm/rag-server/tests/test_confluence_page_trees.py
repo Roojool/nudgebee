@@ -7,6 +7,8 @@ descendant — including those beneath a container page with no body.
 
 from types import SimpleNamespace
 
+from rag.core.types import Document
+
 import rag.core.documents.scraper as scraper
 from rag.core.documents.scraper import (
     collect_confluence_tree_documents,
@@ -151,3 +153,86 @@ def test_a_page_whose_body_did_not_render_is_counted_as_failed():
     stats = {"failed_pages": 0, "empty_spaces": 0, "failed_roots": 0}
     collect_confluence_tree_documents(solo, "root", stats)
     assert stats["failed_pages"] == 1, "a body that never rendered must be counted"
+
+
+def test_integration_kb_document_count_counts_pages_not_chunks(monkeypatch):
+    confluence = fake_confluence(
+        pages={"100": "<p>Runbooks</p>", "101": "<p>child</p>"},
+        children={"100": ["101"]},
+    )
+    monkeypatch.setattr(scraper, "build_confluence_client", lambda config: confluence)
+
+    # Stand in for chunking: three embedding units per scraped page.
+    def process_documents(documents, embeddings, **kwargs):
+        return kwargs["collection_name"], [f"{d.metadata['page_id']}-{i}" for d in documents for i in range(3)]
+
+    monkeypatch.setattr(scraper, "process_documents", process_documents)
+    monkeypatch.setattr(scraper.source_store, "store", lambda *a, **k: None)
+    results = []
+    monkeypatch.setattr(scraper, "update_integration_kb_load_result", lambda *a, **k: results.append(a))
+
+    integration = {"integration_id": "int-1", "config": {"namespace": "SRE", "page_trees": "100"}}
+    ids = scraper._process_integration(integration, "tenant-1", embeddings=None)
+
+    assert len(ids) == 6
+    assert results[-1] == ("int-1", "active", 2)
+
+
+def _load_result_for(monkeypatch, figure_warning):
+    """Run one Confluence integration through to its load result."""
+    confluence = fake_confluence(pages={"100": "<p>Runbooks</p>"}, children={})
+    monkeypatch.setattr(scraper, "build_confluence_client", lambda config: confluence)
+    monkeypatch.setattr(scraper, "fetch_all_spaces", lambda c: [])
+    monkeypatch.setattr(
+        scraper, "process_documents", lambda documents, embeddings, **kw: (kw["collection_name"], ["100"])
+    )
+    monkeypatch.setattr(scraper.source_store, "store", lambda *a, **k: None)
+    monkeypatch.setattr(scraper, "build_page_figure_documents", lambda *a, **k: ([], figure_warning))
+    results = []
+    monkeypatch.setattr(scraper, "update_integration_kb_load_result", lambda *a, **k: results.append((a, k)))
+
+    integration = {"integration_id": "int-1", "config": {"namespace": "SRE", "page_trees": "100"}}
+    scraper._process_integration(integration, "tenant-1", embeddings=None)
+    return results[-1]
+
+
+def test_pictures_do_not_inflate_the_document_count(monkeypatch):
+    # The Docs column counts source pages. A figure is a chunk of a page, so folding
+    # figures in would inflate it by however many pictures the space contains — the
+    # same confusion the load-history count already had to be corrected for.
+    figure = Document(page_content="Runbook — figure 1\n\nText in figure:\nCODE PURPLE", metadata={"is_figure": True})
+    confluence = fake_confluence(pages={"100": "<p>Runbooks</p>"}, children={})
+    monkeypatch.setattr(scraper, "build_confluence_client", lambda config: confluence)
+    monkeypatch.setattr(scraper, "fetch_all_spaces", lambda c: [])
+    monkeypatch.setattr(
+        scraper, "process_documents", lambda documents, embeddings, **kw: (kw["collection_name"], ["100"])
+    )
+    monkeypatch.setattr(scraper.source_store, "store", lambda *a, **k: None)
+    monkeypatch.setattr(scraper, "build_page_figure_documents", lambda *a, **k: ([figure, figure, figure], ""))
+    results = []
+    monkeypatch.setattr(scraper, "update_integration_kb_load_result", lambda *a, **k: results.append((a, k)))
+
+    integration = {"integration_id": "int-1", "config": {"namespace": "SRE", "page_trees": "100"}}
+    scraper._process_integration(integration, "tenant-1", embeddings=None)
+
+    args, _ = results[-1]
+    assert args[:3] == ("int-1", "active", 1)
+
+
+def test_a_load_that_dropped_its_pictures_says_so(monkeypatch):
+    # The pages are indexed, so the load is active — but the KB must not read as
+    # complete when every picture on it was thrown away. Without this the only
+    # record is a log line, and the reader is told nothing.
+    shortfall = "3 page image(s) were not analysed: no vision-capable model is configured"
+
+    args, kwargs = _load_result_for(monkeypatch, shortfall)
+
+    assert args[:2] == ("int-1", "active")
+    assert kwargs["error_message"] == shortfall
+
+
+def test_a_load_with_nothing_to_report_carries_no_message(monkeypatch):
+    args, kwargs = _load_result_for(monkeypatch, "")
+
+    assert args[:2] == ("int-1", "active")
+    assert not kwargs["error_message"]

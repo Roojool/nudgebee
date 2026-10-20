@@ -169,9 +169,13 @@ test.describe("Application Group detail", () => {
       test.skip(opened === null, NO_GROUP_HINT);
       const locators = opened!.locators;
 
+      const enriched = locators.workloadsEnrichmentDone();
       await openTab(locators, "applications");
       await locators.waitForWorkloadsSettled();
       await expect(locators.workloadsSearch).toBeVisible({ timeout: 60000 });
+      if ((await locators.workloadsRows.count()) > 0) {
+        expect(await enriched, "workload row enrichment never finished, so a search would be overwritten by the stale rows").toBe(true);
+      }
 
       await locators.searchWorkloads(noMatchApplication());
 
@@ -294,6 +298,8 @@ test.describe("Application Group detail", () => {
       const typedName = uniqueGroupName();
 
       await openUpdateModal(locators);
+      // The modal prefills the stored name asynchronously and would overwrite an earlier fill.
+      await expect(locators.nameInput).toHaveValue(originalName, { timeout: 60000 });
       await locators.nameInput.fill(typedName);
       await expect(locators.nameInput).toHaveValue(typedName);
 

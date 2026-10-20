@@ -25,7 +25,7 @@ func GetDebugAgentName(accountId string) string {
 		if err != nil {
 			return defaultAgentName
 		}
-		rows, err := dbms.Query("select cloud_provider from cloud_accounts where id = $1", accountId)
+		rows, err := dbms.Query("select cloud_provider, coalesce(account_type, '') from cloud_accounts where id = $1", accountId)
 		if err != nil {
 			return defaultAgentName
 		}
@@ -36,19 +36,12 @@ func GetDebugAgentName(accountId string) string {
 			}
 		}()
 		for rows.Next() {
-			var cloudProvider string
-			err = rows.Scan(&cloudProvider)
+			var cloudProvider, accountType string
+			err = rows.Scan(&cloudProvider, &accountType)
 			if err != nil {
 				return defaultAgentName
 			}
-			planner := defaultAgentName
-			if strings.EqualFold(cloudProvider, "aws") {
-				planner = aws.AgentAwsOrchestratorName
-			} else if strings.EqualFold(cloudProvider, "gcp") {
-				planner = AgentGcpOrchestratorName
-			} else if strings.EqualFold(cloudProvider, "azure") {
-				planner = AgentAzureOrchestratorName
-			}
+			planner := debugAgentForAccount(cloudProvider, accountType)
 			accountDebugAgentMapMutex.Lock()
 			accountDebugAgentMap[accountId] = planner
 			accountDebugAgentMapMutex.Unlock()
@@ -59,4 +52,20 @@ func GetDebugAgentName(accountId string) string {
 		plannerAgent = defaultAgentName
 	}
 	return plannerAgent
+}
+
+func debugAgentForAccount(cloudProvider, accountType string) string {
+	if strings.EqualFold(accountType, "vm") {
+		return AgentVMOrchestratorName
+	}
+	switch {
+	case strings.EqualFold(cloudProvider, "aws"):
+		return aws.AgentAwsOrchestratorName
+	case strings.EqualFold(cloudProvider, "gcp"):
+		return AgentGcpOrchestratorName
+	case strings.EqualFold(cloudProvider, "azure"):
+		return AgentAzureOrchestratorName
+	default:
+		return AgentK8sOrchestratorName
+	}
 }

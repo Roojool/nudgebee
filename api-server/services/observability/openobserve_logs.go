@@ -13,6 +13,7 @@ import (
 	"nudgebee/services/integrations"
 	"nudgebee/services/query"
 	"nudgebee/services/security"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,8 +50,14 @@ var openObserveLogLabelMapping = map[string]string{
 	"level":    "severity",
 }
 
+// Kept identical to OpenObserveTraceSource.GetSupportedOperators — both render through
+// buildOpenObserveBinaryClause. Inline literals, not a shared var: the operator-catalog
+// drift test reads string literals out of each GetSupportedOperators body.
 func (s *OpenObserveLogSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_ilike"}
+	return []string{
+		"_eq", "_neq", "_in", "_not_in", "_gt", "_gte", "_lt", "_lte",
+		"_contains", "_like", "_nlike", "_ilike", "_is_null",
+	}
 }
 
 func (s *OpenObserveLogSource) GetLabelMapping() map[string]string {
@@ -184,10 +191,32 @@ func buildOpenObserveBinaryClause(binary query.BinaryWhereClause, mapping map[st
 				parts = append(parts, fmt.Sprintf("%s = '%s'", col, escapeOpenObserveString(strVal)))
 			case query.Nq:
 				parts = append(parts, fmt.Sprintf("%s != '%s'", col, escapeOpenObserveString(strVal)))
+			case query.In, query.NotIn:
+				parts = append(parts, openObserveInClause(col, op == query.NotIn, val))
+			case query.Gt, query.Gte, query.Lt, query.Lte:
+				parts = append(parts, fmt.Sprintf("%s %s %s", col, openObserveComparison[op], openObserveOrderedLiteral(col, val)))
 			case query.Contains:
 				parts = append(parts, fmt.Sprintf("str_match(%s, '%s')", col, escapeOpenObserveString(strVal)))
 			case query.ILike:
-				parts = append(parts, fmt.Sprintf("str_match_ignore_case(%s, '%s')", col, escapeOpenObserveString(strVal)))
+				// A LIKE pattern, like every other provider's _ilike (Loki and ES anchor it
+				// too). This used to be str_match_ignore_case, a substring match that took
+				// the % wildcards literally — so the pattern the UI's "ILIKE" chip and the
+				// logs agent both send, "%error%", matched nothing and read as "no logs".
+				parts = append(parts, fmt.Sprintf("%s ILIKE '%s'", col, escapeOpenObserveString(strVal)))
+			case query.IsNull:
+				// true = the field is absent, false = present (the builder's exists chips).
+				// The value-less "is null" chip arrives as "" and means absent. Any other
+				// value is refused rather than guessed.
+				switch strings.ToLower(strVal) {
+				case "true", "":
+					parts = append(parts, fmt.Sprintf("%s IS NULL", col))
+				case "false":
+					parts = append(parts, fmt.Sprintf("%s IS NOT NULL", col))
+				default:
+					return "", fmt.Errorf("openobserve: _is_null takes true or false, not %q", strVal)
+				}
+			case query.NLike:
+				parts = append(parts, fmt.Sprintf("%s NOT LIKE '%s'", col, escapeOpenObserveString(strVal)))
 			case query.Like:
 				// SQL LIKE, so the caller's % / _ stay wildcards — that is the whole point
 				// of the operator (callers pass patterns like "5%" to select 5xx statuses).
@@ -204,62 +233,129 @@ func buildOpenObserveBinaryClause(binary query.BinaryWhereClause, mapping map[st
 	return strings.Join(parts, " AND "), nil
 }
 
-func buildOpenObserveSQLWhereClause(where query.QueryWhereClause) (string, error) {
+var openObserveComparison = map[query.BinaryWhereClauseType]string{
+	query.Gt: ">", query.Gte: ">=", query.Lt: "<", query.Lte: "<=",
+}
+
+// openObserveInClause renders _in / _not_in. An empty list is answered rather than
+// rendered, because "IN ()" is a syntax error: nothing is IN an empty set, and
+// everything is NOT IN it.
+func openObserveInClause(col string, negate bool, val any) string {
+	var items []any
+	switch list := val.(type) {
+	case nil:
+		// `"_in": null` is the empty set, not the literal string "<nil>".
+	case []any:
+		items = list
+	case []string:
+		for _, s := range list {
+			items = append(items, s)
+		}
+	default:
+		items = []any{val}
+	}
+	if len(items) == 0 {
+		if negate {
+			return "TRUE"
+		}
+		return "FALSE"
+	}
+	quoted := make([]string, 0, len(items))
+	for _, item := range items {
+		quoted = append(quoted, "'"+escapeOpenObserveString(fmt.Sprintf("%v", item))+"'")
+	}
+	keyword := "IN"
+	if negate {
+		keyword = "NOT IN"
+	}
+	return fmt.Sprintf("%s %s (%s)", col, keyword, strings.Join(quoted, ", "))
+}
+
+// openObserveOrderedLiteral renders the right-hand side of a range comparison. A numeric
+// value goes out bare even when it arrives as a string: OpenObserve compares a quoted
+// literal as text, so `duration >= '3000'` also matches 400 and 50000 — measurably
+// different rows from `duration >= 3000`. Equality and IN coerce correctly and stay quoted.
+//
+// _timestamp is epoch microseconds, and the logs agent bounds it with ISO strings
+// ("timestamp >= 2026-09-25T18:18:00Z"). Quoted, that compares as text and matches
+// nothing — a silent zero — so a parseable time is converted to microseconds.
+func openObserveOrderedLiteral(col string, val any) string {
+	s := fmt.Sprintf("%v", val)
+	if _, err := strconv.ParseFloat(s, 64); err == nil {
+		return s
+	}
+	if col == "_timestamp" {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return strconv.FormatInt(t.UnixMicro(), 10)
+		}
+	}
+	return "'" + escapeOpenObserveString(s) + "'"
+}
+
+// buildOpenObserveWhere renders a where clause, handing each _binary group to
+// binaryClause. Every key present on one clause is ANDed: callers routinely send
+// _binary and _or side by side (the workload traces tab does), and returning after the
+// first key silently dropped the rest — an unapplied filter, so a wider result set.
+func buildOpenObserveWhere(where query.QueryWhereClause, binaryClause func(query.BinaryWhereClause) (string, error)) (string, error) {
+	var parts []string
+
 	if len(where.Binary) > 0 {
-		return buildOpenObserveBinaryClause(where.Binary, openObserveLogLabelMapping)
+		part, err := binaryClause(where.Binary)
+		if err != nil {
+			return "", err
+		}
+		if part != "" {
+			parts = append(parts, part)
+		}
 	}
 
-	if len(where.And) > 0 {
-		var parts []string
-		for _, c := range where.And {
-			part, err := buildOpenObserveSQLWhereClause(c)
+	for _, group := range []struct {
+		clauses []query.QueryWhereClause
+		joiner  string
+	}{{where.And, " AND "}, {where.Or, " OR "}} {
+		var sub []string
+		for _, c := range group.clauses {
+			part, err := buildOpenObserveWhere(c, binaryClause)
 			if err != nil {
 				return "", err
 			}
 			if part != "" {
-				parts = append(parts, part)
+				sub = append(sub, part)
 			}
 		}
-		if len(parts) == 0 {
-			return "", nil
+		switch len(sub) {
+		case 0:
+		case 1:
+			parts = append(parts, sub[0])
+		default:
+			parts = append(parts, "("+strings.Join(sub, group.joiner)+")")
 		}
-		if len(parts) == 1 {
-			return parts[0], nil
-		}
-		return "(" + strings.Join(parts, " AND ") + ")", nil
-	}
-
-	if len(where.Or) > 0 {
-		var parts []string
-		for _, c := range where.Or {
-			part, err := buildOpenObserveSQLWhereClause(c)
-			if err != nil {
-				return "", err
-			}
-			if part != "" {
-				parts = append(parts, part)
-			}
-		}
-		if len(parts) == 0 {
-			return "", nil
-		}
-		if len(parts) == 1 {
-			return parts[0], nil
-		}
-		return "(" + strings.Join(parts, " OR ") + ")", nil
 	}
 
 	if where.Not != nil {
-		notPart, err := buildOpenObserveSQLWhereClause(*where.Not)
+		notPart, err := buildOpenObserveWhere(*where.Not, binaryClause)
 		if err != nil {
 			return "", err
 		}
 		if notPart != "" {
-			return fmt.Sprintf("NOT (%s)", notPart), nil
+			parts = append(parts, fmt.Sprintf("NOT (%s)", notPart))
 		}
 	}
 
-	return "", nil
+	switch len(parts) {
+	case 0:
+		return "", nil
+	case 1:
+		return parts[0], nil
+	default:
+		return "(" + strings.Join(parts, " AND ") + ")", nil
+	}
+}
+
+func buildOpenObserveSQLWhereClause(where query.QueryWhereClause) (string, error) {
+	return buildOpenObserveWhere(where, func(b query.BinaryWhereClause) (string, error) {
+		return buildOpenObserveBinaryClause(b, openObserveLogLabelMapping)
+	})
 }
 
 func (s *OpenObserveLogSource) buildSQL(req FetchLogRequest, stream string) (string, error) {
@@ -297,7 +393,239 @@ func (s *OpenObserveLogSource) GetQuery(ctx *security.RequestContext, req FetchL
 	if err != nil {
 		return "", fmt.Errorf("failed to get OpenObserve configs: %w", err)
 	}
-	return s.buildSQL(req, cfg.LogStream)
+	return s.buildSQL(s.withSchemaFallbacks(ctx, req, cfg), cfg.LogStream)
+}
+
+// withSchemaFallbacks applies every filter rewrite that depends on which columns the
+// stream actually carries. The where clause arrives already rewritten through the
+// account's effective label mapping, so the workload and pod columns are read from that
+// same mapping — an account that remaps them (a Fluent Bit shipper's kubernetes_* names)
+// would otherwise never get the fallback. Resolving it needs the tenant, so a caller
+// without a security context gets the provider defaults.
+func (s *OpenObserveLogSource) withSchemaFallbacks(ctx *security.RequestContext, req FetchLogRequest, cfg integrations.OpenObserveConfig) FetchLogRequest {
+	req = withOpenObserveCorrelationIDs(req, cfg)
+	mapping := openObserveLogLabelMapping
+	if ctx != nil && ctx.GetSecurityContext() != nil {
+		mapping = getMergedLabelMapping(ctx, req.AccountId, s)
+	}
+	return withOpenObserveWorkloadPodFallback(req, cfg, mapping["app"], mapping["pod"])
+}
+
+// openObserveCorrelationFields are the trace-correlation fields the traces screen's Logs tab
+// and the agents filter logs on. A collector that tails container stdout has no such column —
+// the id sits inside the message — so a filter on it matched nothing: the tab showed no logs
+// for a trace whose id was in the log body.
+var openObserveCorrelationFields = map[string]bool{"trace_id": true, "span_id": true}
+
+// withOpenObserveCorrelationIDs rewrites trace_id / span_id equality and set filters into a
+// match on the message body, but only when the stream has no column of that name. A stream
+// fed by OTLP logs with trace context keeps its real column. The schema is fetched only when
+// such a filter is present; if it cannot be read the request is left as it was.
+func withOpenObserveCorrelationIDs(req FetchLogRequest, cfg integrations.OpenObserveConfig) FetchLogRequest {
+	if !whereMentionsField(req.QueryRequest.Where, openObserveCorrelationFields) {
+		return req
+	}
+	fields, err := fetchOpenObserveStreamFields(cfg.URL, cfg.OrgID, cfg.Username, cfg.Password, cfg.LogStream, "logs")
+	if err != nil {
+		return req
+	}
+	missing := map[string]bool{}
+	for f := range openObserveCorrelationFields {
+		if _, ok := fields[f]; !ok {
+			missing[f] = true
+		}
+	}
+	if len(missing) == 0 {
+		return req
+	}
+	req.QueryRequest.Where = rewriteCorrelationToBody(req.QueryRequest.Where, missing)
+	return req
+}
+
+func whereMentionsField(w query.QueryWhereClause, fields map[string]bool) bool {
+	for f := range w.Binary {
+		if fields[f] {
+			return true
+		}
+	}
+	for _, c := range append(append([]query.QueryWhereClause{}, w.And...), w.Or...) {
+		if whereMentionsField(c, fields) {
+			return true
+		}
+	}
+	return w.Not != nil && whereMentionsField(*w.Not, fields)
+}
+
+// rewriteCorrelationToBody returns a copy of w where each _eq / _in on a missing correlation
+// field becomes a body substring match (ids are unique hex strings, so a substring is exact
+// enough). Other operators on those fields are left alone.
+func rewriteCorrelationToBody(w query.QueryWhereClause, missing map[string]bool) query.QueryWhereClause {
+	out := query.QueryWhereClause{}
+	var extra []query.QueryWhereClause
+	if len(w.Binary) > 0 {
+		out.Binary = query.BinaryWhereClause{}
+		for field, ops := range w.Binary {
+			if !missing[field] {
+				out.Binary[field] = ops
+				continue
+			}
+			kept := map[query.BinaryWhereClauseType]any{}
+			for op, v := range ops {
+				switch op {
+				case query.Eq:
+					extra = append(extra, query.QueryWhereClause{Binary: query.BinaryWhereClause{"body": {query.Contains: v}}})
+				case query.In:
+					var alts []query.QueryWhereClause
+					for _, id := range splitOpenObserveList(v) {
+						alts = append(alts, query.QueryWhereClause{Binary: query.BinaryWhereClause{"body": {query.Contains: id}}})
+					}
+					if len(alts) == 0 {
+						kept[op] = v // empty set: let the builder answer FALSE
+						continue
+					}
+					extra = append(extra, query.QueryWhereClause{Or: alts})
+				default:
+					kept[op] = v
+				}
+			}
+			if len(kept) > 0 {
+				out.Binary[field] = kept
+			}
+		}
+		if len(out.Binary) == 0 {
+			out.Binary = nil
+		}
+	}
+	for _, c := range w.And {
+		out.And = append(out.And, rewriteCorrelationToBody(c, missing))
+	}
+	out.And = append(out.And, extra...)
+	for _, c := range w.Or {
+		out.Or = append(out.Or, rewriteCorrelationToBody(c, missing))
+	}
+	if w.Not != nil {
+		n := rewriteCorrelationToBody(*w.Not, missing)
+		out.Not = &n
+	}
+	return out
+}
+
+// withOpenObserveWorkloadPodFallback lets a workload filter match the pods of workloads the
+// shipper records no name for. The canonical app / workload labels map to the deployment
+// column, which the OTel collector fills only for a Deployment's pods — so filtering by a
+// Job, CronJob, StatefulSet or DaemonSet matched nothing, and the Log Groups drill-down
+// (which filters by the workload the group reports) showed no logs for them. The schema is
+// fetched only when such a filter is present; if it cannot be read, or the stream has no
+// pod column to fall back on, the request is left as it was.
+func withOpenObserveWorkloadPodFallback(req FetchLogRequest, cfg integrations.OpenObserveConfig, workloadCol, podCol string) FetchLogRequest {
+	if workloadCol == "" || podCol == "" || workloadCol == podCol ||
+		!whereMentionsField(req.QueryRequest.Where, map[string]bool{workloadCol: true}) {
+		return req
+	}
+	fields, err := fetchOpenObserveStreamFields(cfg.URL, cfg.OrgID, cfg.Username, cfg.Password, cfg.LogStream, "logs")
+	if err != nil {
+		return req
+	}
+	if _, ok := fields[podCol]; !ok {
+		return req
+	}
+	_, hasWorkloadCol := fields[workloadCol]
+	req.QueryRequest.Where = rewriteWorkloadWithPodFallback(req.QueryRequest.Where, workloadCol, podCol, hasWorkloadCol)
+	return req
+}
+
+// rewriteWorkloadWithPodFallback returns a copy of w where each _eq / _in on workloadCol
+// also accepts records that carry no workload name but whose pod belongs to that workload:
+// the pod is named <workload>-<suffix>, or is the workload itself (a bare pod). A record
+// that does carry a workload name still has to match it exactly. When the stream has no
+// workload column at all, the pod match is the whole filter — referencing the missing
+// column would make OpenObserve reject the query. Other operators are left alone.
+func rewriteWorkloadWithPodFallback(w query.QueryWhereClause, workloadCol, podCol string, hasWorkloadCol bool) query.QueryWhereClause {
+	matchOne := func(v any) query.QueryWhereClause {
+		name := fmt.Sprintf("%v", v)
+		podMatch := query.QueryWhereClause{Or: []query.QueryWhereClause{
+			{Binary: query.BinaryWhereClause{podCol: {query.Eq: name}}},
+			{Binary: query.BinaryWhereClause{podCol: {query.Like: name + "-%"}}},
+		}}
+		if !hasWorkloadCol {
+			return podMatch
+		}
+		unrecorded := query.QueryWhereClause{Or: []query.QueryWhereClause{
+			{Binary: query.BinaryWhereClause{workloadCol: {query.IsNull: true}}},
+			{Binary: query.BinaryWhereClause{workloadCol: {query.Eq: ""}}},
+		}}
+		return query.QueryWhereClause{Or: []query.QueryWhereClause{
+			{Binary: query.BinaryWhereClause{workloadCol: {query.Eq: name}}},
+			{And: []query.QueryWhereClause{unrecorded, podMatch}},
+		}}
+	}
+
+	out := query.QueryWhereClause{}
+	var extra []query.QueryWhereClause
+	if len(w.Binary) > 0 {
+		out.Binary = query.BinaryWhereClause{}
+		for field, ops := range w.Binary {
+			if field != workloadCol {
+				out.Binary[field] = ops
+				continue
+			}
+			kept := map[query.BinaryWhereClauseType]any{}
+			for op, v := range ops {
+				switch op {
+				case query.Eq:
+					extra = append(extra, matchOne(v))
+				case query.In:
+					var alts []query.QueryWhereClause
+					for _, name := range splitOpenObserveList(v) {
+						alts = append(alts, matchOne(name))
+					}
+					if len(alts) == 0 {
+						kept[op] = v // empty set: let the builder answer FALSE
+						continue
+					}
+					extra = append(extra, query.QueryWhereClause{Or: alts})
+				default:
+					kept[op] = v
+				}
+			}
+			if len(kept) > 0 {
+				out.Binary[field] = kept
+			}
+		}
+		if len(out.Binary) == 0 {
+			out.Binary = nil
+		}
+	}
+	for _, c := range w.And {
+		out.And = append(out.And, rewriteWorkloadWithPodFallback(c, workloadCol, podCol, hasWorkloadCol))
+	}
+	out.And = append(out.And, extra...)
+	for _, c := range w.Or {
+		out.Or = append(out.Or, rewriteWorkloadWithPodFallback(c, workloadCol, podCol, hasWorkloadCol))
+	}
+	if w.Not != nil {
+		n := rewriteWorkloadWithPodFallback(*w.Not, workloadCol, podCol, hasWorkloadCol)
+		out.Not = &n
+	}
+	return out
+}
+
+// splitOpenObserveList normalises an _in value to its elements.
+func splitOpenObserveList(v any) []any {
+	switch list := v.(type) {
+	case []any:
+		return list
+	case []string:
+		out := make([]any, len(list))
+		for i, s := range list {
+			out[i] = s
+		}
+		return out
+	case nil:
+		return nil
+	default:
+		return []any{v}
+	}
 }
 
 func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req FetchLogRequest) ([]OutputLog, error) {
@@ -306,7 +634,7 @@ func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req Fetch
 		return nil, fmt.Errorf("failed to get OpenObserve configs: %w", err)
 	}
 
-	sql, err := s.buildSQL(req, cfg.LogStream)
+	sql, err := s.buildSQL(s.withSchemaFallbacks(ctx, req, cfg), cfg.LogStream)
 	if err != nil {
 		return nil, err
 	}
@@ -342,9 +670,20 @@ func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req Fetch
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		var errorBody map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&errorBody)
-		return nil, fmt.Errorf("OpenObserve query failed with status %d: %v", resp.StatusCode, errorBody)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		text := strings.TrimSpace(string(bodyBytes))
+
+		// OpenObserve answers a window it holds no data for with "stream not found",
+		// the same body it returns for a stream that genuinely does not exist. That is
+		// an empty result, not a failure: surfacing it as an error makes an idle
+		// fifteen minutes read as a broken integration, and the assistant then reports
+		// the log backend as disconnected. The metric search path already collapses
+		// these — see isOpenObserveEmptyResultError.
+		if isOpenObserveEmptyResultError(text) {
+			return []OutputLog{}, nil
+		}
+
+		return nil, fmt.Errorf("OpenObserve query failed with status %d: %s", resp.StatusCode, text)
 	}
 
 	searchResp, err := decodeOpenObserveSearchResponse(resp.Body)
@@ -380,6 +719,14 @@ func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req Fetch
 			default:
 				out.Labels[k] = v
 			}
+		}
+
+		// The log-row detail renders labels.timestamp as epoch nanoseconds. Set it
+		// explicitly, and after the loop: otherwise normalizeOutputLogLabels aliases the
+		// raw microsecond _timestamp into it (every row read January 1970), and a shipper
+		// field that is itself named "timestamp" would win or lose on map order.
+		if micros, ok := openObserveInt64(hit["_timestamp"]); ok {
+			out.Labels["timestamp"] = micros * 1000
 		}
 
 		outputs = append(outputs, out)
@@ -489,7 +836,13 @@ func (s *OpenObserveLogSource) QueryLabelValues(ctx *security.RequestContext, re
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OpenObserve query failed with status %d", resp.StatusCode)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		text := strings.TrimSpace(string(bodyBytes))
+		// A label absent from this stream has no values; that is an empty list, not an error.
+		if isOpenObserveEmptyResultError(text) {
+			return []OutputLogLabelValue{}, nil
+		}
+		return nil, fmt.Errorf("OpenObserve query failed with status %d: %s", resp.StatusCode, text)
 	}
 
 	searchResp, err := decodeOpenObserveSearchResponse(resp.Body)
@@ -857,6 +1210,98 @@ func openObserveLevelFromSeverityNumber(v any) string {
 	return "error"
 }
 
+// openObserveK8sNameAlphabet is the alphabet Kubernetes draws generated name parts from
+// (k8s.io/apimachinery/pkg/util/rand): no vowels and no 0, 1 or 3, so a generated part
+// never spells a word. Both the pod-template hash and the random suffix use it, and
+// requiring it is what keeps a real name segment — the "nightly" of a Job named
+// db-backup-nightly — from being stripped as if it were generated.
+const openObserveK8sNameAlphabet = "bcdfghjklmnpqrstvwxz2456789"
+
+// openObserveWorkloadFromPod names the workload that owns a pod the shipper recorded no
+// workload for. On an OTel collector stream that is every pod not owned by a Deployment:
+// the Job pod runbook-script-<uuid>-x9gvn used to be reported under its full pod name,
+// making every run its own "application". Recognised shapes:
+//
+//	Deployment   <name>-<pod-template-hash>-<suffix>
+//	CronJob      <name>-<scheduled minute>-<suffix>
+//	Job          <name>-<suffix>   (DaemonSet pods look the same)
+//	StatefulSet  <name>-<ordinal>
+//
+// Anything else, a bare pod included, is its own workload. When a controller's name ends
+// in a UUID, that UUID is dropped: it is a per-run id, and leaving it in splits one
+// application into a row per run. A bare pod keeps its UUID — it is not per-run:
+// llm-server names each account's long-lived code-agent pod workspace-<account id>, and
+// stripping would merge every account's workspace into one row.
+func openObserveWorkloadFromPod(pod string) string {
+	owner := openObserveOwnerFromPod(pod)
+	if owner == pod {
+		return pod
+	}
+	return stripOpenObserveRunID(owner)
+}
+
+func openObserveOwnerFromPod(pod string) string {
+	parts := strings.Split(pod, "-")
+	n := len(parts)
+	switch {
+	case n >= 3 && isGeneratedK8sName(parts[n-1], 5, 5) &&
+		(isGeneratedK8sName(parts[n-2], 5, 10) || isCronJobScheduledMinute(parts[n-2])):
+		return strings.Join(parts[:n-2], "-")
+	case n >= 2 && (isGeneratedK8sName(parts[n-1], 5, 5) || isStatefulSetOrdinal(parts[n-1])):
+		return strings.Join(parts[:n-1], "-")
+	}
+	return pod
+}
+
+// openObserveRunIDSuffix matches a trailing -<uuid>. Workloads created once per run name
+// themselves after the run — the runbook runner creates a Job runbook-script-<execution id>
+// for every execution, with no controller above it — and OpenObserve records nothing else
+// (no job name, no labels) that would group those runs. The drill-down still finds each
+// run's pods: the workload filter falls back to a <name>-% match on the pod name.
+var openObserveRunIDSuffix = regexp.MustCompile(`-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// stripOpenObserveRunID drops a trailing run id, unless the name is nothing but one.
+func stripOpenObserveRunID(name string) string {
+	if loc := openObserveRunIDSuffix.FindStringIndex(name); loc != nil && loc[0] > 0 {
+		return name[:loc[0]]
+	}
+	return name
+}
+
+// isGeneratedK8sName reports whether s is a generated name part of the given length range.
+func isGeneratedK8sName(s string, minLen, maxLen int) bool {
+	if len(s) < minLen || len(s) > maxLen {
+		return false
+	}
+	for _, r := range s {
+		if !strings.ContainsRune(openObserveK8sNameAlphabet, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isCronJobScheduledMinute reports whether s is the scheduled time, in minutes since the
+// epoch, that the CronJob controller puts in a Job's name — eight digits until 2160.
+func isCronJobScheduledMinute(s string) bool {
+	return len(s) >= 8 && len(s) <= 10 && isAllDigits(s)
+}
+
+// isStatefulSetOrdinal reports whether s is a StatefulSet pod ordinal. Capped at five
+// digits so an all-digit tail on some other name is not taken for one.
+func isStatefulSetOrdinal(s string) bool {
+	return s != "" && len(s) <= 5 && isAllDigits(s)
+}
+
+func isAllDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // convertOpenObserveLogGroups maps aggregated rows onto the LogGroup contract shared by
 // every provider. Timestamps are emitted in epoch seconds — the frontend multiplies by 1000.
 func convertOpenObserveLogGroups(hits []map[string]any, fallbackTimestampSec int64) LogGroupOutput {
@@ -894,7 +1339,7 @@ func convertOpenObserveLogGroups(hits []map[string]any, fallbackTimestampSec int
 		// a stream that only records k8s_deployment_name.
 		workload, _ := hit["group_workload"].(string)
 		if workload == "" {
-			workload = extractWorkloadFromPodName(pod)
+			workload = openObserveWorkloadFromPod(pod)
 		}
 
 		group := LogGroup{
@@ -909,14 +1354,13 @@ func convertOpenObserveLogGroups(hits []map[string]any, fallbackTimestampSec int
 			PatternHash: generatePatternHash(sample),
 		}
 
-		// container_id mirrors the Prometheus format so the UI can parse namespace and
-		// workload back out of a single field.
+		// /k8s/<namespace>/<workload>, the shape Loki, Elasticsearch, Datadog and the other
+		// log-group providers emit. Not Prometheus's /k8s/<namespace>/<pod>/<container>: the
+		// UI reads a four-segment id as that format and trims the pod suffix off the third
+		// segment, which here is already the workload — so "nudgebee-doc-docs" displayed,
+		// and was drilled down into, as "nudgebee-doc".
 		if group.Namespace != "" && group.Workload != "" {
-			if group.Container != "" {
-				group.ContainerID = fmt.Sprintf("/k8s/%s/%s/%s", group.Namespace, group.Workload, group.Container)
-			} else {
-				group.ContainerID = fmt.Sprintf("/k8s/%s/%s", group.Namespace, group.Workload)
-			}
+			group.ContainerID = fmt.Sprintf("/k8s/%s/%s", group.Namespace, group.Workload)
 		}
 
 		groups = append(groups, group)
@@ -938,6 +1382,12 @@ func (s *OpenObserveLogSource) QueryLogGroup(ctx *security.RequestContext, req F
 	// would make OpenObserve reject the whole query with a column-not-found error.
 	fields, err := fetchOpenObserveStreamFields(cfg.URL, cfg.OrgID, cfg.Username, cfg.Password, cfg.LogStream, "logs")
 	if err != nil {
+		// A stream OpenObserve has not materialised yet reports no schema. That means
+		// there is nothing to group, not that grouping is broken — and it happens
+		// routinely on an account whose log stream has simply been idle.
+		if errors.Is(err, errOpenObserveStreamNotFound) || isOpenObserveEmptyResultError(err.Error()) {
+			return LogGroupOutput{}, nil
+		}
 		ctx.GetLogger().Error("OpenObserveLogSource.QueryLogGroup: failed to read stream schema", "error", err)
 		return LogGroupOutput{}, err
 	}
@@ -995,8 +1445,13 @@ func (s *OpenObserveLogSource) QueryLogGroup(ctx *security.RequestContext, req F
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		text := strings.TrimSpace(string(bodyBytes))
+		// Same empty-window case as QueryLogs: no groups, rather than a failure.
+		if isOpenObserveEmptyResultError(text) {
+			return LogGroupOutput{}, nil
+		}
 		return LogGroupOutput{}, fmt.Errorf("OpenObserve log group query failed with status %d: %s",
-			resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+			resp.StatusCode, text)
 	}
 
 	searchResp, err := decodeOpenObserveSearchResponse(resp.Body)

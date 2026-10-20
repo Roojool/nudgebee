@@ -193,3 +193,10 @@ llm/rag-server/poetry.lock
 playwright-report/
 test-results/
 blob-report/
+
+# Setup Center working docs — local reference only, never shipped. Note: still
+# cited by inline comments in SetupGateContext.tsx, onboardingReadiness.ts,
+# setupRegistry.ts and IntegrationDynamicFormModal.jsx — kept local on purpose.
+docs/onboarding-setup-center-spec.md
+docs/setup-center-build-spec.md
+docs/setup-center-known-issues.md

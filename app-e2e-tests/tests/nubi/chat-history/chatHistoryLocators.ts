@@ -36,6 +36,7 @@ export class ChatHistoryLocators extends CommonLocators {
   readonly conversationRows: Locator;
   readonly dateGroupHeadings: Locator;
   readonly deleteMenuItem: Locator;
+  readonly confirmDeleteBtn: Locator;
   readonly toggleSaveMenuItem: Locator;
   readonly savedSnackbar: Locator;
   readonly unsavedSnackbar: Locator;
@@ -138,6 +139,11 @@ export class ChatHistoryLocators extends CommonLocators {
     this.deleteMenuItem = page
       .locator('[role="menuitem"]#delete:visible')
       .or(page.locator('[role="menuitem"]:visible', { hasText: "Delete" }))
+      .first();
+    // The menu item only opens a "Delete conversation" confirm modal; this button performs the delete.
+    this.confirmDeleteBtn = page
+      .getByTestId("confirm-delete-conversation")
+      .or(page.getByRole("dialog", { name: "Delete conversation" }).getByRole("button", { name: "Delete", exact: true }))
       .first();
     // One item, two labels: it reads "Save" or "Unsave" depending on the row's
     // current state, which is why the id is the primary here.

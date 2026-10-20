@@ -280,9 +280,12 @@ type cancelWatchInput struct {
 // route switches from GraphQL-over-PG to action-over-HTTP. Snake_case to
 // match Hasura's emitted field names.
 type watchRow struct {
-	ID              string  `json:"id"`
-	Status          string  `json:"status"`
-	SourceKind      string  `json:"source_kind"`
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	SourceKind string `json:"source_kind"`
+	// The command this watch polls, so the drawer names the target not an id (#38901).
+	// Derived server-side; source_config would ship fields the row never renders.
+	WatchTarget     string  `json:"watch_target"`
 	PredicateKind   string  `json:"predicate_kind"`
 	PredicateExpr   string  `json:"predicate_expr"`
 	PredicateNegate bool    `json:"predicate_negate"`
@@ -312,6 +315,7 @@ func toListResponse(in []watch.Watch) []watchRow {
 			ID:              w.ID.String(),
 			Status:          string(w.Status),
 			SourceKind:      string(w.SourceKind),
+			WatchTarget:     watch.DescribeTarget(w),
 			PredicateKind:   string(w.PredicateKind),
 			PredicateExpr:   w.PredicateExpr,
 			PredicateNegate: w.PredicateNegate,

@@ -7,6 +7,7 @@ import (
 	"nudgebee/tickets-server/common"
 	"nudgebee/tickets-server/models"
 	"nudgebee/tickets-server/services"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -440,6 +441,8 @@ func UpdateTicket(ctx *gin.Context) {
 			if description, ok := fields["description"].(string); ok {
 				updateFields.Description = description
 			}
+			updateFields.Impact = selectValue(fields["impact"])
+			updateFields.Urgency = selectValue(fields["urgency"])
 			if labelsRaw, ok := fields["labels"].([]any); ok {
 				labels := make([]string, 0, len(labelsRaw))
 				for _, l := range labelsRaw {
@@ -464,6 +467,22 @@ func UpdateTicket(ctx *gin.Context) {
 		"status":    "updated",
 		"message":   "Ticket updated successfully",
 	})
+}
+
+// selectValue reads a select field that arrives as a string, a JSON number, or
+// {"id": <string or number>}; anything else is "".
+func selectValue(v any) string {
+	if m, ok := v.(map[string]any); ok {
+		v = m["id"]
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	default:
+		return ""
+	}
 }
 
 func TransitionTicket(ctx *gin.Context) {

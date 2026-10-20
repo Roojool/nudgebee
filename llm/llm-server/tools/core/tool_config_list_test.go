@@ -86,3 +86,13 @@ func registerUnavailableMetastore(t *testing.T) {
 	})
 	t.Cleanup(func() { common.RegisterDatabaseManagerHook(common.Metastore, nil) })
 }
+
+func TestCurrentAccountConfig_DoesNotFallBackToOtherTenantAccounts(t *testing.T) {
+	configs := []ToolConfig{
+		{Name: "k8s-dev", Values: []ToolConfigValue{{Name: "id", Value: "active-1"}}},
+		{Name: "k8s-prod", Values: []ToolConfigValue{{Name: "id", Value: "active-2"}}},
+	}
+
+	assert.Nil(t, currentAccountConfig(configs, "inactive-current"))
+	assert.Equal(t, []ToolConfig{configs[1]}, currentAccountConfig(configs, "active-2"))
+}

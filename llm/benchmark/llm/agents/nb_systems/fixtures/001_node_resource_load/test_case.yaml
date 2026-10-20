@@ -1,4 +1,4 @@
-user_prompt: "which node is the most loaded right now — CPU and memory both"
+user_prompt: "which node has the highest CPU usage right now, and which node has the highest memory usage?"
 
 expected_output:
   - The response must identify which node currently has the highest CPU utilization and which node has the highest memory utilization (they may be the same node or different ones).

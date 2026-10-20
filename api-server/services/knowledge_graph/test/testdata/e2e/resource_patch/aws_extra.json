@@ -1,0 +1,94 @@
+[
+  {
+    "id": "ebs-a",
+    "resourse_id": "vol-0aaa",
+    "name": "app-data",
+    "type": "storage",
+    "service_name": "AmazonEC2",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "ebs-a",
+    "meta": {
+      "VolumeId": "vol-0aaa",
+      "Size": 20,
+      "VolumeType": "gp3",
+      "Attachments": [
+        {
+          "InstanceId": "i-0aaa",
+          "Device": "/dev/xvda",
+          "State": "attached"
+        }
+      ]
+    }
+  },
+  {
+    "id": "lambda-vpc-a",
+    "resourse_id": "queue-worker",
+    "name": "queue-worker",
+    "type": "function",
+    "service_name": "AWSLambda",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "lambda-vpc-a",
+    "arn": "arn:aws:lambda:us-east-1:123456789012:function:queue-worker",
+    "meta": {
+      "FunctionName": "queue-worker",
+      "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:queue-worker",
+      "Runtime": "python3.12",
+      "Role": "arn:aws:iam::123456789012:role/app-role",
+      "VpcConfig": {
+        "VpcId": "vpc-1",
+        "SubnetIds": [
+          "subnet-1"
+        ],
+        "SecurityGroupIds": [
+          "sg-1"
+        ]
+      },
+      "EventSourceMappings": [
+        {
+          "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:main-queue",
+          "State": "Enabled",
+          "BatchSize": 10
+        }
+      ]
+    }
+  },
+  {
+    "id": "eni-row-a",
+    "resourse_id": "eni-0aaa",
+    "name": "eni-0aaa",
+    "type": "network-interface",
+    "service_name": "AmazonVPC",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "eni-row-a",
+    "meta": {
+      "NetworkInterfaceId": "eni-0aaa",
+      "SubnetId": "subnet-1",
+      "VpcId": "vpc-1",
+      "InterfaceType": "interface",
+      "PrivateIpAddress": "10.0.1.10",
+      "Status": "in-use",
+      "Groups": [
+        {
+          "GroupId": "sg-1",
+          "GroupName": "app-sg"
+        }
+      ],
+      "Attachment": {
+        "AttachmentId": "eni-attach-0aaa",
+        "InstanceId": "i-0aaa",
+        "DeviceIndex": 0,
+        "Status": "attached",
+        "DeleteOnTermination": true
+      }
+    }
+  }
+]

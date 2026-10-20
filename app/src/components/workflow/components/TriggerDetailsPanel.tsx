@@ -7,10 +7,18 @@ import { ds } from 'src/utils/colors';
 import { workflowUserIcon, workflowCalendarIcon, workflowWebhookIcon, InvestigateHomeIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { Label } from '@ui/Label';
+import { Chip } from '@ui/Chip';
 import Datetime from '@shared/format/Datetime';
 import JsonTreeView from '@shared/viewers/JsonTreeView';
 import type { Node } from 'reactflow';
-import { STRUCTURED_FILTER_FIELDS, parseFilterExpression, structuredFieldLabel } from '../utils/eventFilter';
+import {
+  STRUCTURED_FILTER_FIELDS,
+  migrateLegacyAccountFilter,
+  parseFilterExpression,
+  structuredCoversFilter,
+  structuredFieldLabel,
+} from '../utils/eventFilter';
+import { triggerListenAccounts } from '../utils/listenAccounts';
 import { useAccountOptions } from '../hooks/useAccountOptions';
 
 interface TriggerDetailsPanelProps {
@@ -54,7 +62,7 @@ const formatLegacyEventType = (raw: unknown): string => {
 
 // Mono style for code-like values in detail rows
 const MONO_STYLE = {
-  fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+  fontFamily: ds.font.mono,
   backgroundColor: ds.background[200],
   border: `1px solid ${ds.gray[200]}`,
   borderRadius: 'var(--ds-radius-md)',
@@ -114,36 +122,53 @@ const WebhookConfig = ({ params }: { params: any }) => (
   </Box>
 );
 
-// Event trigger config — parses structured filters from expression
-const EventConfig = ({ params, cloudProvider }: { params: any; cloudProvider: string }) => {
-  const filterStr = params.filter || '';
+// Event trigger config — the listened accounts, then structured filters parsed from the expression.
+// `filter` has any legacy account clause already moved into `accounts`.
+const EventConfig = ({
+  params,
+  filter: filterStr,
+  accounts,
+  cloudProvider,
+}: {
+  params: any;
+  filter: string;
+  accounts: { id: string; label: string }[];
+  cloudProvider: string;
+}) => {
   const parsed = parseFilterExpression(filterStr);
-  // Read-only view, so it can be more lenient than the editor: a name-valued `event.cluster`
-  // is left in advanced mode by the sidebar (rewriting it would break a working filter), but
-  // there is no rewrite risk here, so still surface it as the Cluster chip.
-  if (!parsed.cluster) {
-    const legacyCluster = /event\.cluster\s*==\s*"([^"]*)"/i.exec(filterStr);
-    if (legacyCluster) {
-      parsed.cluster = legacyCluster[1];
-    }
-  }
+  // Chips only recover simple equality clauses, so show the expression too when they don't say it all.
+  const chipsCoverFilter = structuredCoversFilter(filterStr, parsed);
   // Legacy: workflows saved before event_type became a structured filter still carry params.event_type.
   // Surface it under the same key so the UI looks consistent.
   if (!parsed.event_type) {
     const legacy = formatLegacyEventType(params.event_type);
     if (legacy) {
-      parsed.event_type = legacy;
+      parsed.event_type = legacy.split(', ');
     }
   }
   const hasStructured = Object.keys(parsed).length > 0;
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)' }}>
-      {hasStructured ? (
+      {accounts.length > 0 && (
+        <DetailRow
+          label='Listens to'
+          value={
+            <Box data-testid='trigger-details-listen-accounts' sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-1)' }}>
+              {accounts.map((a) => (
+                <Chip key={a.id} tone='neutral' size='sm'>
+                  {a.label}
+                </Chip>
+              ))}
+            </Box>
+          }
+        />
+      )}
+      {hasStructured && (
         <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 'var(--ds-space-3)' }}>
           {STRUCTURED_FILTER_FIELDS.map(
             (f) =>
-              parsed[f.filterType] && (
+              parsed[f.filterType]?.length > 0 && (
                 <Box key={f.filterType} sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
                   <Typography
                     sx={{
@@ -166,15 +191,14 @@ const EventConfig = ({ params, cloudProvider }: { params: any; cloudProvider: st
                       padding: 'var(--ds-space-1) var(--ds-space-2)',
                     }}
                   >
-                    {parsed[f.filterType]}
+                    {parsed[f.filterType].join(', ')}
                   </Box>
                 </Box>
               )
           )}
         </Box>
-      ) : (
-        <DetailRow label='Filter Expression' value={filterStr} mono />
       )}
+      {!chipsCoverFilter && <DetailRow label='Filter Expression' value={filterStr} mono />}
     </Box>
   );
 };
@@ -204,10 +228,18 @@ const TriggerDetailsPanel: React.FC<TriggerDetailsPanelProps> = ({
   const triggerData = triggerNode.data;
   const triggerType: string = triggerData?.trigger?.type || triggerData?.triggerType || 'manual';
   const triggerParams = triggerData?.trigger?.params || triggerData?.triggerParams || {};
-  // `cluster` and `subject_namespace` hold a cloud account name and a cloud service name on
-  // non-K8s accounts, so the filter labels follow the account the trigger filters on.
-  const { providerOf } = useAccountOptions(triggerType === 'event');
-  const filterCloudProvider = providerOf(parseFilterExpression(triggerParams.filter || '').cluster || accountId);
+  const { options: accountOptions, providerOf } = useAccountOptions(triggerType === 'event');
+  // Older triggers pinned their account in the filter; read those as listened accounts too.
+  const eventAccounts = migrateLegacyAccountFilter(
+    triggerParams.filter || '',
+    triggerListenAccounts({ type: 'event', params: triggerParams }),
+    accountId
+  );
+  const listenAccountIds = eventAccounts.accounts.length > 0 ? eventAccounts.accounts : accountId ? [accountId] : [];
+  const listenAccounts = listenAccountIds.map((id) => ({ id, label: accountOptions.find((o) => o.value === id)?.label || id }));
+  // `subject_namespace` holds a cloud service name on non-K8s accounts, so the filter labels
+  // follow the first account the trigger listens to.
+  const filterCloudProvider = providerOf(listenAccountIds[0]);
   const triggerLabel = triggerData?.label || 'Trigger';
   const executionInputs = executionData?.inputs;
   const triggeredBy = executionData?.triggered_by || selectedExecution?.triggered_by;
@@ -241,7 +273,7 @@ const TriggerDetailsPanel: React.FC<TriggerDetailsPanelProps> = ({
       case 'webhook':
         return <WebhookConfig params={triggerParams} />;
       case 'event':
-        return <EventConfig params={triggerParams} cloudProvider={filterCloudProvider} />;
+        return <EventConfig params={triggerParams} filter={eventAccounts.filter} accounts={listenAccounts} cloudProvider={filterCloudProvider} />;
       default:
         return null;
     }

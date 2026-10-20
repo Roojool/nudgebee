@@ -170,3 +170,23 @@ func (s *AWSSource) createPublicIPEdges(reqCtx *security.RequestContext, nodes [
 
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "AmazonVPC",
+		Types:        []string{"elastic-ip"},
+		NodeType:     core.NodeTypePublicIP,
+		SpecificType: "ElasticIP",
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Elastic IPs front an EC2 instance or a network interface.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypePublicIP, Name: "elastic_ip",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createPublicIPEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}

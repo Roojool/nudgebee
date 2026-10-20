@@ -123,7 +123,7 @@ func FieldsForIssueType(meta interface{}, issueType string) map[string]FieldInfo
 		return nil
 	}
 	for _, template := range parsed.Data {
-		if template.Name == issueType {
+		if strings.EqualFold(strings.TrimSpace(template.Name), strings.TrimSpace(issueType)) {
 			return template.Fields
 		}
 	}

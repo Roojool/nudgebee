@@ -24,6 +24,7 @@ query list_account {
       cloud_provider
       id
       account_name
+      created_at
     }
   }
   integrations: integrations_list(where: __WHERE_INTEGRATIONS__) {
@@ -502,6 +503,7 @@ const apiAccount = {
         'solarwinds',
         'solarwinds_webhook',
         'elasticsearch_webhook',
+        'openobserve',
         'openobserve_webhook',
         'workflow_webhook',
         'google_chat_space',
@@ -521,6 +523,19 @@ const apiAccount = {
           object: { platform: null },
         }),
       ]);
+
+      // Fail closed on the fetch so every caller can fail open on the decision.
+      // The envelope below is built unconditionally, so without this an errored
+      // query returns `all_accounts: []` — indistinguishable from a tenant that
+      // genuinely has none. The setup gate reads exactly that count, and locking
+      // an established tenant out of its own product because one query blipped is
+      // the worst outcome available. Same shape `getCloudAccounts` already uses
+      // in `api1/home`. The catch below *returns* the error rather than
+      // rethrowing, so callers see an Error value and must treat it as
+      // "unknown", never as "empty".
+      if (!accountsResponse?.data?.data || accountsResponse?.data?.errors?.length) {
+        throw new Error(accountsResponse?.data?.errors?.[0]?.message || 'Failed to fetch cloud accounts');
+      }
 
       const data = accountsResponse?.data?.data;
       const messagingData = messagingResponse?.data?.data?.messagingplatforms_list?.data || [];

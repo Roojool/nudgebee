@@ -1,6 +1,40 @@
 {
   "nodes": [
     {
+      "unique_key": "aws:test-account-aws-1:global:CloudResource::app-group",
+      "node_type": "CloudResource",
+      "specific_type": "CloudResource",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "arn:aws:iam::123456789012:group/app-group",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "iam-group",
+        "is_active": true,
+        "labels": null,
+        "name": "app-group",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "iam-group",
+        "region": "global",
+        "resource_id": "app-group",
+        "service_name": "AWSIAM",
+        "source": "aws",
+        "status": "",
+        "subtype": "Group",
+        "type": "Group"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "app-group",
+        "region": "global"
+      },
+      "ontology_attributes": {}
+    },
+    {
       "unique_key": "aws:test-account-aws-1:global:ServiceIdentity::admin-role",
       "node_type": "ServiceIdentity",
       "specific_type": "IAMRole",
@@ -84,6 +118,40 @@
       }
     },
     {
+      "unique_key": "aws:test-account-aws-1:us-east-1:AIService::llama3",
+      "node_type": "AIService",
+      "specific_type": "AIService",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "bedrock-a",
+        "is_active": true,
+        "labels": null,
+        "name": "llama3",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "bedrock-a",
+        "region": "us-east-1",
+        "resource_id": "foundation-model/meta.llama3",
+        "service_name": "AmazonBedrock",
+        "source": "aws",
+        "status": "",
+        "subtype": "foundation-model/meta.llama3",
+        "type": "foundation-model/meta.llama3"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "llama3",
+        "region": "us-east-1"
+      },
+      "ontology_attributes": {}
+    },
+    {
       "unique_key": "aws:test-account-aws-1:us-east-1:BackupPolicy::my-plan",
       "node_type": "BackupPolicy",
       "specific_type": "BackupPlan",
@@ -160,6 +228,197 @@
       }
     },
     {
+      "unique_key": "aws:test-account-aws-1:us-east-1:Cache::app-cache",
+      "node_type": "Cache",
+      "specific_type": "ElastiCacheCluster",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cache_type": "elasticache",
+        "cloud_provider": "AWS",
+        "configuration_endpoint": "app-cache.abc.cache.amazonaws.com",
+        "dns_name": "app-cache.abc.cache.amazonaws.com",
+        "engine": "redis",
+        "external_resource_id": "cache-a",
+        "instance_type": "cache.t3.micro",
+        "is_active": true,
+        "labels": null,
+        "name": "app-cache",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "cache-a",
+        "region": "us-east-1",
+        "resource_id": "app-cache",
+        "service_name": "AmazonElastiCache",
+        "source": "aws",
+        "status": "",
+        "subtype": "ElastiCache",
+        "type": "cluster"
+      },
+      "labels": {},
+      "query_attributes": {
+        "engine": "redis",
+        "instance_type": "cache.t3.micro",
+        "name": "app-cache"
+      },
+      "ontology_attributes": {
+        "endpoint": "app-cache.abc.cache.amazonaws.com",
+        "location": "us-east-1",
+        "name": "app-cache",
+        "type": "redis"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:us-east-1:CloudResource::app-recovery-point",
+      "node_type": "CloudResource",
+      "specific_type": "BackupVault",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "backup-rp",
+        "is_active": true,
+        "labels": null,
+        "name": "app-recovery-point",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "backup-rp",
+        "region": "us-east-1",
+        "resource_id": "rp-1",
+        "service_name": "AWSBackup",
+        "source": "aws",
+        "status": "",
+        "subtype": "recovery-point",
+        "type": "recovery-point"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "app-recovery-point",
+        "region": "us-east-1"
+      },
+      "ontology_attributes": {
+        "location": "us-east-1",
+        "name": "app-recovery-point"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:us-east-1:CloudResource::app-snap",
+      "node_type": "CloudResource",
+      "specific_type": "RDSClusterSnapshot",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "rds-snap",
+        "is_active": true,
+        "labels": null,
+        "name": "app-snap",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "rds-snap",
+        "region": "us-east-1",
+        "resource_id": "app-snap",
+        "service_name": "AmazonRDS",
+        "source": "aws",
+        "status": "",
+        "subtype": "cluster-snapshot",
+        "type": "cluster-snapshot"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "app-snap",
+        "region": "us-east-1"
+      },
+      "ontology_attributes": {
+        "location": "us-east-1",
+        "name": "app-snap",
+        "type": "cluster-snapshot"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:us-east-1:CloudResource::app-task",
+      "node_type": "CloudResource",
+      "specific_type": "ECSCluster",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "ecs-task",
+        "is_active": true,
+        "labels": null,
+        "name": "app-task",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "ecs-task",
+        "region": "us-east-1",
+        "resource_id": "task-1",
+        "service_name": "AmazonECS",
+        "source": "aws",
+        "status": "",
+        "subtype": "task",
+        "type": "task"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "app-task",
+        "region": "us-east-1"
+      },
+      "ontology_attributes": {
+        "location": "us-east-1",
+        "name": "app-task"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:us-east-1:CloudResource::unknown-thing",
+      "node_type": "CloudResource",
+      "specific_type": "CloudResource",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "unknown-a",
+        "is_active": true,
+        "labels": null,
+        "name": "unknown-thing",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "unknown-a",
+        "region": "us-east-1",
+        "resource_id": "unknown-1",
+        "service_name": "AmazonUnmapped",
+        "source": "aws",
+        "status": "",
+        "subtype": "widget",
+        "type": "widget"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "unknown-thing",
+        "region": "us-east-1"
+      },
+      "ontology_attributes": {}
+    },
+    {
       "unique_key": "aws:test-account-aws-1:us-east-1:ComputeInstance:main-vpc:app-ec2",
       "node_type": "ComputeInstance",
       "specific_type": "EC2Instance",
@@ -177,6 +436,7 @@
         "labels": {
           "eks:cluster-name": "my-eks"
         },
+        "managed": true,
         "name": "app-ec2",
         "nb_account_id": "123456789012",
         "nb_resource_id": "ec2-a",
@@ -241,6 +501,43 @@
       "ontology_attributes": {
         "name": "my-nodegroup",
         "region": "us-east-1"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:us-east-1:Database::app-table",
+      "node_type": "Database",
+      "specific_type": "DynamoDBTable",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "ddb-a",
+        "is_active": true,
+        "labels": null,
+        "name": "app-table",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "ddb-a",
+        "region": "us-east-1",
+        "resource_id": "app-table",
+        "service_name": "AmazonDynamoDB",
+        "source": "aws",
+        "status": "",
+        "subtype": "table",
+        "type": "table"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "app-table",
+        "subtype": "table"
+      },
+      "ontology_attributes": {
+        "location": "us-east-1",
+        "name": "app-table"
       }
     },
     {
@@ -490,6 +787,43 @@
       }
     },
     {
+      "unique_key": "aws:test-account-aws-1:us-east-1:MessageQueue::app-msk",
+      "node_type": "MessageQueue",
+      "specific_type": "MSKCluster",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "arn:aws:kafka:us-east-1:123456789012:cluster/app-msk/1",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "msk-a",
+        "is_active": true,
+        "labels": null,
+        "name": "app-msk",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "msk-a",
+        "region": "us-east-1",
+        "resource_id": "app-msk",
+        "service_name": "AmazonMSK",
+        "source": "aws",
+        "status": "",
+        "subtype": "MSK",
+        "type": "cluster"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "app-msk"
+      },
+      "ontology_attributes": {
+        "location": "us-east-1",
+        "name": "app-msk",
+        "type": "MSK"
+      }
+    },
+    {
       "unique_key": "aws:test-account-aws-1:us-east-1:MessageQueue::dlq",
       "node_type": "MessageQueue",
       "specific_type": "SQSQueue",
@@ -649,6 +983,97 @@
       "ontology_attributes": {
         "location": "us-east-1",
         "name": "app-nat",
+        "vpc": "vpc-1"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:us-east-1:NetworkGateway:main-vpc:legacy-nat",
+      "node_type": "NetworkGateway",
+      "specific_type": "NATGateway",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "nat-legacy",
+        "is_active": true,
+        "labels": null,
+        "name": "legacy-nat",
+        "nat_gateway_id": "nat-2",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "nat-legacy",
+        "region": "us-east-1",
+        "resource_id": "nat-2",
+        "service_name": "AmazonEC2",
+        "source": "aws",
+        "status": "",
+        "subnet_id": "subnet-1",
+        "subtype": "natgateway",
+        "type": "natgateway",
+        "vpc_id": "vpc-1",
+        "vpc_name_hierarchy": "main-vpc"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "legacy-nat",
+        "vpc_id": "vpc-1"
+      },
+      "ontology_attributes": {
+        "location": "us-east-1",
+        "name": "legacy-nat",
+        "vpc": "vpc-1"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:us-east-1:NetworkInterface:main-vpc:eni-0aaa",
+      "node_type": "NetworkInterface",
+      "specific_type": "NetworkInterface",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "eni_status": "in-use",
+        "external_resource_id": "eni-a",
+        "is_active": true,
+        "labels": null,
+        "name": "app-eni",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "eni-a",
+        "network_interface_id": "eni-0aaa",
+        "private_ip_address": "10.0.1.20",
+        "region": "us-east-1",
+        "resource_id": "eni-0aaa",
+        "service_name": "AmazonVPC",
+        "source": "aws",
+        "status": "",
+        "subnet_id": "subnet-1",
+        "subtype": "network-interface",
+        "type": "network-interface",
+        "vpc_id": "vpc-1",
+        "vpc_name_hierarchy": "main-vpc"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "app-eni",
+        "private_ip_address": "10.0.1.20",
+        "status": "",
+        "subnet_id": "subnet-1",
+        "vpc_id": "vpc-1"
+      },
+      "ontology_attributes": {
+        "location": "us-east-1",
+        "name": "app-eni",
+        "private_ip_address": "10.0.1.20",
+        "subnet": "subnet-1",
         "vpc": "vpc-1"
       }
     },
@@ -932,6 +1357,55 @@
       }
     },
     {
+      "unique_key": "aws:test-account-aws-1:us-east-1:Storage::app-efs",
+      "node_type": "Storage",
+      "specific_type": "EFSFileSystem",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "bucket_name": "app-efs",
+        "cloud_provider": "AWS",
+        "dns_name": "fs-0aaa.efs.us-east-1.amazonaws.com",
+        "encrypted": true,
+        "external_resource_id": "efs-a",
+        "filesystem_id": "fs-0aaa",
+        "is_active": true,
+        "labels": null,
+        "lifecycle_state": "available",
+        "name": "app-efs",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "efs-a",
+        "number_of_mount_targets": 2,
+        "performance_mode": "generalPurpose",
+        "region": "us-east-1",
+        "resource_id": "fs-0aaa",
+        "service_name": "AmazonEFS",
+        "size_in_bytes": 1024,
+        "source": "aws",
+        "status": "",
+        "subtype": "filesystem",
+        "type": "filesystem"
+      },
+      "labels": {},
+      "query_attributes": {
+        "encrypted": true,
+        "name": "app-efs",
+        "size_in_bytes": 1024,
+        "subtype": "filesystem"
+      },
+      "ontology_attributes": {
+        "encrypted": true,
+        "location": "us-east-1",
+        "name": "app-efs",
+        "size": 1024
+      }
+    },
+    {
       "unique_key": "aws:test-account-aws-1:us-east-1:Subnet:main-vpc:main-subnet",
       "node_type": "Subnet",
       "specific_type": "EC2Subnet",
@@ -1008,6 +1482,44 @@
       "ontology_attributes": {
         "location": "us-east-1",
         "name": "app-topic",
+        "type": "SNS"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:us-east-1:Topic::odd-topic",
+      "node_type": "Topic",
+      "specific_type": "SNSTopic",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "sns-bad-arn",
+        "is_active": true,
+        "labels": null,
+        "name": "odd-topic",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "sns-bad-arn",
+        "region": "us-east-1",
+        "resource_id": "odd-topic",
+        "service_name": "AmazonSNS",
+        "source": "aws",
+        "status": "",
+        "subtype": "SNS",
+        "topic_arn": "arn:aws:sns:us-east-1:123456789012:odd-topic:sub",
+        "type": "topic"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "odd-topic"
+      },
+      "ontology_attributes": {
+        "location": "us-east-1",
+        "name": "odd-topic",
         "type": "SNS"
       }
     },
@@ -1423,6 +1935,78 @@
     },
     {
       "src_key": "aws:test-account-aws-1:us-east-1:NetworkGateway:main-vpc:app-nat",
+      "dst_key": "aws:test-account-aws-1:us-east-1:VPC::main-vpc",
+      "relationship_type": "HOSTED_ON",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "connection_type": "vpc",
+        "contributing_sources": [
+          "aws"
+        ]
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
+    {
+      "src_key": "aws:test-account-aws-1:us-east-1:NetworkGateway:main-vpc:legacy-nat",
+      "dst_key": "aws:test-account-aws-1:us-east-1:Subnet:main-vpc:main-subnet",
+      "relationship_type": "HOSTED_ON",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "connection_type": "subnet",
+        "contributing_sources": [
+          "aws"
+        ]
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
+    {
+      "src_key": "aws:test-account-aws-1:us-east-1:NetworkGateway:main-vpc:legacy-nat",
+      "dst_key": "aws:test-account-aws-1:us-east-1:VPC::main-vpc",
+      "relationship_type": "HOSTED_ON",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "connection_type": "vpc",
+        "contributing_sources": [
+          "aws"
+        ]
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
+    {
+      "src_key": "aws:test-account-aws-1:us-east-1:NetworkInterface:main-vpc:eni-0aaa",
+      "dst_key": "aws:test-account-aws-1:us-east-1:Subnet:main-vpc:main-subnet",
+      "relationship_type": "HOSTED_ON",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "connection_type": "subnet",
+        "contributing_sources": [
+          "aws"
+        ]
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
+    {
+      "src_key": "aws:test-account-aws-1:us-east-1:NetworkInterface:main-vpc:eni-0aaa",
       "dst_key": "aws:test-account-aws-1:us-east-1:VPC::main-vpc",
       "relationship_type": "HOSTED_ON",
       "cloud_account_id": "test-account-aws-1",

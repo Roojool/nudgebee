@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_cloud_resourses_active_account_service;

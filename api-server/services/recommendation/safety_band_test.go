@@ -1,6 +1,7 @@
 package recommendation
 
 import (
+	"strings"
 	"testing"
 
 	"nudgebee/services/knowledge_graph/core"
@@ -162,5 +163,35 @@ func TestDeriveSafetyBand(t *testing.T) {
 				t.Errorf("DeriveSafetyBand() returned empty reason for %q", got)
 			}
 		})
+	}
+}
+
+// The band is the same for every destructive rule; only the words change. A
+// scale-down keeps its manifest, so its reason says the pods stop rather than
+// that the change is irreversible.
+func TestDeriveSafetyBandForRuleWording(t *testing.T) {
+	empty := &core.ImpactSummary{CoverageConfidence: core.CoverageHigh}
+	prod := &core.ImpactSummary{CoverageConfidence: core.CoverageHigh, DependentCount: 2, ProductionDependents: 2}
+
+	band, reason := DeriveSafetyBandForRule("abandoned_resource", empty, ChangeClassDestructive)
+	if band != SafetyBandReview || !strings.Contains(reason, "the pods stop and the manifest stays") {
+		t.Fatalf("scale-down on an empty neighbourhood: got %q %q", band, reason)
+	}
+	band, reason = DeriveSafetyBandForRule("abandoned_resource", prod, ChangeClassDestructive)
+	if band != SafetyBandRisky || reason != "scale-down to zero replicas with 2 production dependent(s)" {
+		t.Fatalf("scale-down with production callers: got %q %q", band, reason)
+	}
+
+	band, reason = DeriveSafetyBandForRule("unused_pvc", prod, ChangeClassDestructive)
+	if band != SafetyBandRisky || reason != "irreversible change with 2 production dependent(s)" {
+		t.Fatalf("removal keeps its wording: got %q %q", band, reason)
+	}
+	if _, plain := DeriveSafetyBand(prod, ChangeClassDestructive); plain != reason {
+		t.Fatalf("DeriveSafetyBand drifted from the removal wording: %q vs %q", plain, reason)
+	}
+
+	band, reason = DeriveSafetyBandForRule("abandoned_resource", prod, ChangeClassReductive)
+	if b2, r2 := DeriveSafetyBand(prod, ChangeClassReductive); band != b2 || reason != r2 {
+		t.Fatalf("a non-destructive class must grade exactly as DeriveSafetyBand: %q %q vs %q %q", band, reason, b2, r2)
 	}
 }

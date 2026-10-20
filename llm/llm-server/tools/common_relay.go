@@ -540,8 +540,37 @@ func parseProxyDBResponse(response map[string]any) (string, error) {
 	return string(b), nil
 }
 
+// proxySSHTargetHost picks the host for a proxy-agent ssh_command: the
+// per-call host_name, else the config's `host` value (the integration's own
+// host, or the discovered VM's IP IdentifyConfig / resolveCallHost set on a
+// copy of a dynamic integration). Empty when neither is set.
+func proxySSHTargetHost(toolConfig core.ToolConfig, configs map[string]any) (string, error) {
+	if hn, ok := configs["host_name"].(string); ok && strings.TrimSpace(hn) != "" {
+		hn = strings.TrimSpace(hn)
+		if !sshHostRe.MatchString(hn) {
+			return "", fmt.Errorf("invalid host_name %q: must be a hostname or IPv4 address", hn)
+		}
+		return hn, nil
+	}
+	if host := strings.TrimSpace(getConfigValue(toolConfig.Values, "host")); host != "" {
+		if !sshHostRe.MatchString(host) {
+			return "", fmt.Errorf("invalid host %q in integration config", host)
+		}
+		return host, nil
+	}
+	return "", nil
+}
+
 // executeSSHViaProxyAgent sends an ssh_command request to the forager agent via the relay
-func executeSSHViaProxyAgent(toolContext core.NbToolContext, command string, accountId string) (any, error) {
+func executeSSHViaProxyAgent(toolContext core.NbToolContext, command string, accountId string, configs map[string]any) (any, error) {
+	host, err := proxySSHTargetHost(toolContext.ToolConfig, configs)
+	if err != nil {
+		return nil, err
+	}
+	if host == "" && isDynamicSSHConfig(toolContext.ToolConfig) {
+		return nil, fmt.Errorf("no target host for dynamic ssh integration %s: pass host_name, or an instance id, IP or name of a VM it can reach", toolContext.ToolConfig.Name)
+	}
+
 	datasourceKey := getConfigValue(toolContext.ToolConfig.Values, "datasource_key")
 	if datasourceKey == "" {
 		if toolContext.ToolConfig.Id != "" {
@@ -565,6 +594,9 @@ func executeSSHViaProxyAgent(toolContext core.NbToolContext, command string, acc
 		"datasource_id": datasourceKey,
 		"command":       command,
 		"timeout_ms":    float64(config.Config.LlmServerRelayPodExecutionTimeoutSeconds * 1000),
+	}
+	if host != "" {
+		params["host"] = host
 	}
 
 	actionParam := relay.ActionExecuteBody{
@@ -703,7 +735,7 @@ func ExecuteContainerJob(toolContext core.NbToolContext, module RelayJob, query 
 
 	// Route SSH commands to proxy agent for vm_agent integrations
 	if isSSHProxyModule(module) && isVMAgentMode(toolContext.ToolConfig.Values) {
-		return executeSSHViaProxyAgent(toolContext, query, accountId)
+		return executeSSHViaProxyAgent(toolContext, query, accountId, configs)
 	}
 
 	explainQuery := false
@@ -1130,6 +1162,58 @@ func ExecuteContainerJob(toolContext core.NbToolContext, module RelayJob, query 
 	if err != nil {
 		return nil, err
 	}
+	result, err := formatRelayCommandResponse(toolContext, module, query, raw, explainQuery, responseParsed)
+	// Raw callers (the workspace shim and remediation) hand the output to
+	// something that decides success from an exit status. The agent reports
+	// the real one in exit_code, but the formatting below either merges
+	// stdout/stderr (dropping it) or passes the envelope through for the shim
+	// to print — either way a failed `kubectl describe pod gone` reached the
+	// agent as a success. Surface it as a typed error; the output is kept.
+	//
+	// kubectl only: the agent's kubectl executor is read-verb-only, where a
+	// non-zero exit always means the command failed. Other CLIs use non-zero
+	// for informative successes (`argocd app diff` exits 1 when the app has
+	// drifted), so they keep reporting success until each has its own rule.
+	if err == nil && raw && module == RelayJobKubectl {
+		if code, ok := relayExitCode(responseParsed); ok && code != 0 {
+			return result, &RelayCommandExitError{ExitCode: code}
+		}
+	}
+	return result, err
+}
+
+// RelayCommandExitError reports a command that ran on the relay target and
+// exited non-zero. It is not a transport failure: the command's output is
+// returned alongside it.
+type RelayCommandExitError struct {
+	ExitCode int
+}
+
+func (e *RelayCommandExitError) Error() string {
+	return fmt.Sprintf("command exited with status %d", e.ExitCode)
+}
+
+// relayExitCode reads exit_code from a parsed relay command response. Both
+// shapes carry it at the top level: the Go agent's {stdout, stderr, exit_code}
+// and the legacy {response, exit_code}. A missing or non-numeric value means
+// the executor did not report one.
+func relayExitCode(responseParsed map[string]any) (int, bool) {
+	switch v := responseParsed["exit_code"].(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case json.Number:
+		n, err := v.Int64()
+		return int(n), err == nil
+	default:
+		return 0, false
+	}
+}
+
+func formatRelayCommandResponse(toolContext core.NbToolContext, module RelayJob, query string, raw, explainQuery bool, responseParsed map[string]any) (any, error) {
 	if responseAny, ok := responseParsed["response"]; ok {
 		responseStr, ok := responseAny.(string)
 		if !ok {

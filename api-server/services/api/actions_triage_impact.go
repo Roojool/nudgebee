@@ -671,6 +671,7 @@ func buildIncidentAssembly(log *slog.Logger, db *sqlx.DB, accountID, rootEventID
 		"cause":            gin.H{"config_changes": []tierItem{}, "upstream": []tierItem{}},
 		"impact":           []tierItem{},
 		"chronic":          []tierItem{},
+		"co_firing":        []tierItem{},
 		"window":           windowMeta,
 		"truncated":        false,
 		"seed_occurrences": 1,
@@ -773,10 +774,64 @@ func buildIncidentAssembly(log *slog.Logger, db *sqlx.DB, accountID, rootEventID
 		"cause":            gin.H{"config_changes": configChanges, "upstream": upstream},
 		"impact":           impact,
 		"chronic":          chronic,
+		"co_firing":        collapseCoFiring(wr, triage.CoFiring(seed, cands, tiers, rates), rates),
 		"window":           windowMeta,
 		"truncated":        truncated,
 		"seed_occurrences": seedOccurrences,
 	}
+}
+
+// collapseCoFiring renders triage.CoFiring's candidates (nearest first) as tier items,
+// one per (subject, aggregation_key) with an occurrence count, capped at
+// triage.MaxCoFiring. Relation is triage.RelationCoFiring: the only link is the shared window.
+func collapseCoFiring(wr []windowRow, coFiring []triage.AlertIdentity, rates map[string]triage.Rate) []tierItem {
+	rowByID := make(map[string]windowRow, len(wr))
+	for _, r := range wr {
+		rowByID[r.id.ID] = r
+	}
+	type group struct {
+		item tierItem
+		src  map[string]bool
+	}
+	index := map[string]int{}
+	var groups []group
+	for _, id := range coFiring {
+		r, ok := rowByID[id.ID]
+		if !ok {
+			continue
+		}
+		key := triage.SubjectKey(id) + "|" + id.AggregationKey
+		if id.IsConfigChange {
+			// Same reason as the tier fold in buildIncidentAssembly: config changes
+			// share their owner's SubjectKey and aggregation key, so without the
+			// changed object's name distinct edits would merge into one row.
+			key += "|" + strings.ToLower(strings.TrimSpace(id.SubjectName))
+		}
+		i, seen := index[key]
+		if !seen {
+			if len(groups) == triage.MaxCoFiring {
+				continue
+			}
+			item := toTierItem(r, rates)
+			item.Relation = triage.RelationCoFiring
+			i = len(groups)
+			index[key] = i
+			groups = append(groups, group{item: item, src: map[string]bool{}})
+		}
+		groups[i].item.OccurrenceCount++
+		if r.source != "" {
+			groups[i].src[r.source] = true
+		}
+	}
+	out := make([]tierItem, 0, len(groups))
+	for _, g := range groups {
+		for src := range g.src {
+			g.item.Sources = append(g.item.Sources, src)
+		}
+		sort.Strings(g.item.Sources)
+		out = append(out, g.item)
+	}
+	return out
 }
 
 // isSeedRefiring reports whether a window row is a later firing of the seed's OWN alert

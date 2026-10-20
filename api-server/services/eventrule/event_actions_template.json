@@ -2854,6 +2854,20 @@
                 "description": "Command timeout in milliseconds",
                 "display_name": "Timeout (ms)"
             },
+            "host": {
+                "type": "string",
+                "default": "",
+                "required": false,
+                "description": "Target host (IP or hostname). Overrides the integration's host; required when the SSH datasource has no fixed host. Must be within the agent's allowed hosts.",
+                "display_name": "Host"
+            },
+            "port": {
+                "type": "int",
+                "default": 0,
+                "required": false,
+                "description": "Target SSH port. 0 uses the datasource's port.",
+                "display_name": "Port"
+            },
             "title": {
                 "type": "string",
                 "description": "Title of the action",

@@ -46,15 +46,8 @@ test.describe("Nubi Account Context Tab", () => {
     }
   );
 
-  // The tenant-wide ("All accounts") read is deliberately NOT covered. BCortexModal's
-  // handleAccountChange does setPickedAccountId(id || null), and AccountSelect signals
-  // All-accounts by passing '' — so that '' collapses into the same null the "nothing
-  // picked yet" state uses, and `pickedAccountId ?? accountId ?? ''` falls straight back
-  // to the accountId prop. Opened from an account-scoped page, b-Cortex therefore cannot
-  // be switched back to tenant-wide at all, which contradicts the "or clear back off"
-  // intent stated in that component's own comment. Covering GlobalContextTab's
-  // isTenantWide branch means driving a state the product cannot currently reach, so it
-  // is left to the ticket rather than asserted here or written to expect the defect.
+  // The tenant-wide read (filter cleared back to its "All accounts" placeholder) is not
+  // covered here: this spec exercises the account-scoped view b-Cortex opens in.
 
   test(
     "Nubi Account Context - select a single account, verify the empty state, its one-per-account hint and that Add is enabled",

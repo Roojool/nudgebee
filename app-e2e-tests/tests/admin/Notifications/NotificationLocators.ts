@@ -1,10 +1,15 @@
 import { Page, Locator } from "@playwright/test";
 import { CommonLocators } from "../../GlobalLocators";
 
+// The rule editor (app/src/components/notifications/rules/RuleEditorModal.tsx):
+// type chips under "Which", an account picker under "From", and one channel
+// picker per connected app under "Do".
 export class NotificationLocators extends CommonLocators {
   readonly notificationsTab!: Locator;
 
   readonly notificationRuleBtn!: Locator;
+  readonly blankRuleItem!: Locator;
+  readonly scopeSelector!: Locator;
   readonly clusterSelector!: Locator;
   readonly notificationNameInput!: Locator;
   readonly successToast!: Locator;
@@ -14,13 +19,14 @@ export class NotificationLocators extends CommonLocators {
   readonly sloTab!: Locator;
   readonly troubleshootTab!: Locator;
   readonly cloudTab!: Locator;
+  readonly weeklyDigestTab!: Locator;
 
-  readonly enableNotificationSwitch = "#enable-notification";
-
-  readonly slackBadge!: Locator;
-  readonly msTeamsBadge!: Locator;
-  readonly gChatBadge!: Locator;
-  readonly emailBadge!: Locator;
+  readonly sendAction!: Locator;
+  readonly dontSendAction!: Locator;
+  readonly pauseForSelector!: Locator;
+  readonly ruleSaveBtn!: Locator;
+  readonly ruleCancelEditorBtn!: Locator;
+  readonly ruleError!: Locator;
 
   readonly slackChannelSelector!: Locator;
   readonly msTeamsGroupSelector!: Locator;
@@ -35,75 +41,58 @@ export class NotificationLocators extends CommonLocators {
     this.notificationsTab = page.locator("#anchor-tab-Notifications")
       .or(page.getByRole("tab", { name: "Notifications" }));
 
+    // "Add rule" opens a menu of starting points; "Blank rule" opens the editor.
     this.notificationRuleBtn = page.locator("#notification-rule")
-      .or(page.getByRole("button", { name: /Create Rule/i }));
+      .or(page.getByRole("button", { name: /Add rule/i }));
+    this.blankRuleItem = page.locator("#add-rule-blank")
+      .or(page.getByRole("menuitem", { name: "Blank rule" }));
 
-    this.clusterSelector = page.locator("#account-2")
-      .or(page.locator("#account-1"))
-      .or(page.locator('[role="dialog"]').locator('button').filter({ hasText: /^Account/ }).first());
+    this.scopeSelector = page.locator("#rule-scope");
+    this.clusterSelector = page.locator("#account-1");
 
-    this.notificationNameInput = page.locator("#notificationName")
-      .or(page.getByRole("textbox", { name: /rule name/i }));
+    this.notificationNameInput = page.locator("#notificationName");
 
-    this.successToast = page.locator('[data-testid="rule-created-toast"]')
-      .or(page.getByText("Rule Created Successfully").first());
+    this.successToast = page.getByText("Rule Created Successfully").first();
+    this.updatedSuccessToast = page.getByText("Rule Updated Successfully").first();
 
-    this.updatedSuccessToast = page.locator('[data-testid="rule-updated-toast"]')
-      .or(page.getByText("Rule Updated Successfully").first());
+    this.dailyHighTab = page.locator("#rule-type-daily_recap");
+    this.optimizationTab = page.locator("#rule-type-optimize");
+    this.sloTab = page.locator("#rule-type-slo");
+    this.troubleshootTab = page.locator("#rule-type-troubleshoot");
+    this.cloudTab = page.locator("#rule-type-cloud");
+    this.weeklyDigestTab = page.locator("#rule-type-weekly_digest");
 
-    this.dailyHighTab = page.locator("#tab-daily-recap")
-      .or(page.getByRole("tab", { name: /daily/i }));
+    this.sendAction = page.locator("#rule-action").getByRole("radio", { name: "Send them" });
+    this.dontSendAction = page.locator("#rule-action").getByRole("radio", { name: /Don.t send them/ });
+    this.pauseForSelector = page.locator("#rule-pause-for");
+    this.ruleSaveBtn = page.locator("#save-rule");
+    this.ruleCancelEditorBtn = page.locator("#cancel-rule");
+    this.ruleError = page.locator("#rule-error");
 
-    this.optimizationTab = page.locator("#tab-optimize")
-      .or(page.getByRole("tab", { name: /optim/i }));
+    this.slackChannelSelector = page.locator("#slack-channel");
+    this.msTeamsGroupSelector = page.locator("#msteam-groups");
+    this.msTeamsChannelSelector = page.locator("#msteam-channel");
+    this.gChatChannelSelector = page.locator("#gchat-channel");
+    this.emailInput = page.locator("#email-input");
+    this.excludeUsersSelector = page.locator("#exclude-users");
+  }
 
-    this.sloTab = page.locator("#tab-slo")
-      .or(page.getByRole("tab", { name: /slo/i }));
-
-    this.troubleshootTab = page.locator("#tab-troubleshoot")
-      .or(page.getByRole("tab", { name: /troubleshoot/i }));
-
-    this.cloudTab = page.locator("#tab-cloud")
-      .or(page.getByRole("tab", { name: /cloud/i }));
-
-    this.slackBadge = page.locator("#slack-badge")
-      .or(page.getByRole("button", { name: /^slack$/i }));
-
-    this.msTeamsBadge = page.locator("#msteams-badge")
-      .or(page.getByRole("button", { name: /ms teams|microsoft teams/i }));
-
-    this.gChatBadge = page.locator("#gchat-badge")
-      .or(page.getByRole("button", { name: /google chat|gchat/i }));
-
-    this.emailBadge = page.locator("#email-badge")
-      .or(page.getByRole("button", { name: /^email$/i }));
-
-    this.slackChannelSelector = page.locator("#slack-channel")
-      .or(page.locator('[role="dialog"]').locator('button').filter({ hasText: /^Channel/ }).first());
-
-    this.msTeamsGroupSelector = page.locator("#msteam-groups")
-      .or(page.locator('[role="dialog"]').locator('button').filter({ hasText: /^Team/ }).first());
-
-    this.msTeamsChannelSelector = page.locator("#msteam-channel")
-      .or(page.locator('[role="dialog"]').locator('button').filter({ hasText: /^Channel/ }).first());
-
-    this.gChatChannelSelector = page.locator("#gchat-channel")
-      .or(page.locator('[role="dialog"]').locator('button').filter({ hasText: /^Space/ }).first());
-
-    this.emailInput = page.locator('#email-input')
-      .or(page.getByRole("textbox", { name: /email/i }));
-
-    this.excludeUsersSelector = page.locator("#exclude-users")
-      .or(page.getByRole("button", { name: /Exclude Users/ }));
+  // Selecting a type chip replaces the default Troubleshooting when it is the
+  // only one picked; a chip is a toggle, so this clicks only when it is off.
+  async selectOnlyType(chip: Locator): Promise<void> {
+    if ((await chip.getAttribute("aria-pressed")) !== "true") {
+      await chip.click();
+    }
+    if (chip !== this.troubleshootTab && (await this.troubleshootTab.getAttribute("aria-pressed")) === "true") {
+      await this.troubleshootTab.click();
+    }
   }
 
   getDuplicateError(): Locator {
-    return this.page.locator('[data-testid="rule-duplicate-error"]')
-      .or(this.page.getByText("A notification rule with this name already exists", { exact: false }));
+    return this.page.getByText("A notification rule with this name already exists.", { exact: false });
   }
 
   get duplicateConstraintError(): Locator {
-    return this.page.locator('[data-testid="rule-constraint-error"]')
-      .or(this.page.getByText("Duplicate value violates unique constraint"));
+    return this.page.getByText("Duplicate value violates unique constraint");
   }
 }

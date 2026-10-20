@@ -53,6 +53,10 @@ export interface InputProps {
   minRows?: number;
   maxRows?: number;
   name?: string;
+  /**
+   * Defaults to `new-password` on a password input. Pass `current-password`
+   * on a sign-in field to opt back into saved-credential fill.
+   */
   autoComplete?: string;
   onBlur?: React.FocusEventHandler<HTMLInputElement | HTMLTextAreaElement>;
   onFocus?: React.FocusEventHandler<HTMLInputElement | HTMLTextAreaElement>;
@@ -219,6 +223,13 @@ export function Input({
   // readOnly beats disabled per spec — disabled hides the value from copy-paste.
   const effectiveDisabled = disabled && !readOnly;
 
+  // A password input with no `autocomplete` is a credential target: the browser
+  // pairs it with whatever text field looks like a username, fills both, and
+  // re-fills the secret as soon as it is cleared. Secrets we collect are new
+  // values, not saved logins, so default to `new-password` — the one token
+  // Chrome honours here, since it ignores `off` on password inputs.
+  const effectiveAutoComplete = autoComplete ?? (type === 'password' ? 'new-password' : undefined);
+
   // Inline-icon padding math: padX + icon + 6px gap = inset on that side.
   // Keeps the visual rhythm consistent across sizes when an icon is present.
   const leftInset = leadingIcon ? `calc(${tokens.padX} + ${tokens.iconSize} + 6px)` : tokens.padX;
@@ -226,6 +237,9 @@ export function Input({
 
   const describedBy =
     [hasError ? errorId : null, !hasError && help ? helpId : null, instructionText ? instrId : null].filter(Boolean).join(' ') || undefined;
+
+  const fillColor = effectiveDisabled || readOnly ? 'var(--ds-background-200)' : 'var(--ds-background-100)';
+  const focusRing = `0 0 0 3px ${hasError ? 'var(--ds-red-100)' : 'var(--ds-blue-100)'}`;
 
   const inputBaseSx = {
     width: '100%',
@@ -246,8 +260,14 @@ export function Input({
     '&:hover': effectiveDisabled ? undefined : { borderColor: hasError ? 'var(--ds-red-600)' : 'var(--ds-gray-400)' },
     '&:focus': {
       borderColor: hasError ? 'var(--ds-red-500)' : 'var(--ds-blue-500)',
-      boxShadow: `0 0 0 3px ${hasError ? 'var(--ds-red-100)' : 'var(--ds-blue-100)'}`,
+      boxShadow: focusRing,
     },
+    // Browser autofill paints its own blue fill that CSS can't override; an inset shadow covers it.
+    '&:-webkit-autofill': {
+      boxShadow: `inset 0 0 0 1000px ${fillColor}`,
+      WebkitTextFillColor: effectiveDisabled ? 'var(--ds-gray-500)' : 'var(--ds-gray-700)',
+    },
+    '&:-webkit-autofill:focus': { boxShadow: `inset 0 0 0 1000px ${fillColor}, ${focusRing}` },
     '&:disabled': { color: 'var(--ds-gray-500)', cursor: 'not-allowed' },
     '&[readonly]': { backgroundColor: 'var(--ds-background-200)', cursor: 'default' },
     '&::placeholder': { color: 'var(--ds-gray-500)' },
@@ -266,7 +286,7 @@ export function Input({
     required,
     disabled: effectiveDisabled,
     readOnly,
-    autoComplete,
+    autoComplete: effectiveAutoComplete,
     'aria-invalid': hasError || undefined,
     'aria-describedby': describedBy,
     onBlur,

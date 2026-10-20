@@ -7,9 +7,7 @@ import (
 )
 
 func TestResolveOrchestratorThinkingLevelConfig(t *testing.T) {
-	assert.Equal(t, "high", resolveOrchestratorThinkingLevelConfig("high", true, "low", true), "canonical setting wins")
-	assert.Equal(t, "", resolveOrchestratorThinkingLevelConfig("", true, "high", true), "explicit canonical empty disables")
-	assert.Equal(t, "high", resolveOrchestratorThinkingLevelConfig("", false, "high", true), "legacy setting remains compatible")
-	assert.Equal(t, "", resolveOrchestratorThinkingLevelConfig("", false, "", true), "explicit legacy empty remains compatible")
-	assert.Equal(t, "medium", resolveOrchestratorThinkingLevelConfig("", false, "", false), "compiled default remains medium")
+	assert.Equal(t, "high", resolveOrchestratorThinkingLevelConfig("high", true), "canonical setting applies")
+	assert.Equal(t, "", resolveOrchestratorThinkingLevelConfig("", true), "explicit canonical empty disables")
+	assert.Equal(t, "medium", resolveOrchestratorThinkingLevelConfig("", false), "compiled default remains medium")
 }

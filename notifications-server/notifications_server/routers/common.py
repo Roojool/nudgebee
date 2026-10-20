@@ -18,6 +18,7 @@ from notifications_server.services.channel_watch import ChannelWatchService
 from notifications_server.services.common import CommonService
 from notifications_server.services.message import MessageService
 from notifications_server.services.rules import NotificationRulesService
+from notifications_server.services.route_check import RouteCheckService
 from notifications_server.clients.google_chat_app_client import GoogleChatAppClient
 
 LOG = logging.getLogger(__name__)
@@ -537,8 +538,8 @@ async def send_test_notification(request: Request, body: Dict[Any, Any]):
 @router.post("/integrations/messaging/invalidate-cache", dependencies=[Depends(verify_action_token)])
 async def invalidate_messaging_cache(body: Dict[Any, Any]):
     """Drop a tenant's cached messaging installs. Called by api-server on
-    ms_teams_webhook create/update/delete so the change is routable without the
-    cache TTL."""
+    webhook messaging integration (ms_teams_webhook, slack_webhook)
+    create/update/delete so the change is routable without the cache TTL."""
     tenant = body.get("tenant_id")
     if not tenant:
         raise HTTPException(status_code=400, detail="tenant_id is required")
@@ -622,6 +623,38 @@ async def save_or_update_rule(data: Dict[Any, Any]):
     response = await service.save_or_update_rule(**data)
     response.pop("status_code", None)
     return JSONResponse(response, status_code=201)
+
+
+@router.post("/rules/defaults", status_code=201, dependencies=[Depends(verify_action_token)])
+async def list_default_policies(data: Dict[Any, Any]):
+    response = await NotificationRulesService(engine).list_default_policies(**data)
+    response.pop("status_code", None)
+    return JSONResponse(response, status_code=201)
+
+
+@router.post("/rules/defaults/save", status_code=201, dependencies=[Depends(verify_action_token)])
+async def upsert_default_policy(data: Dict[Any, Any]):
+    response = await NotificationRulesService(engine).upsert_default_policy(**data)
+    response.pop("status_code", None)
+    return JSONResponse(response, status_code=201)
+
+
+@router.post("/rules/check", status_code=201, dependencies=[Depends(verify_action_token)])
+async def check_route(data: Dict[Any, Any]):
+    response = await RouteCheckService(engine).check_route(**data)
+    response.pop("status_code", None)
+    return JSONResponse(response, status_code=201)
+
+
+@router.post("/rules/invalidate-cache", dependencies=[Depends(verify_action_token)])
+async def invalidate_rules_cache(body: Dict[Any, Any]):
+    """Drop a tenant's cached notification rules. Called by api-server after it
+    deletes a rule, so the deleted rule stops applying without the cache TTL."""
+    tenant = body.get("tenant_id")
+    if not tenant:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    NotificationRulesService(engine).invalidate_cached_rules(tenant)
+    return JSONResponse({"success": True})
 
 
 @router.post("/emails/send", status_code=201, dependencies=[Depends(verify_action_token)])

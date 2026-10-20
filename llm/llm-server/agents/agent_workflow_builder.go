@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"nudgebee/llm/agents/core"
 	"nudgebee/llm/common"
-	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 	"nudgebee/llm/services_server"
 	"nudgebee/llm/tools"
@@ -2009,7 +2008,7 @@ func (a *WorkflowBuilderAgent) finalizeWithAutoSave(ctx *security.RequestContext
 
 // buildWorkflowEditorLink returns the canonical "Open in Editor" URL the chat
 // surfaces after building or fixing an automation. The frontend route is
-// `/workflow/[workflowId]` and `WorkflowBuilderNotebook` reads `accountId` from
+// `/automation/[workflowId]` and `WorkflowBuilderNotebook` reads `accountId` from
 // `router.query`, so the link MUST include a non-empty `accountId`.
 //
 // The URL is absolute (prefixed with config.BaseUrl) because Slack mrkdwn only
@@ -2017,7 +2016,7 @@ func (a *WorkflowBuilderAgent) finalizeWithAutoSave(ctx *security.RequestContext
 // scheme; a path-only URL appears as raw text. Runbook-server uses the same
 // convention for its workflow links.
 //
-// Returns "" if accountId cannot be determined — callers MUST fall back to a
+// Returns "" if accountId (or config.BaseUrl) cannot be determined — callers MUST fall back to a
 // no-link summary rather than emit a URL with an empty `accountId=` value,
 // which would land the user on the editor page with no tenant context.
 func (a *WorkflowBuilderAgent) buildWorkflowEditorLink(request core.NBAgentRequest, workflowId string) string {
@@ -2025,16 +2024,11 @@ func (a *WorkflowBuilderAgent) buildWorkflowEditorLink(request core.NBAgentReque
 	if accountId == "" {
 		accountId = request.AccountId
 	}
-	if accountId == "" || workflowId == "" {
-		return ""
-	}
 	q := url.Values{}
-	q.Set("accountId", accountId)
 	if request.SessionId != "" {
 		q.Set("session_id", request.SessionId)
 	}
-	base := strings.TrimRight(config.Config.BaseUrl, "/")
-	return fmt.Sprintf("%s/workflow/%s?%s#editor", base, url.PathEscape(workflowId), q.Encode())
+	return toolcore.BuildAutomationURL(accountId, workflowId, q, "editor")
 }
 
 // truncateSaveError returns a short, user-facing rendition of the save error.

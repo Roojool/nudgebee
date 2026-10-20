@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"nudgebee/llm/common"
 	"nudgebee/llm/llms/huggingface/huggingfaceclient"
 
 	"github.com/stretchr/testify/assert"
@@ -23,7 +24,7 @@ func TestCircuitBreakerOpensOnRateLimit(t *testing.T) {
 	assert.False(t, IsModelCircuitOpen(provider, model))
 
 	// Record a rate limit hit
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 
 	// Circuit should now be open
 	assert.True(t, IsModelCircuitOpen(provider, model))
@@ -36,7 +37,7 @@ func TestCircuitBreakerClosesOnSuccess(t *testing.T) {
 	model := "claude-3-sonnet"
 
 	// Open the circuit
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 	assert.True(t, IsModelCircuitOpen(provider, model))
 
 	// Record a success
@@ -53,7 +54,7 @@ func TestCircuitBreakerCooldownExpiry(t *testing.T) {
 	model := "claude-3-sonnet"
 
 	// Open the circuit
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 	assert.True(t, IsModelCircuitOpen(provider, model))
 
 	// Manually set cooldown to the past to simulate expiry
@@ -82,7 +83,7 @@ func TestCircuitBreakerEscalatingCooldown(t *testing.T) {
 	model := "gpt-4"
 
 	// First failure: base cooldown (60s)
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 	key := getCircuitBreakerKey(provider, model)
 
 	circuitBreakerMutex.RLock()
@@ -93,7 +94,7 @@ func TestCircuitBreakerEscalatingCooldown(t *testing.T) {
 	assert.InDelta(t, 60, cooldown1.Seconds(), 1.0, "First failure should have ~60s cooldown")
 
 	// Second failure: doubled (120s)
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 	circuitBreakerMutex.RLock()
 	entry2 := circuitBreakerMap[key]
 	cooldown2 := entry2.CooldownUntil.Sub(entry2.OpenedAt)
@@ -102,7 +103,7 @@ func TestCircuitBreakerEscalatingCooldown(t *testing.T) {
 	assert.InDelta(t, 120, cooldown2.Seconds(), 1.0, "Second failure should have ~120s cooldown")
 
 	// Third failure: doubled again (240s)
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 	circuitBreakerMutex.RLock()
 	entry3 := circuitBreakerMap[key]
 	cooldown3 := entry3.CooldownUntil.Sub(entry3.OpenedAt)
@@ -111,7 +112,7 @@ func TestCircuitBreakerEscalatingCooldown(t *testing.T) {
 	assert.InDelta(t, 240, cooldown3.Seconds(), 1.0, "Third failure should have ~240s cooldown")
 
 	// Fourth failure: would be 480s but capped at 300s
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 	circuitBreakerMutex.RLock()
 	entry4 := circuitBreakerMap[key]
 	cooldown4 := entry4.CooldownUntil.Sub(entry4.OpenedAt)
@@ -124,7 +125,7 @@ func TestCircuitBreakerKeyIsolation(t *testing.T) {
 	ResetCircuitBreakers()
 
 	// Open circuit for one model
-	RecordModelRateLimitHit("bedrock", "claude-3-sonnet")
+	RecordModelRateLimitHit("bedrock", "claude-3-sonnet", nil)
 
 	// Different provider+model should be unaffected
 	assert.False(t, IsModelCircuitOpen("openai", "gpt-4"))
@@ -149,7 +150,7 @@ func TestCircuitBreakerConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			RecordModelRateLimitHit(provider, model)
+			RecordModelRateLimitHit(provider, model, nil)
 		}(i)
 	}
 
@@ -182,7 +183,7 @@ func TestCircuitBreakerHalfOpenReOpensOnFailure(t *testing.T) {
 	model := "claude-3-sonnet"
 
 	// Open the circuit
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 
 	// Simulate a probe in flight: an entry left half-open with an expired cooldown
 	// (e.g. written by an older pod before the read-only change). It still allows a probe.
@@ -194,7 +195,7 @@ func TestCircuitBreakerHalfOpenReOpensOnFailure(t *testing.T) {
 	assert.False(t, IsModelCircuitOpen(provider, model))
 
 	// Another rate limit hit should re-open the circuit
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 	assert.True(t, IsModelCircuitOpen(provider, model))
 }
 
@@ -214,9 +215,9 @@ func TestCircuitBreakerSuccessResetsFailureCount(t *testing.T) {
 	key := getCircuitBreakerKey(provider, model)
 
 	// Accumulate multiple failures
-	RecordModelRateLimitHit(provider, model)
-	RecordModelRateLimitHit(provider, model)
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
+	RecordModelRateLimitHit(provider, model, nil)
+	RecordModelRateLimitHit(provider, model, nil)
 
 	circuitBreakerMutex.RLock()
 	assert.Equal(t, 3, circuitBreakerMap[key].FailureCount)
@@ -231,7 +232,7 @@ func TestCircuitBreakerSuccessResetsFailureCount(t *testing.T) {
 	assert.False(t, present, "success should clear the breaker entry")
 
 	// Next failure should start from base cooldown again
-	RecordModelRateLimitHit(provider, model)
+	RecordModelRateLimitHit(provider, model, nil)
 	circuitBreakerMutex.RLock()
 	entry := circuitBreakerMap[key]
 	cooldown := entry.CooldownUntil.Sub(entry.OpenedAt)
@@ -299,4 +300,115 @@ func TestFirstTokenTimeoutRoutesToFallback(t *testing.T) {
 	// same-model retries first, which is exactly the 5-minute stall we are removing.
 	assert.False(t, isEmptyResponseError(err),
 		"first-token timeout is a hung stream, not an empty response")
+}
+
+// A 429 and a dead endpoint are different problems with different remediation, so
+// the breaker has to remember which one opened it. Before this, every trip was
+// reported to the user as a network/timeout fault — including the rate limits.
+func TestCircuitBreakerRecordsTripCause(t *testing.T) {
+	provider, model := "custom", "gpt-5.6-sol"
+
+	t.Run("rate limit trip reports quota", func(t *testing.T) {
+		ResetCircuitBreakers()
+		RecordModelRateLimitHit(provider, model, nil)
+
+		status := modelCircuitStatus(provider, model)
+		assert.True(t, status.Open)
+		assert.Equal(t, fallbackCauseQuota, status.Cause)
+		assert.Equal(t, ErrLLMRateLimited, circuitOpenError(status.Cause, status.Detail))
+	})
+
+	t.Run("endpoint failure trip reports unavailable", func(t *testing.T) {
+		ResetCircuitBreakers()
+		RecordModelFailure(provider, model)
+
+		status := modelCircuitStatus(provider, model)
+		assert.True(t, status.Open)
+		assert.Equal(t, fallbackCauseUnavailable, status.Cause)
+		assert.Equal(t, ErrLLMServiceUnavailable, circuitOpenError(status.Cause, status.Detail))
+	})
+
+	// A later endpoint failure must relabel the circuit: the cause reported has to
+	// be the one that opened it most recently, not the first one ever seen.
+	t.Run("latest trip cause wins", func(t *testing.T) {
+		ResetCircuitBreakers()
+		RecordModelRateLimitHit(provider, model, nil)
+		RecordModelFailure(provider, model)
+
+		assert.Equal(t, fallbackCauseUnavailable, modelCircuitStatus(provider, model).Cause)
+	})
+
+	t.Run("closed circuit is not reported open", func(t *testing.T) {
+		ResetCircuitBreakers()
+
+		assert.False(t, modelCircuitStatus(provider, model).Open)
+	})
+}
+
+// IsModelCircuitOpen is the exported entry point (the huggingface client hook uses
+// it); it must keep agreeing with the cause-carrying reader it now delegates to.
+func TestIsModelCircuitOpenMatchesModelCircuitState(t *testing.T) {
+	ResetCircuitBreakers()
+	provider, model := "custom", "gpt-5.6-sol"
+
+	assert.Equal(t, IsModelCircuitOpen(provider, model), modelCircuitStatus(provider, model).Open)
+
+	RecordModelRateLimitHit(provider, model, nil)
+	assert.True(t, modelCircuitStatus(provider, model).Open)
+	assert.True(t, IsModelCircuitOpen(provider, model))
+}
+
+// The 429 that opens the circuit names a limit; every fail-fast during the
+// cooldown has to repeat it. In the incident this came from, almost every user
+// failure was one of these, not a fresh 429 — so a reason that only survives on
+// the first call is a reason nobody sees.
+func TestCircuitBreakerRemembersRateLimitReason(t *testing.T) {
+	ResetCircuitBreakers()
+	provider, model := "custom", "gpt-5.6-sol"
+
+	rpmErr := common.NewProviderHTTPError(429, nil,
+		"Rate limit is exceeded. This deployment has reached its configured requests-per-minute (RPM) limit. Please retry shortly.")
+	RecordModelRateLimitHit(provider, model, rpmErr)
+
+	status := modelCircuitStatus(provider, model)
+	assert.True(t, status.Open)
+	assert.Equal(t, common.RateLimitScopeRequests, status.Detail.Scope)
+	assert.Equal(t, common.RateLimitWindowMinute, status.Detail.Window)
+
+	err := circuitOpenError(status.Cause, status.Detail)
+	assert.Contains(t, err.Error(), "per-minute request limit")
+}
+
+// A daily cap must not be answered with "wait a moment" — it will not clear today.
+func TestCircuitBreakerDailyLimitChangesTheAdvice(t *testing.T) {
+	ResetCircuitBreakers()
+	provider, model := "custom", "gpt-5.6-sol"
+
+	RecordModelRateLimitHit(provider, model, common.NewProviderHTTPError(429, nil,
+		"You exceeded your current quota: requests per day (RPD) limit reached."))
+
+	status := modelCircuitStatus(provider, model)
+	err := circuitOpenError(status.Cause, status.Detail)
+	assert.Contains(t, err.Error(), "daily request limit")
+	assert.NotContains(t, err.Error(), "wait a moment")
+}
+
+// An endpoint outage is not a rate limit and must keep the unavailable message.
+func TestCircuitBreakerUnavailableKeepsGenericMessage(t *testing.T) {
+	ResetCircuitBreakers()
+	provider, model := "custom", "gpt-5.6-sol"
+
+	RecordModelFailure(provider, model)
+	status := modelCircuitStatus(provider, model)
+	assert.Equal(t, ErrLLMServiceUnavailable, circuitOpenError(status.Cause, status.Detail))
+}
+
+func TestRateLimitedErrorFallsBackWhenProviderSaidNothing(t *testing.T) {
+	assert.Equal(t, ErrLLMRateLimited, RateLimitedError(common.UnknownRateLimitDetail()))
+
+	// Never echoes provider text, so a deployment name in the 429 cannot leak.
+	err := RateLimitedError(common.RateLimitDetailFromError(common.NewProviderHTTPError(429, nil,
+		"deployment gpt-5.6-sol-prod-eastus has exceeded its requests-per-minute (RPM) limit")))
+	assert.NotContains(t, err.Error(), "gpt-5.6-sol-prod-eastus")
+	assert.Contains(t, err.Error(), "per-minute request limit")
 }

@@ -209,9 +209,12 @@ func (t GetEventEvidenceTool) Call(nbRequestContext core.NbToolContext, input co
 		}, nil
 	}
 
-	// If no specific evidence type requested, return everything
+	// If no specific evidence type requested, return everything. The file is
+	// the whole event row array, a different shape from the InvestigateData
+	// object get_event_by_id saves as EventEvidenceFileName, so it gets its own
+	// name — sharing one name let whichever tool ran last overwrite the other.
 	if evidenceType == "" || evidenceType == "all" {
-		data, references := saveEvidenceToWorkspaceIfLarge(nbRequestContext.Ctx, wm, nbRequestContext.AccountId, nbRequestContext.ConversationId, fmt.Sprintf("event_%s_evidence", eventId), resp.Data)
+		data, references := saveEvidenceToWorkspaceIfLarge(nbRequestContext.Ctx, wm, nbRequestContext.AccountId, nbRequestContext.ConversationId, fmt.Sprintf("event_%s_full_event", eventId), resp.Data)
 		respType := core.NBToolResponseTypeJson
 		if references != nil {
 			respType = core.NBToolResponseTypeText

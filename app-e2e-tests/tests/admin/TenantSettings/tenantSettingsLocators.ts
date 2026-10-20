@@ -200,25 +200,34 @@ export class TenantSettingsLocators extends CommonLocators {
       .first();
   }
 
-  // A Save button. Every tab and sub-tab carries its own, all wired to the same
-  // handleSaveSettings, and none of them renders at all without tenants:Write —
-  // so this is scoped to the visible card rather than assumed to exist.
+  // The same row reached by its description copy rather than its display name, so a
+  // display_name reword in the feature catalog degrades to this instead of a red suite.
+  // CustomTable renders one <tr> per feature, which is what keeps the role match pinned to
+  // that feature's own switch; no .or() below it, since an unscoped checkbox match would
+  // resolve against the first row on the table instead.
+  featureToggleByDescription(description: string): Locator {
+    return this.featureRows.filter({ hasText: description }).getByRole("checkbox").first();
+  }
+
+  // A Save button. General and the three Labels sub-tabs each carry their own,
+  // all wired to the same handleSaveSettings; the Features tab has none (its
+  // toggles apply immediately on change). None renders without tenants:Write, so
+  // this is scoped to the visible card rather than assumed to exist.
   saveButton(): Locator {
     return this.page.getByRole("button", { name: "Save", exact: true }).first();
   }
 
-  // Whether this viewer holds tenants:Write. The Save button and the read-only
-  // banner are mutually exclusive in the markup, so racing them is what
-  // distinguishes the two shapes without a fixed wait on either.
+  // Whether this viewer holds tenants:Write. The read-only banner renders on
+  // every tab exactly when the viewer lacks it, so its presence is the authority.
+  // Settle first on whatever the active tab shows -- Save button (General /
+  // Labels), banner, or the feature table (Features has no Save) -- so a
+  // still-loading page isn't read as editable.
   async canEdit(): Promise<boolean> {
     await this.saveButton()
       .or(this.readOnlyBanner)
+      .or(this.featuresTable)
       .first()
       .waitFor({ state: "visible", timeout: 60000 });
-    // Absence is the expected answer for a read-only viewer, which is exactly
-    // the branch this probe exists to report.
-    return this.saveButton()
-      .isVisible()
-      .catch(() => false);
+    return !(await this.readOnlyBanner.isVisible().catch(() => false));
   }
 }

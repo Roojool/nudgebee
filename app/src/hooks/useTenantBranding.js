@@ -225,7 +225,7 @@ export const fillBrandTokens = (text) => {
     .replace(/\{assistant\}/g, assistant);
 };
 
-// True on white-labeled (partner) deployments — driven by TENANT_BRANDING_FILE server-side.
+// True on white-labeled (partner) hosts — set server-side when the host's branding row renames or re-logos the product.
 // Use this (not the session tenant name) to gate Nudgebee-specific assets like the mascots.
 export const getIsWhiteLabel = () => !!_configCache?.isWhiteLabel;
 
@@ -273,7 +273,7 @@ export const getBrandingAsset = (key) => {
 
 /**
  * Hook that provides tenant branding from the config API (/api/public/app_config).
- * All branding is driven by TENANT_BRANDING_FILE (falls back to branding/default/theme.json).
+ * All branding comes from the host's tenant_branding_override row over branding/default/theme.json.
  *
  * Returns:
  *   - baseTitle: resolved page/app title

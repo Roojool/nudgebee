@@ -84,12 +84,11 @@ func TestServiceDependencyForWorkload(t *testing.T) {
 
 }
 
-// TestServiceDependencyKGExecute exercises the KG tool routing paths enabled
-// when KGToolsEnabled=true: kg_traverse for CALLS edges and static topology,
-// and kg_search_nodes for discovery by type/namespace. Each case targets a
-// question that the runtime-metrics service_dependency_graph_execute tool
-// would not answer, so a non-empty response confirms the agent routed to the
-// KG tools rather than falling back.
+// TestServiceDependencyKGExecute exercises the KG tool routing paths:
+// kg_traverse for CALLS edges and static topology, and kg_search_nodes
+// for discovery by type/namespace. Each case targets a question that the
+// runtime-metrics service_dependency_graph_execute tool would not answer,
+// so a non-empty response confirms the agent routed to the KG tools rather than falling back.
 func TestServiceDependencyKGExecute(t *testing.T) {
 	if os.Getenv("TEST_ACCOUNT") == "" || os.Getenv("TEST_USER") == "" {
 		t.Skip("TEST_ACCOUNT / TEST_USER not set — skipping integration test")

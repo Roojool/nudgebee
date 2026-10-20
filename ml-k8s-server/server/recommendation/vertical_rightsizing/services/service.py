@@ -19,10 +19,13 @@ from server.recommendation.vertical_rightsizing.models.result import (
     Result,
     StrategyData,
 )
+from server.recommendation.vertical_rightsizing.services.metric_base_service import MetricsService
 from server.recommendation.vertical_rightsizing.services.metrics_prometheus_service import PrometheusMetricsService
+from server.recommendation.vertical_rightsizing.services.metrics_utilisation_service import UtilisationMetricsService
 
 # from server.recommendation.vertical_rightsizing.services.cluster_service import ClusterService
 from server.recommendation.vertical_rightsizing.services.nudgebee_cluster_service import ClusterService
+from server.utils.utils import ApiServerMetricsConfigs
 
 from server.recommendation.vertical_rightsizing.strategy.strateggy_nudgebee import (
     NudgebeeStrategy,
@@ -30,6 +33,13 @@ from server.recommendation.vertical_rightsizing.strategy.strateggy_nudgebee impo
 )
 
 logger = logging.getLogger("rightsizing")
+
+# Providers whose accounts have a Prometheus the owner-chain pod walk can query. The
+# empty string is the common case: no explicit provider means the account's agent, which
+# ships Prometheus. `metrics_provider` is Optional and arrives as None whenever the
+# trigger names no provider -- the SAME common case -- so it is normalised to "" before
+# being looked up here, which keeps this a set of provider names.
+PROMETHEUS_FAMILY_PROVIDERS = {"", "prometheus", "victoria_metrics", "chronosphere", "cubeapm"}
 
 
 class CriticalRunnerException(Exception):
@@ -47,16 +57,86 @@ class RecommendationService:
         datadog_site: Optional[str] = None,
         elasticsearch: Optional[dict] = None,
         tenant_id: str = "",
+        metric_provider: str = "",
+        metric_provider_source: str = "",
     ) -> None:
         self._config = config
-        self._executor = ThreadPoolExecutor(self._config.max_workers)
+        # Named so a leaked pool is identifiable in `py-spy dump` and in
+        # /proc/<pid>/task/*/comm on a live pod, rather than being one more
+        # anonymous "ThreadPoolExecutor-N_M" among the process's other pools.
+        self._executor = ThreadPoolExecutor(self._config.max_workers, thread_name_prefix="rightsizing")
         self.account_id = account_id
         self.tenant_id = tenant_id
-        if metrics_provider == "ES":
+        # Both providers' queries now travel through api-server, which resolves the
+        # account's integration and its credentials. The keys and passwords below are
+        # only read when the rollback flag sends the queries straight to the provider.
+        via_api_server = ApiServerMetricsConfigs.via_api_server
+        elasticsearch = elasticsearch or {}
+        # Annotated because there are now four branches: without it the field's type is
+        # whichever service the first branch builds, and the other three read as
+        # assignment errors.
+        self._metrics_service_loaders: MetricsService
+        # Datadog used to be excluded here. It no longer is: every reason has been
+        # fixed and the numbers checked against Prometheus on the same cluster, which
+        # is the only way to tell "Datadog disagrees" from "we asked it a different
+        # question".
+        #
+        # The three original blockers were api-server's, and are gone (#39288, #39297,
+        # #39301): the key loop is bounded-concurrent, one key's failure no longer
+        # discards the others, and the metrics path retries 429s inside a budget.
+        #
+        # Two more surfaced while verifying, both measured rather than reasoned about:
+        # the rollup ignored the window, and coverage counted buckets instead of
+        # samples. With both fixed, Datadog matches Prometheus at equal resolution --
+        # memory 100-103%, coverage 100-110%, CPU p99 94-110%.
+        #
+        # What remains is a property of Datadog, not a defect: it cannot be sampled
+        # finer than 300s at scale, so its percentiles are a coarser-window peak than
+        # the 75s one a Prometheus account gets. Recommendations there are smoother for
+        # spiky workloads. That is a deliberate trade, not a regression.
+        via_utilisation = ApiServerMetricsConfigs.rightsizing_via_utilisation
+
+        if via_utilisation:
+            # One service for every provider: it asks api-server for metric keys and
+            # never names a provider. The account's default decides, except where the
+            # trigger said otherwise because that default cannot answer these keys at
+            # all (RightsizingMetricsHint, api-server side).
+            #
+            # Which pods a workload HAD over the window is a separate question, and on
+            # a Prometheus-family account the existing walk over kube_pod_owner
+            # answers it better than a pod-name prefix does. Keeping it means this
+            # switch changes the numbers and not the population they are computed
+            # over, which is what makes a before/after diff readable.
+            # The owner-chain walk is PromQL over kube_pod_owner, so only an account
+            # that HAS a Prometheus can use it. Asking it of a Datadog or ES account
+            # returns no pods at all -- and a rightsizing run with no pods produces no
+            # recommendation, silently. Those accounts derive the pod list from the
+            # metric series instead, which UtilisationMetricsService does when it is
+            # given no inventory.
+            inventory = (
+                PrometheusMetricsService(config, account_id, self._executor, tenant_id=tenant_id)
+                if (metrics_provider or "") in PROMETHEUS_FAMILY_PROVIDERS
+                else None
+            )
+            self._metrics_service_loaders = UtilisationMetricsService(
+                config,
+                account_id,
+                self._executor,
+                tenant_id=tenant_id,
+                metric_provider=metric_provider or "",
+                metric_provider_source=metric_provider_source or "",
+                inventory=inventory,
+            )
+            logger.info(
+                f"rightsizing via utilisation keys for account {account_id} "
+                f"(default provider {metrics_provider or 'unset'}, "
+                f"hint {metric_provider or 'none'}/{metric_provider_source or 'none'})"
+            )
+        elif metrics_provider == "ES":
             # An ES account has no Prometheus to fall back to, so a missing connection
             # has to fail loudly. Falling through to PrometheusMetricsService is what
             # made rightsizing silently produce nothing for these accounts.
-            if not elasticsearch:
+            if not via_api_server and not elasticsearch:
                 raise ValueError(
                     f"metrics_provider=ES for account {account_id} but no elasticsearch connection was supplied"
                 )
@@ -72,15 +152,19 @@ class RecommendationService:
                 bearer_token=elasticsearch.get("bearer_token"),
                 metrics_index=elasticsearch.get("metrics_index"),
                 tls_skip_verify=bool(elasticsearch.get("tls_skip_verify", False)),
+                tenant_id=tenant_id,
+                via_api_server=via_api_server,
             )
         elif metrics_provider == "datadog":
             self._metrics_service_loaders = DatadogMetricsService(
                 config,
                 account_id,
                 self._executor,
-                api_key=datadog_api_key,
-                app_key=datadog_app_key,
-                site=datadog_site,
+                api_key=datadog_api_key or "",
+                app_key=datadog_app_key or "",
+                site=datadog_site or "",
+                tenant_id=tenant_id,
+                via_api_server=via_api_server,
             )
         else:
             self._metrics_service_loaders = PrometheusMetricsService(
@@ -89,6 +173,28 @@ class RecommendationService:
         self._k8s_loader = ClusterService(account_id, self._executor, config)
         self._strategy = NudgebeeStrategy(NudgebeeStrategySettings())
         self.errors: list[dict] = []
+
+    def close(self) -> None:
+        """Release this scan's thread pool.
+
+        One service is built per scan and then dropped. Its worker threads park on the work
+        queue instead of exiting, and each one keeps the scan's object graph -- metrics
+        client, config, fetched series -- reachable. Measured on dev: a pod that consumed
+        three scans held one extra thread and ~33MB per scan against a pod that consumed
+        none, and the threads never came back, even for a scan that aborted in 0.35s.
+
+        Relying on the executor being garbage collected is what failed in production:
+        something still referenced it, so the weakref callback that would have drained the
+        workers never fired. Shutting down explicitly does not care what holds the
+        reference, which is why it is done here rather than by hunting the referrer.
+
+        cancel_futures drops queries still queued, whose results were discarded when the
+        scan ended; wait=True joins only the handful already in flight. Every callable
+        handed to this pool is an HTTP request with its own timeout, so the join is bounded
+        by one timeout rather than by the backlog -- keep it that way, since an untimed call
+        here would stall the RabbitMQ consumer thread.
+        """
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def __get_resource_minimal(self, resource: ResourceType) -> float:
         if resource == ResourceType.CPU:
@@ -240,9 +346,6 @@ class RecommendationService:
 
         logger.info(f"Processing {len(workloads)} workloads")
 
-        # Get cluster summary and process workloads concurrently
-        cluster_summary_task = self._metrics_service_loaders.get_cluster_summary()
-
         # Batch sizing to avoid overwhelming relay server and memory
         # Each workload makes ~4-5 Prometheus queries, so smaller batches for more workloads
         # Cap at max_workers to prevent excessive concurrent memory usage
@@ -274,8 +377,6 @@ class RecommendationService:
                 elif result is not None:
                     scans.append(result)
 
-        # Wait for cluster summary
-        cluster_summary = await cluster_summary_task
         successful_scans = scans  # All scans are already non-None due to filtering above
 
         if len(scans) == 0:
@@ -296,7 +397,6 @@ class RecommendationService:
                 name=str(self._strategy).lower(),
                 settings=self._strategy.settings.model_dump(),
             ),
-            clusterSummary=cluster_summary,
             config=self._config,
         )
 

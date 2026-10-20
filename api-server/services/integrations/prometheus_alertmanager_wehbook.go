@@ -120,9 +120,7 @@ func (m PrometheusAlertManagerWebhook) ProcessEventWebook(sc *security.RequestCo
 		generatorURL, _ := alert["generatorURL"].(string)
 		status, _ := alert["status"].(string)
 
-		if generatorURL != "" {
-			labels["generatorURL"] = generatorURL
-		}
+		markAlertOrigin(labels, generatorURL)
 
 		subjectKind, subjectName := extractPromSubject(labels)
 		namespace := extractPromNamespace(labels)
@@ -243,6 +241,28 @@ func (m PrometheusAlertManagerWebhook) ProcessEventWebook(sc *security.RequestCo
 	}
 
 	return results, nil
+}
+
+// AlertOriginLabel / AlertOriginNoRuleEvaluation mark an Alertmanager alert that no
+// alerting rule produced.
+const (
+	AlertOriginLabel            = "nb_alert_origin"
+	AlertOriginNoRuleEvaluation = "posted_without_rule_evaluation"
+)
+
+// markAlertOrigin records where the alert came from on its labels. Every alert that
+// a rule evaluation produces (Prometheus, vmalert, Grafana, Thanos ruler) carries a
+// generatorURL pointing back at the rule; an alert posted straight to the
+// Alertmanager API does not. On one production tenant all 5 such alerts in 30 days were delivery
+// tests ("probe", "RouteTestCritical", "verify nudgebee delivery"), which
+// investigations then treated as real outages. The label gives the investigation a
+// structural signal instead of guessing from the alert name.
+func markAlertOrigin(labels map[string]string, generatorURL string) {
+	if generatorURL != "" {
+		labels["generatorURL"] = generatorURL
+		return
+	}
+	labels[AlertOriginLabel] = AlertOriginNoRuleEvaluation
 }
 
 // extractPromSubject picks the K8s subject from Prometheus alert labels.

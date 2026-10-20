@@ -533,6 +533,15 @@ func TestRecommendationWriteToolConfirmationQuestions(t *testing.T) {
 		// The backend never grades a removal safe, but the card follows the
 		// change class if one ever arrives that way.
 		assert.Contains(t, RecommendationApplyTool{}.ConfirmationQuestion(`{"recommendation_id":"rec-1","safety_band":"safe","change_class":"destructive"}`), "Safety: Irreversible")
+
+		// A scale-down is graded destructive too, but it keeps the manifest:
+		// the card names the stop and the way back, never a snapshot.
+		stop := RecommendationApplyTool{}.ConfirmationQuestion(`{"recommendation_id":"rec-1","provider":"kubernetes","safety_band":"review","change_class":"destructive","rule_name":"abandoned_resource","safety_reason":"nothing attached, hosted, or depending on this workload — the pods stop and the manifest stays; verify nothing needs it before scaling down"}`)
+		assert.Contains(t, stop, "Safety: Stops workload — nothing attached, hosted, or depending on this workload — the pods stop and the manifest stays; verify nothing needs it before scaling down. Safeguard: the pods stop but the manifest stays")
+		assert.NotContains(t, stop, "Irreversible")
+		assert.NotContains(t, stop, "snapshot")
+		// Without the rule the card cannot tell a stop from a removal and keeps the removal wording.
+		assert.Contains(t, RecommendationApplyTool{}.ConfirmationQuestion(`{"recommendation_id":"rec-1","safety_band":"review","change_class":"destructive"}`), "Safety: Irreversible")
 	})
 
 	t.Run("apply falls back to default rendering on unparseable input", func(t *testing.T) {

@@ -113,6 +113,19 @@ func (s *GCPSource) createCloudRunEdges(nodes []*core.DbNode, lookup *sources.No
 // e.g. "asia-south1-docker.pkg.dev/my-project/cloud-run-source-deploy/image@sha256:..."
 //
 //	→ "cloud-run-source-deploy"
+//
+// extractCloudRunMetadata is what a Cloud Run row's metadata extraction is:
+// the per-service URL (copied to dns_name so DirectEndpointMatch hits when
+// eBPF observes it) and the Artifact Registry its container image comes from.
+func (s *GCPSource) extractCloudRunMetadata(properties map[string]interface{}, metaMap map[string]interface{}) {
+	extractGCPCloudRunURL(properties, metaMap)
+	if containerImage, ok := metaMap["container_image"].(string); ok && containerImage != "" {
+		if registryName := extractArtifactRegistryName(containerImage); registryName != "" {
+			properties["registry_name"] = registryName
+		}
+	}
+}
+
 func extractArtifactRegistryName(containerImage string) string {
 	if containerImage == "" {
 		return ""
@@ -127,4 +140,34 @@ func extractArtifactRegistryName(containerImage string) string {
 		return parts[1] // repo name — matches artifact-registry node name in DB
 	}
 	return ""
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	cloudRunRows := resourceKind{
+		Service:      "Cloud Run",
+		NodeType:     core.NodeTypeServerlessFunction,
+		SpecificType: "CloudRunService",
+		Subtype:      "CloudRun",
+		Extract:      (*GCPSource).extractCloudRunMetadata,
+	}
+	cloudFunctionsRows := resourceKind{
+		Service:      "Cloud Functions",
+		NodeType:     core.NodeTypeServerlessFunction,
+		SpecificType: "CloudRunService",
+		Subtype:      "CloudRun",
+		Extract:      (*GCPSource).extractCloudRunMetadata,
+	}
+	appEngineRows := resourceKind{
+		Service:      "App Engine",
+		NodeType:     core.NodeTypeServerlessFunction,
+		SpecificType: "CloudRunService",
+		Subtype:      "CloudRun",
+		Extract:      (*GCPSource).extractCloudRunMetadata,
+	}
+	registerKind(cloudRunRows)
+	registerKind(cloudFunctionsRows)
+	registerKind(appEngineRows)
+	registerKind(cloudRunRows.withTypes("run.googleapis.com/service"))
 }

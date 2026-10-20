@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import httplib2
 import requests
@@ -16,6 +16,7 @@ LOG = logging.getLogger(__name__)
 
 # Constants
 USER_AGENT = "my-user-agent/1.0"
+CONTENT_TYPE_JSON = "application/json"
 
 
 def _build_chat_service(credentials):
@@ -266,6 +267,44 @@ class GoogleChatClient:
             "reason": "rate_limit_exceeded",
             "error": last_error_message or "Max retries exceeded",
         }
+
+    @staticmethod
+    def post_to_google_chat_webhook(
+        webhook_url: str,
+        message: Any,
+        tenant: Optional[str] = None,
+        timeout: int = 15,
+    ) -> Optional[requests.Response]:
+        """Post a text or card message directly to a Google Chat Incoming Webhook.
+        No credentials - the key/token query params on the URL are the secret,
+        and it's bound to one space. Returns the raw response, or None on a
+        transport failure so one dead webhook doesn't abort the fan-out. The
+        caller decides success (2xx). Timeout is explicit and short: an
+        unbounded Google Chat call has previously frozen this service's health
+        check (see the service-account client's rationale)."""
+        message_body = message if isinstance(message, dict) else {"text": message}
+        try:
+            # requests.post, not a shared Session: this runs concurrently across
+            # threads via asyncio.to_thread, and a Session isn't thread-safe.
+            response = requests.post(
+                webhook_url,
+                headers={"Content-Type": CONTENT_TYPE_JSON},
+                json=message_body,
+                timeout=timeout,
+            )
+        except requests.exceptions.RequestException as exc:
+            LOG.warning("Google Chat webhook connection failed for tenant %s: %s", tenant, exc)
+            return None
+        if response.status_code >= 400:
+            LOG.warning(
+                "Google Chat webhook delivery failed for tenant %s: %s - %s",
+                tenant,
+                response.status_code,
+                response.text[:512],
+            )
+        else:
+            LOG.debug("Google Chat webhook notification sent for tenant %s", tenant)
+        return response
 
     @staticmethod
     def create_reaction(token, space_id, message_id, emoji, tenant=None):

@@ -1,12 +1,13 @@
-import { Box, Grid, Typography, Stack, Alert } from '@mui/material';
+import { Box, Grid, Typography, Stack } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { Input } from '@ui/Input';
 import { getBrandTitle } from '@hooks/useTenantBranding';
-import { ContentCopy, CheckCircleOutline, ErrorOutline } from '@mui/icons-material';
+import { ContentCopy } from '@mui/icons-material';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import apiAccount from '@api1/account';
 import apiIntegrations from '@api1/integrations';
 import { Modal } from '@ui/Modal';
-import { isK8sAccountNameValid, safeJSONParse, toKebabCase } from 'src/utils/common';
+import { isK8sAccountNameValid, parseAwsRegions, safeJSONParse, toKebabCase } from 'src/utils/common';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import CustomTable from '@shared/tables/CustomTable';
 import Datetime from '@shared/format/Datetime';
@@ -114,6 +115,10 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
   const [billingLoading, setBillingLoading] = useState(false);
   const [billingValidationResult, setBillingValidationResult] = useState(null);
   const [isValidatingBilling, setIsValidatingBilling] = useState(false);
+  const [regionsModalOpen, setRegionsModalOpen] = useState(false);
+  const [regionsInput, setRegionsInput] = useState('');
+  const [savedRegions, setSavedRegions] = useState('');
+  const [regionsLoading, setRegionsLoading] = useState(false);
   const [cfUpdateModalOpen, setCfUpdateModalOpen] = useState(false);
   const [cfUpdateAccountId, setCfUpdateAccountId] = useState(null);
   const [webhookModalOpen, setWebhookModalOpen] = useState(false);
@@ -323,6 +328,10 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         id: 'billing-config',
       });
       items.push({
+        label: 'Edit AWS Regions',
+        id: 'aws-regions',
+      });
+      items.push({
         label: 'Update Permissions',
         id: 'update-permissions',
       });
@@ -363,6 +372,13 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
       }
       setBillingValidationResult(null);
       setBillingModalOpen(true);
+    } else if (menuItem.id === 'aws-regions') {
+      setSelectedAccount(data);
+      const accountData = (typeof data.data === 'string' ? safeJSONParse(data.data) : data.data) || {};
+      const current = Array.isArray(accountData.regions) ? accountData.regions.join(', ') : '';
+      setSavedRegions(current);
+      setRegionsInput(current);
+      setRegionsModalOpen(true);
     } else if (menuItem.id === 'real-time-alerts') {
       setWebhookModalAccount(data);
       setWebhookModalOpen(true);
@@ -532,6 +548,44 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
       })
       .finally(() => {
         setRenameLoading(false);
+      });
+  };
+
+  const closeRegionsModal = () => {
+    setRegionsModalOpen(false);
+    setSelectedAccount(null);
+    setRegionsInput('');
+    setSavedRegions('');
+    setRegionsLoading(false);
+  };
+
+  const handleRegionsSubmit = () => {
+    if (!selectedAccount) {
+      return;
+    }
+
+    setRegionsLoading(true);
+    // An empty box is a deliberate value, not a missing one: it clears the
+    // allowlist and puts the account back on auto-discovery, so it has to
+    // reach the server as [] rather than being skipped.
+    apiAccount
+      .updateAccount({ id: selectedAccount.id }, { regions: parseAwsRegions(regionsInput) })
+      .then((res) => {
+        if (res?.data?.errors?.length > 0) {
+          const error = res?.data?.errors?.[0]?.message || 'Failed to Update AWS Regions';
+          snackbar.error(error);
+        } else {
+          snackbar.success('AWS Regions updated successfully');
+          closeRegionsModal();
+          listCloudAccounts();
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to update AWS regions:', error);
+        snackbar.error('Failed to Update AWS Regions');
+      })
+      .finally(() => {
+        setRegionsLoading(false);
       });
   };
 
@@ -854,10 +908,50 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         </Box>
       </Modal>
       <Modal
+        width='sm'
+        open={regionsModalOpen}
+        handleClose={regionsLoading ? () => {} : closeRegionsModal}
+        title='Edit AWS Regions'
+        loader={regionsLoading}
+        actionButtons={
+          <>
+            <DsButton id='aws-regions-cancel-btn' tone='secondary' size='md' onClick={closeRegionsModal} disabled={regionsLoading}>
+              Cancel
+            </DsButton>
+            <DsButton
+              id='aws-regions-save-btn'
+              tone='primary'
+              size='md'
+              loading={regionsLoading}
+              disabled={regionsLoading || parseAwsRegions(regionsInput).join(', ') === parseAwsRegions(savedRegions).join(', ')}
+              onClick={handleRegionsSubmit}
+            >
+              Save
+            </DsButton>
+          </>
+        }
+      >
+        <Box sx={{ px: ds.space[4], py: ds.space[2] }}>
+          <Input
+            value={regionsInput}
+            size='sm'
+            id='edit-aws-regions'
+            label='AWS Regions'
+            placeholder='ap-southeast-2, us-east-1'
+            onChange={setRegionsInput}
+            disabled={regionsLoading}
+            help='Leave blank to discover regions automatically. Set this only if the IAM role is restricted to specific regions — an unlisted region is not monitored, and resources already found there are marked deleted.'
+          />
+          <Box sx={{ mt: ds.space[3] }}>
+            <Banner tone='info' message='The new list applies on the next sync of this account. No reconnection is needed.' />
+          </Box>
+        </Box>
+      </Modal>
+      <Modal
         handleClose={envLoading ? () => {} : closeEnvModal}
         open={envModalOpen}
         title={
-          <Typography component='h2' variant='h6' fontWeight={600}>
+          <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
             Change Environment
           </Typography>
         }
@@ -893,7 +987,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         handleClose={isStatusUpdating ? () => {} : () => setUpdateAccountStatus({})}
         open={updateAccountStatus && Object.keys(updateAccountStatus).length > 0}
         title={
-          <Typography component='h2' variant='h6' fontWeight={600}>
+          <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
             {updateAccountStatus.status == 'active' ? 'Enable' : 'Disable'} {cloudProvider} Account
           </Typography>
         }
@@ -1088,13 +1182,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
           )}
           {billingValidationResult && (
             <Grid item xs={12}>
-              <Alert
-                severity={billingValidationResult.success ? 'success' : 'error'}
-                icon={billingValidationResult.success ? <CheckCircleOutline sx={{ fontSize: 18 }} /> : <ErrorOutline sx={{ fontSize: 18 }} />}
-                sx={{ '& .MuiAlert-message': { fontSize: ds.text.body } }}
-              >
-                {billingValidationResult.message}
-              </Alert>
+              <Banner tone={billingValidationResult.success ? 'success' : 'critical'} message={billingValidationResult.message} />
             </Grid>
           )}
         </Grid>
@@ -1236,16 +1324,18 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
                     {addOrgButtonText}
                   </DsButton>
                 )}
-                <DsButton
-                  id={`${toKebabCase(addAccountButtonText)}-btn`}
-                  tone='primary'
-                  size='md'
-                  icon={<AddIcon sx={{ fontSize: 18 }} />}
-                  onClick={() => setOpenAddModal(true)}
-                  aria-label={addAccountButtonText}
-                >
-                  {addAccountButtonText}
-                </DsButton>
+                {hasLoaded && totalCount > 0 && (
+                  <DsButton
+                    id={`${toKebabCase(addAccountButtonText)}-btn`}
+                    tone='primary'
+                    size='md'
+                    icon={<AddIcon sx={{ fontSize: 18 }} />}
+                    onClick={() => setOpenAddModal(true)}
+                    aria-label={addAccountButtonText}
+                  >
+                    {addAccountButtonText}
+                  </DsButton>
+                )}
               </Stack>
             ) : undefined
           }
@@ -1259,7 +1349,12 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
               description={getIntegrationDescription(cloudProvider)}
               action={
                 canManage('integrations', 'Write')
-                  ? { label: addAccountButtonText, onClick: () => setOpenAddModal(true), icon: <AddIcon sx={{ fontSize: 16 }} /> }
+                  ? {
+                      id: `${toKebabCase(addAccountButtonText)}-btn`,
+                      label: addAccountButtonText,
+                      onClick: () => setOpenAddModal(true),
+                      icon: <AddIcon sx={{ fontSize: 16 }} />,
+                    }
                   : undefined
               }
             />

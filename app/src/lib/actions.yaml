@@ -37,6 +37,30 @@ actions:
     permissions:
       - role: tenant_admin
       - role: tenant_admin_readonly
+  - name: integrations_list_webhook_events
+    comment: List incoming webhook events for one integration's Activity Log
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/query'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
+  - name: integrations_aggregate_webhook_events
+    comment: Count incoming webhook events for one integration's Activity Log widgets
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/query'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
   - name: notifications_aggregate_rules
     comment: Aggregate notification rules grouped by severity, source and account
     definition:
@@ -505,10 +529,10 @@ actions:
       - role: tenant_admin
       - role: tenant_admin_readonly
       - role: tenant_usage
-  - name: ai_generate_prometheus_query
+  - name: ai_generate_metrics_query
     definition:
       kind: synchronous
-      handler: '{{LLM_SERVER_URL}}/v1/completions/prometheus-query'
+      handler: '{{LLM_SERVER_URL}}/v1/completions/metrics-query'
       forward_client_headers: true
       headers:
         - name: X-ACTION-TOKEN
@@ -522,7 +546,7 @@ actions:
       - role: account_admin_readonly
       - role: account_admin
       - role: tenant_admin
-    comment: Generate Prometheus Query
+    comment: Generate Metrics Query
   - name: ai_generate_workflow
     comment: Generate an automation workflow from a natural-language description
     definition:
@@ -1480,6 +1504,32 @@ actions:
       - role: account_admin
       - role: tenant_admin
     comment: Mark one document of a knowledge base as a procedure (sop) or reference material (fact)
+  - name: ai_get_kb_document_source
+    definition:
+      kind: "synchronous"
+      handler: '{{LLM_SERVER_URL}}/v1/knowledgebases'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+    permissions:
+      - role: account_admin
+      - role: account_admin_readonly
+      - role: tenant_admin
+    comment: Get one document's source exactly as it was fetched, by content hash
+  - name: ai_list_kb_run_documents
+    definition:
+      kind: "synchronous"
+      handler: '{{LLM_SERVER_URL}}/v1/knowledgebases'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+    permissions:
+      - role: account_admin
+      - role: account_admin_readonly
+      - role: tenant_admin
+    comment: List the documents one knowledge-base load captured
   - name: ai_list_kb_retrieval
     definition:
       kind: "synchronous"
@@ -1994,6 +2044,76 @@ actions:
       - role: k8s_namespace_admin
       - role: account_admin_readonly
       - role: account_admin
+  - name: eventrules_get_capabilities
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/eventrule'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+    comment: Which changes (edit, threshold, disable at source, mute, PR) Nudgebee can really make to each alert rule, with the reason when it cannot
+  - name: eventrules_update_mute
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/eventrule'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: account_admin
+    comment: Mute or unmute an alert rule in Nudgebee (suppression rules; the source rule is not changed)
+  - name: eventrules_get_event_alert_controls
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/eventrule'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+    comment: What the investigation screen can do about an event's alert — the alert rule it belongs to and its capabilities, the mute scopes with 7-day counts, and the suppressions that apply
+  - name: eventrules_apply_rule_change
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/eventrule'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: account_admin
+    comment: Change one alert rule's expression and/or `for` where it is defined, refusing if the rule changed since the change was proposed (Nubi remediation plan)
+  - name: eventrules_update_event_mute
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/eventrule'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: account_admin
+    comment: Mute or unmute an event's alert in Nudgebee for its workload or for every firing, for a set time (suppression rules; the source rule is not changed)
   - name: alertmanager_update_rule
     definition:
       kind: synchronous
@@ -3196,6 +3316,34 @@ actions:
     permissions:
       - role: tenant_admin
       - role: account_admin
+  - name: event_update_status
+    comment: Manually open or close an event's alert status from the Events three-dot menu
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/event'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: account_admin
+  - name: event_get_status_change
+    comment: Batch-get the most recent manual open/close for a set of events, if any (prefetched for the Alert Status "Closed by" tooltip)
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/event'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
   - name: event_update_nb_status
     definition:
       kind: synchronous
@@ -4388,6 +4536,41 @@ actions:
           value_from_env: NOTIFICATION_SERVER_TOKEN
     permissions:
       - role: tenant_admin
+  - name: notifications_list_default_policies
+    comment: List what happens to notifications no rule matches, for all types and per type
+    definition:
+      kind: synchronous
+      handler: '{{NOTIFICATION_SERVICE_URL}}/api/rules/defaults'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: NOTIFICATION_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
+  - name: notifications_upsert_default_policy
+    comment: Set what happens to notifications no rule matches, for all types or one type
+    definition:
+      kind: synchronous
+      handler: '{{NOTIFICATION_SERVICE_URL}}/api/rules/defaults/save'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: NOTIFICATION_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+  - name: notifications_check_route
+    comment: Check where a notification would go under the current rules, without sending it
+    definition:
+      kind: synchronous
+      handler: '{{NOTIFICATION_SERVICE_URL}}/api/rules/check'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: NOTIFICATION_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
   - name: observability_list_provider_capabilities
     comment: List logs, metrics and traces capabilities per observability provider
     definition:
@@ -4590,6 +4773,19 @@ actions:
       - role: tenant_admin
   - name: security_scan_vm_account
     comment: Trigger an on-demand VM package inventory + vulnerability scan for every instance in an account
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/recommendation'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: k8s_namespace_admin
+      - role: account_admin
+      - role: tenant_admin
+  - name: security_list_vm_scan_statuses
+    comment: List each VM's most recent scan outcome (started/completed/failed) for an account
     definition:
       kind: synchronous
       handler: '{{SERVICE_API_SERVER_URL}}/rpc/recommendation'
@@ -5834,6 +6030,22 @@ actions:
       - role: k8s_namespace_admin
       - role: account_admin_readonly
       - role: account_admin
+  - name: users_update_token
+    comment: Update an API access token's expiry and limits
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/user'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
   - name: cloud_check_credentials
     definition:
       kind: synchronous
@@ -6568,6 +6780,22 @@ actions:
       - role: tenant_admin
       - role: account_admin_readonly
       - role: account_admin
+  - name: cloud_list_account_integrations
+    comment: List integrations wired to a cloud account (name, type, status only; no config values)
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/query'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: k8s_namespace_admin
+      - role: k8s_namespace_admin_readonly
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: account_admin_readonly
+      - role: account_admin
   - name: ai_list_conversations
     comment: List AI investigation conversations with status and title
     definition:
@@ -7079,73 +7307,6 @@ actions:
       - role: tenant_admin
       - role: account_admin_readonly
       - role: account_admin
-  # Runtime branding overrides (tenant_branding_override). Super-admin only:
-  # rows are keyed by hostname and carry no tenant column, because branding
-  # resolves before authentication, so there is no tenant scope to constrain a
-  # tenant_admin — one partner's admin could otherwise repaint another
-  # partner's hostname. services-server re-checks IsSuperAdmin on every one of
-  # these; the gate here is the fast-fail, not the authority.
-  #
-  # The read path the frontend uses on every render is NOT an action: it is
-  # GET /v1/branding/overrides, called server-side from the Next.js process
-  # because branding must resolve without a session.
-  - name: branding_list_overrides
-    comment: List every stored per-host branding override, including disabled rows
-    definition:
-      kind: "synchronous"
-      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
-      forward_client_headers: true
-      headers:
-        - name: X-ACTION-TOKEN
-          value_from_env: ACTION_API_SERVER_TOKEN
-    permissions:
-      - role: super_admin
-      - role: super_admin_readonly
-  - name: branding_get_override
-    comment: Get the stored branding override for one host
-    definition:
-      kind: "synchronous"
-      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
-      forward_client_headers: true
-      headers:
-        - name: X-ACTION-TOKEN
-          value_from_env: ACTION_API_SERVER_TOKEN
-    permissions:
-      - role: super_admin
-      - role: super_admin_readonly
-  - name: branding_upsert_override
-    comment: Create or replace the branding override for one host
-    definition:
-      kind: "synchronous"
-      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
-      forward_client_headers: true
-      headers:
-        - name: X-ACTION-TOKEN
-          value_from_env: ACTION_API_SERVER_TOKEN
-    permissions:
-      - role: super_admin
-  - name: branding_apply_previous_override
-    comment: Roll a host's branding override back to the value before its last write
-    definition:
-      kind: "synchronous"
-      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
-      forward_client_headers: true
-      headers:
-        - name: X-ACTION-TOKEN
-          value_from_env: ACTION_API_SERVER_TOKEN
-    permissions:
-      - role: super_admin
-  - name: branding_delete_override
-    comment: Remove a host's branding override so it falls back to its mounted kit
-    definition:
-      kind: "synchronous"
-      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
-      forward_client_headers: true
-      headers:
-        - name: X-ACTION-TOKEN
-          value_from_env: ACTION_API_SERVER_TOKEN
-    permissions:
-      - role: super_admin
 custom_types:
   enums:
     - name: QuerySortOrderRequest
@@ -7250,6 +7411,7 @@ custom_types:
     - name: security_scan_image_input
     - name: security_scan_vm_input
     - name: security_scan_vm_account_input
+    - name: security_list_vm_scan_statuses_input
     - name: tenant_user_roles_upsert_one_input
     - name: tenant_group_roles_upsert_one_input
     - name: account_user_roles_upsert_one_input
@@ -7333,7 +7495,7 @@ custom_types:
     - name: ApplicationRequest
     - name: ApplicationMetricsRequest
     - name: NudgebeeAIGetPrometheusQueryRequest
-    - name: AIGetPrometheusQueryRequest
+    - name: AIGetMetricsQueryRequest
     - name: AIGetLogQueryRequest
     - name: AiFeedbackCreateRequest
     - name: GetInvestigateQueryRequest
@@ -7688,6 +7850,7 @@ custom_types:
     - name: security_scan_image_output
     - name: security_scan_vm_output
     - name: security_scan_vm_account_output
+    - name: security_list_vm_scan_statuses_output
     - name: tenant_user_roles_upsert_one_output
     - name: tenant_group_roles_upsert_one_output
     - name: account_user_roles_upsert_one_output
@@ -7805,8 +7968,8 @@ custom_types:
     - name: ApplicationDeploymentMetrics
     - name: NudgebeeAIGetPrometheusQueryResponse
     - name: NudgebeeAIGetPrometheusQuery
-    - name: AIGetPrometheusQueryResponse
-    - name: AIGetPrometheusQuery
+    - name: AIGetMetricsQueryResponse
+    - name: AIGeneratedQuery
     - name: AIGetLogQueryResponse
     - name: GenerateFeedbackResponse
     - name: FeedbackResponse

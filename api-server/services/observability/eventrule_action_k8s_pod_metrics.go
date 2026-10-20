@@ -1,14 +1,17 @@
 package observability
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"nudgebee/services/common"
 	"nudgebee/services/eventrule/playbooks"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
+	"sort"
 
 	"github.com/lib/pq"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"strings"
 )
 
@@ -42,7 +45,7 @@ type podMetricAction struct {
 	//
 	// Overridable in tests; nil means use the real DB-backed
 	// resourcePresenceFromWorkloadSpec.
-	workloadResourceSpec func(ctx playbooks.PlaybookActionContext, podName, namespace string) (found bool, containers []string, hasMemReq, hasMemLim, hasCpuReq bool)
+	workloadResourceSpec func(ctx playbooks.PlaybookActionContext, podName, namespace string) podWorkloadSpec
 }
 
 type podMetricData struct {
@@ -111,30 +114,7 @@ func (a *podMetricAction) AutoExecute(ctx playbooks.PlaybookActionContext) (play
 		return nil, errors.New("namespace is required")
 	}
 
-	// Prefer workload-level labels over the raw "pod" label.
-	// For deployment-level alerts (e.g. KubeDeploymentRolloutStuck), the "pod" label
-	// is the kube-state-metrics exporter pod, not the affected deployment's pods.
-	podName := ""
-	if labels != nil {
-		podName = labels["pod"]
-		if labels["deployment"] != "" {
-			podName = labels["deployment"]
-		} else if labels["statefulset"] != "" {
-			podName = labels["statefulset"]
-		} else if labels["daemonset"] != "" {
-			podName = labels["daemonset"]
-		}
-	}
-	// Go-agent findings don't set workload labels — fall back to SubjectOwner
-	// (the resolved owner of the Pod, e.g. the StatefulSet name) so the
-	// regex query catches every Pod backed by the owner. Then to SubjectName.
-	if podName == "" {
-		podName = ctx.GetEvent().SubjectOwner
-	}
-	if podName == "" {
-		podName = ctx.GetEvent().SubjectName
-	}
-
+	podName := podMetricTarget(ctx.GetEvent())
 	if podName == "" {
 		return nil, errors.New("no pod or workload label found")
 	}
@@ -145,6 +125,56 @@ func (a *podMetricAction) AutoExecute(ctx playbooks.PlaybookActionContext) (play
 		"resource_type": a.autodetectResource,
 	}
 	return a.Execute(ctx, params)
+}
+
+// podMetricTarget picks the name the metrics are queried for: a workload name
+// (matched as a prefix across its pods) or a single pod name (matched exactly).
+//
+// Workload labels win over the raw "pod" label: for deployment-level alerts
+// (e.g. KubeDeploymentRolloutStuck) the "pod" label is the kube-state-metrics
+// exporter pod, not the affected deployment's pods.
+//
+// Go-agent findings set no labels. When their subject is a pod, that pod is the
+// target, not its owner: every provider's utilisation query wraps the matched
+// series in sum(), so a prefix match on the owner reports the whole workload's
+// usage and limits as one series. On an OOMKilled DaemonSet pod that read as a
+// 4.6 GiB working set against an 8.4 GiB limit, for a container killed at 600 Mi.
+// The owner is only the fallback when the subject names no pod.
+func podMetricTarget(event playbooks.PlaybookEvent) string {
+	labels := event.Labels
+	if labels != nil {
+		switch {
+		case labels["deployment"] != "":
+			return labels["deployment"]
+		case labels["statefulset"] != "":
+			return labels["statefulset"]
+		case labels["daemonset"] != "":
+			return labels["daemonset"]
+		case labels["pod"] != "":
+			return labels["pod"]
+		}
+	}
+	if isPodSubjectTarget(event, event.SubjectName) {
+		return event.SubjectName
+	}
+	if event.SubjectOwner != "" {
+		return event.SubjectOwner
+	}
+	return event.SubjectName
+}
+
+// isPodSubjectTarget reports whether name is the event's own pod subject, chosen
+// by podMetricTarget because no label identified a workload or pod. podMetricKind
+// uses the same test, so a pod picked here is always matched exactly: a
+// labels["kind"] set without a workload label would otherwise turn the full pod
+// name into a prefix (pod=~"<pod>-.*") and match nothing.
+func isPodSubjectTarget(event playbooks.PlaybookEvent, name string) bool {
+	if name == "" || name != eventPodSubject(event) {
+		return false
+	}
+	labels := event.Labels
+	return labels == nil || (labels["deployment"] == "" && labels["statefulset"] == "" &&
+		labels["daemonset"] == "" && labels["pod"] == "")
 }
 
 type podMetricEnricherParams struct {
@@ -221,6 +251,13 @@ type podWorkloadSpec struct {
 	hasMemReq  bool
 	hasMemLim  bool
 	hasCpuReq  bool
+	// requests / limits are the spec's quantities per container, in the same
+	// {container: {cpu|memory: value}} shape the metrics path records (bytes,
+	// cores). They fill in whatever the metrics backend did not return — which on
+	// an OOMKilled Prometheus is everything, because the backend is the pod that
+	// died.
+	requests map[string]map[string]float64
+	limits   map[string]map[string]float64
 }
 
 func (a *podMetricAction) resolveWorkloadSpec(ctx playbooks.PlaybookActionContext, params podMetricEnricherParams) podWorkloadSpec {
@@ -228,8 +265,7 @@ func (a *podMetricAction) resolveWorkloadSpec(ctx playbooks.PlaybookActionContex
 	if lookup == nil {
 		lookup = a.resourcePresenceFromWorkloadSpec
 	}
-	found, containers, hasMemReq, hasMemLim, hasCpuReq := lookup(ctx, params.PodName, params.Namespace)
-	return podWorkloadSpec{found: found, containers: containers, hasMemReq: hasMemReq, hasMemLim: hasMemLim, hasCpuReq: hasCpuReq}
+	return lookup(ctx, params.PodName, params.Namespace)
 }
 
 // workloadKindForUtilisation maps the event's workload kind onto the vocabulary
@@ -253,6 +289,9 @@ func workloadKindForUtilisation(kind string) string {
 // match on a workload name and a workload that genuinely has no data produce
 // byte-identical output, which is how the empty-card bug survived review.
 func podMetricKind(ctx playbooks.PlaybookActionContext, params podMetricEnricherParams) string {
+	if isPodSubjectTarget(ctx.GetEvent(), params.PodName) {
+		return "pod"
+	}
 	// Use regex match for workload names (Deployment, StatefulSet, DaemonSet,
 	// ReplicaSet, Job, ReplicationController) since their pod names have a
 	// random suffix appended by the workload controller. StatefulSet was
@@ -278,12 +317,18 @@ func podMetricKind(ctx playbooks.PlaybookActionContext, params podMetricEnricher
 		strings.EqualFold(kind, "statefulset") ||
 		strings.EqualFold(kind, "job") ||
 		strings.EqualFold(kind, "replicationcontroller")
+	// A workload label only asks for a prefix match when it IS the name being
+	// queried. When the target is the raw "pod" label, a sibling label names
+	// something else: "job" is Prometheus's scrape job on nearly every alert
+	// (job="kube-state-metrics"), and a prefix on the pod's full name
+	// (pod=~"<pod>-.*") matches nothing.
 	if !useRegex && ctx.GetEvent().Labels != nil {
-		useRegex = ctx.GetEvent().Labels["deployment"] != "" ||
-			ctx.GetEvent().Labels["statefulset"] != "" ||
-			ctx.GetEvent().Labels["daemonset"] != "" ||
-			ctx.GetEvent().Labels["job"] != "" ||
-			ctx.GetEvent().Labels["replicaset"] != ""
+		for _, key := range []string{"deployment", "statefulset", "daemonset", "job", "replicaset"} {
+			if value := ctx.GetEvent().Labels[key]; value != "" && value == params.PodName {
+				useRegex = true
+				break
+			}
+		}
 	}
 	// Implicit workload-name signal: AutoExecute resolves `pod_name` to
 	// `SubjectOwner` (the owner workload, e.g. the StatefulSet name) when
@@ -555,41 +600,21 @@ func (a *podMetricAction) buildPodMetricResponse(ctx playbooks.PlaybookActionCon
 	// card renders (container / pod / namespace), so there is nothing to filter
 	// down any more.
 	for i := range metricEntries {
-		metricEntries[i].Metric["requests"] = a.getResourceValues(requestsMap, metricEntries[i].Metric)
-		metricEntries[i].Metric["limits"] = a.getResourceValues(limitsMap, metricEntries[i].Metric)
+		metricEntries[i].Metric["requests"] = a.getResourceValues(requestsMap, spec.requests, metricEntries[i].Metric)
+		metricEntries[i].Metric["limits"] = a.getResourceValues(limitsMap, spec.limits, metricEntries[i].Metric)
 	}
 
-	// When the main metric query returned no series — typical for an
-	// OOMKilled pod whose container is no longer running — but
-	// kube_pod_container_resource_{requests,limits} did return data,
-	// seed an entry per container so the UI can still render the
-	// "Resource allocation" card and so the requests/limits-driven
-	// insights actually surface. Legacy Robusta read requests/limits
+	// Seed an entry for every known container that returned no usage series, so
+	// the card and the tune form list it with its requests/limits. Typical for an
+	// OOMKilled container — and when the pod that died is the metrics backend
+	// itself, every query for it fails. Legacy Robusta read requests/limits
 	// straight off the K8s pod spec (oom_killer.py via
 	// pod.spec.containers[].resources) for exactly this case.
-	if len(metricEntries) == 0 && (len(requestsMap) > 0 || len(limitsMap) > 0) {
-		containers := map[string]bool{}
-		for c := range requestsMap {
-			containers[c] = true
-		}
-		for c := range limitsMap {
-			containers[c] = true
-		}
-		for container := range containers {
-			metric := map[string]any{
-				"container": container,
-				"pod":       params.PodName,
-				"namespace": params.Namespace,
-			}
-			metric["requests"] = a.getResourceValues(requestsMap, metric)
-			metric["limits"] = a.getResourceValues(limitsMap, metric)
-			metricEntries = append(metricEntries, podMetricEntry{
-				Metric:     metric,
-				Timestamps: []float64{},
-				Values:     []string{},
-			})
-		}
-	}
+	//
+	// Per container, not only when every container came back empty: a sidecar
+	// with usage used to hide the container that was actually killed, and the
+	// tune form then proposed the sidecar's numbers for the pod.
+	a.seedContainersWithoutUsage(&metricEntries, requestsMap, limitsMap, spec, params)
 
 	// Scope insight emission to the resource_type being collected. Both
 	// the cpu and memory enricher invocations call generateInsights — if
@@ -659,7 +684,49 @@ func (a *podMetricAction) buildPodMetricResponse(ctx playbooks.PlaybookActionCon
 	return podMetric, insights
 }
 
-func (a *podMetricAction) getResourceValues(resourceMap map[string]map[string]float64, metric map[string]any) map[string]any {
+// seedContainersWithoutUsage appends an entry with no samples for each container
+// that has spec or requests/limits data but no usage series. Order follows the
+// workload spec, then any container only the metrics knew about.
+func (a *podMetricAction) seedContainersWithoutUsage(entries *[]podMetricEntry, requestsMap, limitsMap map[string]map[string]float64, spec podWorkloadSpec, params podMetricEnricherParams) {
+	seen := map[string]bool{}
+	for _, entry := range *entries {
+		if c, ok := entry.Metric["container"].(string); ok {
+			seen[c] = true
+		}
+	}
+	candidates := append([]string{}, spec.containers...)
+	for _, m := range []map[string]map[string]float64{requestsMap, limitsMap} {
+		extra := make([]string, 0, len(m))
+		for c := range m {
+			extra = append(extra, c)
+		}
+		sort.Strings(extra)
+		candidates = append(candidates, extra...)
+	}
+	for _, container := range candidates {
+		if container == "" || seen[container] {
+			continue
+		}
+		seen[container] = true
+		metric := map[string]any{
+			"container": container,
+			"pod":       params.PodName,
+			"namespace": params.Namespace,
+		}
+		metric["requests"] = a.getResourceValues(requestsMap, spec.requests, metric)
+		metric["limits"] = a.getResourceValues(limitsMap, spec.limits, metric)
+		*entries = append(*entries, podMetricEntry{
+			Metric:     metric,
+			Timestamps: []float64{},
+			Values:     []string{},
+		})
+	}
+}
+
+// getResourceValues returns the container's {cpu, memory} values from the
+// metrics, falling back per resource to the workload spec. 0 means neither
+// source had it.
+func (a *podMetricAction) getResourceValues(resourceMap, specMap map[string]map[string]float64, metric map[string]any) map[string]any {
 	result := map[string]any{
 		"cpu":    0,
 		"memory": 0,
@@ -670,7 +737,11 @@ func (a *podMetricAction) getResourceValues(resourceMap map[string]map[string]fl
 		container = c
 	}
 
-	if containerResources, ok := resourceMap[container]; ok {
+	for _, source := range []map[string]map[string]float64{specMap, resourceMap} {
+		containerResources, ok := source[container]
+		if !ok {
+			continue
+		}
 		if cpu, ok := containerResources["cpu"]; ok {
 			result["cpu"] = cpu
 		}
@@ -697,14 +768,14 @@ func (a *podMetricAction) getResourceValues(resourceMap map[string]map[string]fl
 //
 // found is false when no active workload row matches (or it has no containers in
 // meta); the caller then falls back to the Prometheus-observable heuristic.
-func (a *podMetricAction) resourcePresenceFromWorkloadSpec(ctx playbooks.PlaybookActionContext, podName, namespace string) (found bool, containers []string, hasMemReq, hasMemLim, hasCpuReq bool) {
+func (a *podMetricAction) resourcePresenceFromWorkloadSpec(ctx playbooks.PlaybookActionContext, podName, namespace string) podWorkloadSpec {
 	if podName == "" || namespace == "" {
-		return false, nil, false, false, false
+		return podWorkloadSpec{}
 	}
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
 		ctx.GetLogger().Warn("pod_metrics_enricher: workload spec lookup unavailable; falling back to metric-presence heuristic", "error", err)
-		return false, nil, false, false, false
+		return podWorkloadSpec{}
 	}
 
 	// Resolve the workload by longest-prefix match on its name (pod/RS names are
@@ -739,26 +810,65 @@ func (a *podMetricAction) resourcePresenceFromWorkloadSpec(ctx playbooks.Playboo
 			coalesce(array_agg(c->>'name') FILTER (WHERE c->>'name' IS NOT NULL), '{}') AS container_names,
 			coalesce(bool_or(coalesce((c->'resources'->'requests') ? 'memory', false)), false) AS has_mem_req,
 			coalesce(bool_or(coalesce((c->'resources'->'limits')   ? 'memory', false)), false) AS has_mem_lim,
-			coalesce(bool_or(coalesce((c->'resources'->'requests') ? 'cpu', false)),    false) AS has_cpu_req
+			coalesce(bool_or(coalesce((c->'resources'->'requests') ? 'cpu', false)),    false) AS has_cpu_req,
+			coalesce(jsonb_object_agg(c->>'name', coalesce(c->'resources', '{}'::jsonb)) FILTER (WHERE c->>'name' IS NOT NULL), '{}'::jsonb) AS resources
 		FROM w CROSS JOIN LATERAL jsonb_array_elements(coalesce(w.meta->'config'->'containers', '[]'::jsonb)) c`
 
+	var spec podWorkloadSpec
 	var names pq.StringArray
-	var hasSpec bool
-	if err := dbms.Db.QueryRowx(query, ctx.GetAccountId(), namespace, podName).Scan(&hasSpec, &names, &hasMemReq, &hasMemLim, &hasCpuReq); err != nil {
+	var resources []byte
+	if err := dbms.Db.QueryRowx(query, ctx.GetAccountId(), namespace, podName).Scan(&spec.found, &names, &spec.hasMemReq, &spec.hasMemLim, &spec.hasCpuReq, &resources); err != nil {
 		ctx.GetLogger().Warn("pod_metrics_enricher: workload spec lookup failed; falling back to metric-presence heuristic",
 			"error", err, "pod", podName, "namespace", namespace)
-		return false, nil, false, false, false
+		return podWorkloadSpec{}
 	}
-	if !hasSpec {
+	if !spec.found {
 		// No matching workload, or it carries no container spec — no authoritative
 		// answer; let the caller fall back rather than assert "unset".
-		return false, nil, false, false, false
+		return podWorkloadSpec{}
 	}
 	// `found` deliberately tracks whether the spec exists, NOT whether names came
 	// back. A container without a name would only cost us the per-container split;
 	// treating that as "no spec" would hand the insights back to the metric-presence
 	// heuristic, which is what fabricated false "missing resource" findings.
-	return true, []string(names), hasMemReq, hasMemLim, hasCpuReq
+	spec.containers = []string(names)
+	spec.requests, spec.limits = parseSpecResources(resources)
+	return spec
+}
+
+// parseSpecResources turns {container: {requests: {cpu: "200m"}, limits: {memory: "8Gi"}}}
+// into bytes / cores keyed like the metrics maps. Unparseable quantities are
+// skipped: a missing value falls back to "unknown", a wrong one would be shown.
+func parseSpecResources(raw []byte) (requests, limits map[string]map[string]float64) {
+	requests, limits = map[string]map[string]float64{}, map[string]map[string]float64{}
+	var byContainer map[string]struct {
+		Requests map[string]any `json:"requests"`
+		Limits   map[string]any `json:"limits"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &byContainer) != nil {
+		return requests, limits
+	}
+	fill := func(into map[string]map[string]float64, container string, quantities map[string]any) {
+		for _, name := range []string{"cpu", "memory"} {
+			value, ok := quantities[name]
+			if !ok || value == nil {
+				continue
+			}
+			q, err := resource.ParseQuantity(fmt.Sprint(value))
+			if err != nil {
+				continue
+			}
+			if into[container] == nil {
+				into[container] = map[string]float64{}
+			}
+			into[container][name] = q.AsApproximateFloat64()
+		}
+	}
+	for container, r := range byContainer {
+		fill(requests, container, r.Requests)
+		fill(limits, container, r.Limits)
+	}
+	return requests, limits
 }
 
 // generateInsights emits resource-allocation insights scoped by resourceType

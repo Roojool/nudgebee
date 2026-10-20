@@ -36,14 +36,16 @@ export const ROLLUP_HEADERS = ["Severity", "Check", "Accounts", "Findings"] as c
 // column and is deliberately unnamed.
 export const FINDINGS_HEADERS = ["Severity", "Resource", "Account", "Last Seen"] as const;
 
-// An empty table here renders "All good here!", NOT the copy either component asks for.
+// An empty table here renders "All good here!" whenever the caller supplies no copy of its
+// own, which both tables on this tab do.
 // CustomTable.jsx renderEmptyState: the default branch is `EmptyData id={id}`, whose
 // heading carries `${id}-no-data`; the showUpdatedEmptyData branch renders a fixed
 // EmptyData and forwards NO id, ignoring emptyHeading/emptySubHeading entirely. Both
 // tables on this tab pass showUpdatedEmptyData, so ConfigRuleRollup's 'No configuration
 // findings' and ConfigRuleFindings' 'No findings' never reach the DOM and neither table
-// has a `-no-data` anchor. The id form is kept as the primary only so these locators
-// self-heal if that branch ever starts forwarding one.
+// has a `-no-data` anchor. That branch now forwards the id, so the id form leads here and
+// the heading is only the fallback — which is the shape every empty-state locator should
+// take, and what scripts/check-empty-state-anchors.js enforces.
 export const NO_DATA_HEADING = "All good here!";
 
 export class ConfigurationLocators extends OptimizeModuleLocators {
@@ -122,7 +124,12 @@ export class ConfigurationLocators extends OptimizeModuleLocators {
     return this.drilldownOf(row).locator(`[id^="${FINDINGS_TABLE_PREFIX}"][id$="-body"] tr:has(td:nth-child(2))`);
   }
 
+  // Same two rungs as configRulesEmpty, on the drawer's own table: its id is generated
+  // per rule, so the anchor is matched by prefix the way findingsRowsIn does.
   findingsEmptyIn(row: Locator): Locator {
-    return this.drilldownOf(row).getByRole("heading", { name: NO_DATA_HEADING, exact: true }).first();
+    return this.drilldownOf(row)
+      .locator(`[id^="${FINDINGS_TABLE_PREFIX}"][id$="-no-data"]`)
+      .or(this.drilldownOf(row).getByRole("heading", { name: NO_DATA_HEADING, exact: true }))
+      .first();
   }
 }

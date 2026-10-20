@@ -3,7 +3,9 @@ package core
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"nudgebee/llm/security"
 )
@@ -356,11 +358,14 @@ func HandleConversationUsageMetricsApi(ctx *security.RequestContext, request Con
 	if timeBreakdown.ToolTimeSeconds > 0 {
 		toolTimePtr = &timeBreakdown.ToolTimeSeconds
 	}
-	if totalLatency != nil && *totalLatency > 0 {
-		apiTimePtr = totalLatency
+	// Use the merged (deduplicated) API-call interval, not the raw latency sum,
+	// so parallel sub-agent LLM calls aren't double-counted against wall time.
+	mergedApiTime := calculateMergedApiTimeSeconds(detailedRecords)
+	if mergedApiTime != nil && *mergedApiTime > 0 {
+		apiTimePtr = mergedApiTime
 		// Calculate percentages if we have agent active time
 		if timeBreakdown.AgentActiveTimeSeconds > 0 {
-			apiPct := (*totalLatency / timeBreakdown.AgentActiveTimeSeconds) * 100
+			apiPct := (*mergedApiTime / timeBreakdown.AgentActiveTimeSeconds) * 100
 			apiTimePercentagePtr = &apiPct
 			toolPct := (timeBreakdown.ToolTimeSeconds / timeBreakdown.AgentActiveTimeSeconds) * 100
 			toolTimePercentagePtr = &toolPct
@@ -623,6 +628,49 @@ func calculateLatencyStats(records []TokenUsageDetailedRecord) (*float64, *float
 	}
 
 	return totalLatencyPtr, avgLatencyPtr
+}
+
+// calculateMergedApiTimeSeconds returns the union (not the sum) of individual
+// LLM call intervals, mirroring the tool-call gaps-and-islands merge in
+// GetConversationTimeBreakdown's tool_islands CTE (conversation_dao.go). A
+// plain sum of latencies double-counts whenever sub-agents make LLM calls
+// concurrently, which is what let the "Time split" API percentage exceed
+// 100% (#38129). CreatedAt is the call's completion time (see
+// InsertTokenUsage), so each call's interval is approximated as
+// [CreatedAt-LatencySeconds, CreatedAt].
+func calculateMergedApiTimeSeconds(records []TokenUsageDetailedRecord) *float64 {
+	type span struct{ start, end time.Time }
+
+	spans := make([]span, 0, len(records))
+	for _, record := range records {
+		if !record.LatencySeconds.Valid || record.LatencySeconds.Float64 <= 0 {
+			continue
+		}
+		end := record.CreatedAt
+		start := end.Add(-time.Duration(record.LatencySeconds.Float64 * float64(time.Second)))
+		spans = append(spans, span{start: start, end: end})
+	}
+	if len(spans) == 0 {
+		return nil
+	}
+
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start.Before(spans[j].start) })
+
+	merged := 0.0
+	curStart, curEnd := spans[0].start, spans[0].end
+	for _, s := range spans[1:] {
+		if s.start.After(curEnd) {
+			merged += curEnd.Sub(curStart).Seconds()
+			curStart, curEnd = s.start, s.end
+			continue
+		}
+		if s.end.After(curEnd) {
+			curEnd = s.end
+		}
+	}
+	merged += curEnd.Sub(curStart).Seconds()
+
+	return &merged
 }
 
 // resolutionLayerLabels renders the layered walk's own outcome — recorded when a

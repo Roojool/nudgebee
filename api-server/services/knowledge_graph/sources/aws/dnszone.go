@@ -1,6 +1,9 @@
 package aws
 
-import "nudgebee/services/knowledge_graph/core"
+import (
+	"nudgebee/services/knowledge_graph/core"
+	"nudgebee/services/knowledge_graph/sources"
+)
 
 // route53HostedZoneSchema — concrete schema for Route53 hosted zones. Fields written by
 // extractDNSZoneMetadata.
@@ -43,4 +46,25 @@ func (s *AWSSource) extractDNSZoneMetadata(properties map[string]interface{}, me
 			properties["alias_target_zone_id"] = hostedZoneId
 		}
 	}
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	route53Rows := resourceKind{
+		Service:      "AmazonRoute53",
+		NodeType:     core.NodeTypeDNSZone,
+		SpecificType: "Route53HostedZone",
+		Extract:      (*AWSSource).extractDNSZoneMetadata,
+	}
+	registerKind(route53Rows)
+	registerKind(route53Rows.withTypes("hostedzone"))
+}
+
+// Per-resource updates (see patch.go). Hosted zones only own a HOSTED_ON VPC edge.
+func init() {
+	registerPatchSpec(defaultVPCEdgeSpec(sources.PatchSpec{
+		SpecificTypes: []string{"Route53HostedZone"},
+		Creatable:     true,
+	}))
 }

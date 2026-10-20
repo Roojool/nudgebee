@@ -106,3 +106,77 @@ func TestGetNameToTool_ResolvesAliases(t *testing.T) {
 	require.NotNil(t, toolsMap[strings.ToUpper("mock_tool_alias_gnt")])
 	require.Equal(t, toolsMap[strings.ToUpper("mock_tool_canonical_gnt")], toolsMap[strings.ToUpper("mock_tool_alias_gnt")])
 }
+
+type mockInferenceTool struct {
+	mockTool
+	inferredType toolcore.ToolRequestType
+	prompt       string
+}
+
+func (m mockInferenceTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (toolcore.ToolRequestType, error) {
+	return m.inferredType, nil
+}
+
+func (m mockInferenceTool) InferToolRequestTypePrompt(ctx *security.RequestContext, toolName, input string) (string, error) {
+	return m.prompt, nil
+}
+
+func TestIsAgentToolAuthorizedToProcessRequest_DeterministicMutationAuthoritative(t *testing.T) {
+	fake := &fakeLLMModel{
+		response: "read",
+	}
+	withFakeLLMModel(t, fake)
+
+	ctx := llmOverrideContext()
+
+	// Case 1: Deterministic heuristic identifies an Update mutation.
+	// Even though LLM prompt response is "read", deterministic mutation is authoritative and must NOT be downgraded.
+	tool := mockInferenceTool{
+		mockTool:     mockTool{name: "mock_gcp_cli"},
+		inferredType: toolcore.ToolRequestTypeUpdate,
+		prompt:       "Classify the command",
+	}
+	agent := mockAgentWithTools{
+		mockPlainAgent: mockPlainAgent{name: "test_agent"},
+		tools:          []toolcore.NBTool{tool},
+	}
+	request := NBAgentRequest{
+		AccountId:      "test-account",
+		ConversationId: "test-conv",
+	}
+
+	finish, reqType, err := IsAgentToolAuthorizedToProcessRequest(
+		ctx, agent, request,
+		NBAgentPlannerToolAction{
+			Tool:      "mock_gcp_cli",
+			ToolInput: "gcloud compute instances stop my-vm",
+		},
+	)
+	require.NoError(t, err)
+	require.Nil(t, finish)
+	require.NotNil(t, reqType)
+	require.Equal(t, toolcore.ToolRequestTypeUpdate, *reqType)
+
+	// Case 2: Deterministic heuristic returns unknown ("").
+	// Falls back to LLM prompt classifier, which classifies as Read.
+	unknownTool := mockInferenceTool{
+		mockTool:     mockTool{name: "mock_unknown_tool"},
+		inferredType: "",
+		prompt:       "Classify the command",
+	}
+	agentUnknown := mockAgentWithTools{
+		mockPlainAgent: mockPlainAgent{name: "test_agent"},
+		tools:          []toolcore.NBTool{unknownTool},
+	}
+	finish2, reqType2, err2 := IsAgentToolAuthorizedToProcessRequest(
+		ctx, agentUnknown, request,
+		NBAgentPlannerToolAction{
+			Tool:      "mock_unknown_tool",
+			ToolInput: "custom_cli unknown_command",
+		},
+	)
+	require.NoError(t, err2)
+	require.Nil(t, finish2)
+	require.NotNil(t, reqType2)
+	require.Equal(t, toolcore.ToolRequestTypeRead, *reqType2)
+}

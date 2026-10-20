@@ -43,7 +43,7 @@ interface UseTicketDynamicFieldsReturn {
   ticketFieldOptionsLoading: Record<string, boolean>;
   ticketTool: string;
   // The create-meta field backing the Severity control for the selected tool
-  // (priority for Jira, urgency for PD/ZD/ServiceNow), or null when the tool has
+  // (priority for Jira, urgency for PD/ZD), or null when the tool has
   // no severity concept (GitHub/GitLab). Lets the UI hide/relabel Severity.
   ticketSeverityField: { key: string; name: string } | null;
   searchTicketField: (fieldKey: string, query: string) => void;

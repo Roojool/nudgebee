@@ -58,7 +58,7 @@ func (e *SshExecutor) Execute(taskCtx types.TaskContext, execConfig ExecutionCon
 		finalCommand = fmt.Sprintf("%secho %s | base64 -d | bash -s --%s", envPrefix, encodedScript, argsStr)
 	}
 
-	resp, err := relay.ExecuteRelayJob(requestContext, execConfig.AccountID, relay.RelayJobSSH, execConfig.IntegrationID, finalCommand, nil)
+	resp, err := relay.ExecuteRelayJob(requestContext, execConfig.AccountID, relay.RelayJobSSH, execConfig.IntegrationID, finalCommand, sshTargetConfigs(execConfig))
 	if err != nil {
 		return "", err
 	}
@@ -86,4 +86,17 @@ func (e *SshExecutor) Execute(taskCtx types.TaskContext, execConfig ExecutionCon
 		return "", fmt.Errorf("failed to marshal response: %w", err)
 	}
 	return string(respBytes), nil
+}
+
+// sshTargetConfigs carries the optional target host/port override to the
+// relay job; only the vm_agent (forager ssh-proxy) path consumes them.
+func sshTargetConfigs(execConfig ExecutionConfig) map[string]any {
+	configs := map[string]any{}
+	if execConfig.Host != "" {
+		configs["host"] = execConfig.Host
+	}
+	if execConfig.Port > 0 {
+		configs["port"] = execConfig.Port
+	}
+	return configs
 }

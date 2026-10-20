@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"nudgebee/llm/config"
 	"nudgebee/llm/security/egressfilter"
 )
 
@@ -105,10 +106,11 @@ func listTenantConfigs(c *gin.Context) {
 // --- Write -------------------------------------------------------------------
 
 type upsertBody struct {
-	Mode          *string  `json:"mode,omitempty"`
-	Enabled       *bool    `json:"enabled,omitempty"`
-	Allowlist     []string `json:"allowlist,omitempty"`
-	DisabledRules []string `json:"disabled_rules,omitempty"`
+	Mode           *string  `json:"mode,omitempty"`
+	Enabled        *bool    `json:"enabled,omitempty"`
+	EntropyEnabled *bool    `json:"entropy_enabled,omitempty"`
+	Allowlist      []string `json:"allowlist,omitempty"`
+	DisabledRules  []string `json:"disabled_rules,omitempty"`
 	// Agents skipping detection -> see TenantConfig.DisabledAgents.
 	DisabledAgents []string `json:"disabled_agents,omitempty"`
 	// PII sibling detector (V827). All fields optional; omitting them
@@ -135,9 +137,13 @@ func upsertTenantConfig(c *gin.Context) {
 		TenantID:       tenantID,
 		Mode:           egressfilter.ModeDetect, // default
 		Enabled:        true,
+		EntropyEnabled: config.Config.LlmServerEgressFilterEntropyEnabled,
 		Allowlist:      cleanStrings(body.Allowlist),
 		DisabledRules:  cleanStrings(body.DisabledRules),
 		DisabledAgents: cleanStrings(body.DisabledAgents),
+	}
+	if body.EntropyEnabled != nil {
+		cfg.EntropyEnabled = *body.EntropyEnabled
 	}
 	if body.Mode != nil {
 		mode, errResp := parseMode(*body.Mode)
@@ -169,8 +175,9 @@ func upsertTenantConfig(c *gin.Context) {
 }
 
 type patchBody struct {
-	Mode    *string `json:"mode,omitempty"`
-	Enabled *bool   `json:"enabled,omitempty"`
+	Mode           *string `json:"mode,omitempty"`
+	Enabled        *bool   `json:"enabled,omitempty"`
+	EntropyEnabled *bool   `json:"entropy_enabled,omitempty"`
 	// Additive operations on the array-shaped columns. *_add and *_remove
 	// arrive simultaneously: server applies removes first, then adds, so the
 	// caller doesn't have to think about ordering.
@@ -252,9 +259,10 @@ func patchTenantConfig(c *gin.Context) {
 	}
 	if cfg == nil {
 		cfg = &egressfilter.TenantConfig{
-			TenantID: tenantID,
-			Mode:     egressfilter.ModeDetect,
-			Enabled:  true,
+			TenantID:       tenantID,
+			Mode:           egressfilter.ModeDetect,
+			Enabled:        true,
+			EntropyEnabled: config.Config.LlmServerEgressFilterEntropyEnabled,
 		}
 	}
 
@@ -268,6 +276,9 @@ func patchTenantConfig(c *gin.Context) {
 	}
 	if body.Enabled != nil {
 		cfg.Enabled = *body.Enabled
+	}
+	if body.EntropyEnabled != nil {
+		cfg.EntropyEnabled = *body.EntropyEnabled
 	}
 	cfg.Allowlist = applyAddRemove(cfg.Allowlist, body.AllowlistAdd, body.AllowlistRemove)
 	cfg.DisabledRules = applyAddRemove(cfg.DisabledRules, body.DisabledRulesAdd, body.DisabledRulesRemove)
@@ -526,6 +537,7 @@ func configResponse(cfg *egressfilter.TenantConfig) gin.H {
 		"tenant_id":               cfg.TenantID.String(),
 		"mode":                    string(cfg.Mode),
 		"enabled":                 cfg.Enabled,
+		"entropy_enabled":         cfg.EntropyEnabled,
 		"allowlist":               cfg.Allowlist,
 		"disabled_rules":          cfg.DisabledRules,
 		"disabled_agents":         cfg.DisabledAgents,

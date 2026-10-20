@@ -1,10 +1,12 @@
 package playbooks
 
 import (
-	"nudgebee/services/common"
-	"nudgebee/services/relay"
+	"net"
 	"strings"
 	"time"
+
+	"nudgebee/services/common"
+	"nudgebee/services/relay"
 )
 
 // Shared resolvers for the trigger-matched enricher chain. They read the
@@ -83,8 +85,14 @@ func nodeNameFromPodDict(p map[string]any) string {
 //  1. canonical event.SubjectNode field — populated by the collector from
 //     the kubewatch payload (events.subject_node column).
 //  2. SubjectName when SubjectType=="node" (the subject IS the node).
-//  3. label fallback ("node" / "instance") for alert-driven events that
+//  3. label fallback ("node", then "instance") for alert-driven events that
 //     don't have a subject_node column.
+//
+// The `instance` fallback is only taken when the value is not a scrape target.
+// Prometheus writes `instance` as `<host>:<port>` ("10.128.0.14:9100"), which is
+// not a node name: passing it on sends the node enrichers to the relay with a
+// name no node ever has, and they come back "node not found". A bare `instance`
+// with no port is kept — some rules relabel a real node name into it.
 //
 // Enrichers that need the host node should always call this rather than
 // re-fetching the Pod via relay — the data is already in hand.
@@ -101,7 +109,29 @@ func SubjectNodeName(event PlaybookEvent) string {
 	if v := event.Labels["node"]; v != "" {
 		return v
 	}
-	return event.Labels["instance"]
+	// A value that parses as host:port is a scrape target, not a node. Checked
+	// with net.SplitHostPort rather than looking for a colon, because a bare IPv6
+	// address ("fe80::1") is full of colons and carries no port.
+	if v := event.Labels["instance"]; v != "" {
+		if _, _, err := net.SplitHostPort(v); err != nil {
+			return v
+		}
+	}
+	return ""
+}
+
+// EventIsAboutNode reports whether an event's subject is a node, so the
+// node-scoped enrichers can decide to run from the event's shape rather than
+// from one hardcoded aggregation key.
+//
+// `node_not_ready` stays named explicitly: it is the kubewatch-sourced event
+// these enrichers were originally written for, and it is the one case where the
+// subject can be a node without subject_type saying so.
+func EventIsAboutNode(event PlaybookEvent) bool {
+	if SubjectNodeName(event) == "" {
+		return false
+	}
+	return strings.EqualFold(event.SubjectType, "node") || event.AggregationKey == "node_not_ready"
 }
 
 // getResourceViaRelay is a small wrapper around the get_resource action used

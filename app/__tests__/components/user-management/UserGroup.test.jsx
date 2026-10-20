@@ -21,7 +21,7 @@ jest.mock('@ui/Toast', () => ({
 }));
 
 jest.mock('@assets', () => ({
-  writeIcon: { default: { src: '/write-icon.svg' } },
+  EditIcon: { default: { src: '/edit-new.svg' } },
 }));
 
 jest.mock('@utils/colors');

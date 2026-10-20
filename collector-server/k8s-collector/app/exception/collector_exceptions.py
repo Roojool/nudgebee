@@ -24,3 +24,8 @@ class BadRequestError(HTTPException):
 class InternalServerError(HTTPException):
     code = 500
     name = "InternalServerError"
+
+
+class ServiceUnavailableError(HTTPException):
+    code = 503
+    name = "ServiceUnavailableError"

@@ -6,7 +6,7 @@ import PropTypes from 'prop-types';
 import { Input } from '@ui/Input';
 import { Select } from '@ui/Select';
 
-const TicketFormComponent = ({ fields, initialValues, onChanges, configurationId, forceValidate }) => {
+const TicketFormComponent = ({ fields, initialValues, onChanges, configurationId, forceValidate, nonClearableFields = [] }) => {
   const [options, setOptions] = useState({});
   const [loadingOptions, setLoadingOptions] = useState({});
   const [touched, setTouched] = useState({});
@@ -211,6 +211,7 @@ const TicketFormComponent = ({ fields, initialValues, onChanges, configurationId
                   required={field?.required || false}
                   options={options[field.key] || []}
                   value={selectVal}
+                  clearable={!nonClearableFields.includes(field.key)}
                   placeholder={loadingOptions[field.key] ? 'Loading...' : 'Select…'}
                   disabled={loadingOptions[field.key]}
                   onChange={(next) => handleChange(field.key, next)}
@@ -308,4 +309,5 @@ TicketFormComponent.propTypes = {
   onChanges: PropTypes.func,
   configurationId: PropTypes.any,
   forceValidate: PropTypes.bool,
+  nonClearableFields: PropTypes.arrayOf(PropTypes.string),
 };

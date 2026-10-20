@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 
+	"nudgebee/llm/common"
+
 	"github.com/tmc/langchaingo/llms"
 )
 
@@ -546,16 +548,15 @@ func (c *Client) createChat(ctx context.Context, payload *ChatRequest) (*ChatCom
 	defer func() { _ = r.Body.Close() }()
 
 	if r.StatusCode != http.StatusOK {
-		msg := fmt.Sprintf("API returned unexpected status code: %d", r.StatusCode)
-
-		// No need to check the error here: if it fails, we'll just return the
-		// status code.
+		// Decode is best-effort: on failure the error carries the status code
+		// alone. Either way the response headers ride along, so a 429 records
+		// whether the limit was on requests or tokens and how much was left.
 		var errResp errorMessage
 		if err := json.NewDecoder(r.Body).Decode(&errResp); err != nil {
-			return nil, errors.New(msg)
+			return nil, common.NewProviderHTTPError(r.StatusCode, r.Header, "")
 		}
 
-		return nil, fmt.Errorf("%s: %s", msg, errResp.Error.Message)
+		return nil, common.NewProviderHTTPError(r.StatusCode, r.Header, errResp.Error.Message)
 	}
 	if payload.StreamingFunc != nil || payload.StreamingReasoningFunc != nil {
 		return parseStreamingChatResponse(ctx, r, payload)

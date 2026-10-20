@@ -22,8 +22,45 @@ var Config appConfig
 
 const SERVICE_NAME = "services-server"
 
+// Valid ServerRole values. See appConfig.ServerRole for what each one runs.
+const (
+	ServerRoleAll    = "all"
+	ServerRoleAPI    = "api"
+	ServerRoleWorker = "worker"
+)
+
+// RunsBackgroundJobs reports whether this process should start the RabbitMQ
+// consumers and the long-running EE startup goroutines.
+//
+// Fails open: an unrecognised SERVER_ROLE runs background jobs. A typo that
+// silently disabled every consumer would leave queues filling with nobody
+// draining them and no error anywhere, which is far worse than a pod doing
+// more work than intended.
+func RunsBackgroundJobs() bool {
+	return Config.ServerRole != ServerRoleAPI
+}
+
 type appConfig struct {
 	NudgebeeLicense string `mapstructure:"nudgebee_license"`
+
+	// ServerRole selects which halves of the process are active, so a single
+	// image can be deployed twice: HTTP-serving pods and background-job pods.
+	//
+	//   all    (default) — HTTP server AND RabbitMQ consumers AND EE startup
+	//                      goroutines. The historical, single-Deployment
+	//                      behaviour; every single-replica, OSS and on-prem
+	//                      install stays on this.
+	//   api             — HTTP server only. common.MqConsume is inert (see
+	//                      common/mq.go) and api.RunEEStartupHooks is skipped.
+	//   worker          — HTTP server (for /health, pprof and the OTel metrics
+	//                      endpoint) plus consumers and startup goroutines. Not
+	//                      a member of the services-server Service.
+	//
+	// Handler-spawned background work (scan_orchestrator heartbeat evaluation,
+	// application/profiler tickers, triage's rule-match batcher) is NOT gated
+	// by this — it runs on whichever pod received the request, which for those
+	// flows is always an API pod.
+	ServerRole string `mapstructure:"server_role"`
 
 	ServiceApiServerToken           string `mapstructure:"action_api_server_token"`
 	ServiceApiServerTokenHeader     string `mapstructure:"action_api_server_token_header"`
@@ -191,6 +228,21 @@ type appConfig struct {
 
 	NBRetentionDaysAiCostReportDispatchLog int `mapstructure:"nb_retention_days_ai_cost_report_dispatch_log"`
 
+	// event_incoming_webhooks keeps the raw body of every webhook delivery, one
+	// row per event, for the integration Activity Log and replay. Nothing else
+	// references it, and stuck-delivery recovery only looks back 30 minutes.
+	NBRetentionDaysEventIncomingWebhooks int `mapstructure:"nb_retention_days_event_incoming_webhooks"`
+
+	// Oldest stuck webhook delivery the recovery cron will re-drive. Older ones
+	// are marked skipped: replaying a stale alert re-runs analysis on today's data.
+	StuckWebhookRecoveryMaxAgeMinutes int `mapstructure:"stuck_webhook_recovery_max_age_minutes"`
+
+	// llm_retrieval_trace (formerly llm_rag_audit, still readable under that
+	// name through a view) holds one row per knowledge-base or memory search,
+	// with every candidate and the scores behind it. Written on every search by
+	// rag-server, so it grows with question volume, not with data volume.
+	NBRetentionDaysRagRetrievalTrace int `mapstructure:"nb_retention_days_rag_retrieval_trace"`
+
 	// NBRetentionDaysEventAnalysis ages out event_log_analysis by the recency of
 	// the newest run for an event identity, not per row — see the
 	// event_log_analysis cleanup job in services/nb. Defaults to the critical
@@ -262,6 +314,17 @@ type appConfig struct {
 	// cannot answer. Default on; turn it off to force CLI-always as a kill switch.
 	FeatureKGCloudTopologyFromDB bool `mapstructure:"feature_kg_cloud_topology_from_db"`
 
+	// When true, the knowledge graph reads each CloudFormation stack's
+	// managed-resource list from the stack's own cloud_resourses row, falling back
+	// to `aws cloudformation list-stack-resources` only when the key is absent.
+	// Default on; turn it off to force CLI-always as a kill switch.
+	//
+	// Separate from FeatureKGCloudTopologyFromDB on purpose: a kill switch is only
+	// worth having if it reverts exactly the thing that broke, and folding these
+	// together would mean a CloudFormation bug also reverts the ENI, Route 53 and
+	// load-balancer paths.
+	FeatureKGCFNStackResourcesFromDB bool `mapstructure:"feature_kg_cfn_stack_resources_from_db"`
+
 	// Webhook execution mode - true for async (default), false for sync (useful for tests)
 	WebhookAsyncExecution bool `mapstructure:"webhook_async_execution"`
 
@@ -284,6 +347,12 @@ type appConfig struct {
 	RabbitMqKGUpdateConcurrency      int    `mapstructure:"rabbit_mq_kg_update_concurrency"`
 	KGUpdateDeduplicationMinutes     int    `mapstructure:"kg_update_deduplication_minutes"`
 	KGUpdateProcessingTimeoutMinutes int    `mapstructure:"kg_update_processing_timeout_minutes"`
+	// Inventory change detector (knowledge_graph/changedetect), run by the
+	// kg_detect_inventory_changes cron.
+	KGInventoryChangeDetectionEnabled bool `mapstructure:"kg_inventory_change_detection_enabled"`
+	KGInventoryChangeCandidateCap     int  `mapstructure:"kg_inventory_change_candidate_cap"`
+	KGInventoryChangeCreatesEnabled   bool `mapstructure:"kg_inventory_change_creates_enabled"`
+	KGResourcePatchEnabled            bool `mapstructure:"kg_resource_patch_enabled"`
 
 	// Event post-process queue configuration
 	RabbitMqEventPostProcessExchange    string `mapstructure:"rabbit_mq_event_post_process_exchange"`
@@ -352,6 +421,8 @@ func init() {
 	viper.SetConfigType("dotenv")
 	viper.AddConfigPath(".")
 
+	viper.SetDefault("server_role", ServerRoleAll)
+
 	viper.SetDefault("action_api_server_token_header", "X-ACTION-TOKEN")
 
 	viper.SetDefault("clickhouse_host", "http://localhost:8123")
@@ -397,9 +468,9 @@ func init() {
 	viper.SetDefault("app_database_url", "")
 	viper.SetDefault("nudgebee_license", "")
 	viper.SetDefault("app_database_max_connection", "20")
-	viper.SetDefault("app_database_min_connection", "2")
+	viper.SetDefault("app_database_min_connection", "5")
 	viper.SetDefault("app_database_idle_minutes", "5")
-	viper.SetDefault("app_database_conn_max_lifetime_minutes", "5")
+	viper.SetDefault("app_database_conn_max_lifetime_minutes", "15")
 	viper.SetDefault("app_database_query_timeout_seconds", "120")
 	viper.SetDefault("nudgebee_encryption_key", "")
 
@@ -477,6 +548,9 @@ func init() {
 	viper.SetDefault("nb_retention_days_k8s_resources", 30)
 	viper.SetDefault("nb_retention_days_recommendations_archive", 30)
 	viper.SetDefault("nb_retention_days_ai_cost_report_dispatch_log", 7)
+	viper.SetDefault("nb_retention_days_event_incoming_webhooks", 14)
+	viper.SetDefault("stuck_webhook_recovery_max_age_minutes", 60)
+	viper.SetDefault("nb_retention_days_rag_retrieval_trace", 30)
 	viper.SetDefault("nb_retention_days_event_analysis", 90)
 	viper.SetDefault("kg_edge_stale_after_days", 7)
 	viper.SetDefault("nb_retention_days_kg_inactive_edges", 14)
@@ -503,6 +577,7 @@ func init() {
 
 	viper.SetDefault("feature_event_point_in_time_close_enabled", true)
 	viper.SetDefault("feature_kg_cloud_topology_from_db", true)
+	viper.SetDefault("feature_kg_cfn_stack_resources_from_db", true)
 	viper.SetDefault("webhook_async_execution", true)
 
 	viper.SetDefault("LLM_SERVER_TOOL_SHELL_IMAGE", "ghcr.io/nudgebee/nudgebee-debug:0.3.12")
@@ -522,8 +597,34 @@ func init() {
 	viper.SetDefault("rabbit_mq_kg_update_exchange", "kg_update_exchange")
 	viper.SetDefault("rabbit_mq_kg_update_queue", "kg_update")
 	viper.SetDefault("rabbit_mq_kg_update_concurrency", 2)
-	viper.SetDefault("kg_update_deduplication_minutes", 120)
+	// Minimum gap between the end of one tenant-wide knowledge-graph build and the
+	// start of the next for the same tenant. Collectors request tenant-wide
+	// rebuilds several times an hour; requests inside the window stay queued and
+	// run on the first trigger after it. Kept below the hourly cron period so the
+	// cron, not this window, sets the cadence. Account-scoped and manual builds are
+	// not deferred. 0 disables.
+	viper.SetDefault("kg_update_deduplication_minutes", 45)
 	viper.SetDefault("kg_update_processing_timeout_minutes", 30)
+	// Every 10 minutes the detector compares each account's inventory with the
+	// marks it saved and requests account rebuilds / per-resource updates. The cap
+	// bounds how many new rows or rolled-out workloads one account may produce in
+	// a run before the detector stops inspecting them and rebuilds the account.
+	// Off by default, like the collectors' KG_UPDATE_NOTIFICATIONS_ENABLED: an
+	// environment opts into event-driven graph updates by turning both on. With
+	// both off nothing drives the graph but the hourly build_knowledge_graph cron.
+	viper.SetDefault("kg_inventory_change_detection_enabled", false)
+	viper.SetDefault("kg_inventory_change_candidate_cap", 5000)
+	// When false, a new resource of a creatable type rebuilds its account like
+	// any other new resource instead of being added on its own.
+	viper.SetDefault("kg_inventory_change_creates_enabled", true)
+	// The rollback switch for per-resource graph updates. When false, every
+	// resource ref — from the detector, EventBridge/EventGrid or the Kubernetes
+	// collector — rebuilds its account instead of being patched, which is how the
+	// graph behaved before per-resource updates existed. On by default: shipping
+	// it off meant the patch path never ran anywhere, so the comparison it was
+	// waiting for could not happen. It stays a switch, so turning it off restores
+	// account rebuilds without a deploy.
+	viper.SetDefault("kg_resource_patch_enabled", true)
 
 	// Event post-process queue configuration
 	viper.SetDefault("rabbit_mq_event_post_process_exchange", "event_post_process_exchange")
@@ -570,6 +671,17 @@ func init() {
 	err = viper.Unmarshal(&Config)
 	if err != nil {
 		slog.Error("Error unmarshalling config", "error", err)
+	}
+
+	switch Config.ServerRole {
+	case ServerRoleAll, ServerRoleAPI, ServerRoleWorker:
+	default:
+		// Fail open — see RunsBackgroundJobs. Loud, because the operator asked
+		// for a split deployment and is not getting one.
+		slog.Warn("unrecognised SERVER_ROLE; treating this pod as \"all\" (HTTP + background jobs)",
+			"server_role", Config.ServerRole,
+			"valid", []string{ServerRoleAll, ServerRoleAPI, ServerRoleWorker})
+		Config.ServerRole = ServerRoleAll
 	}
 
 	// Two distinct startup checks on NUDGEBEE_ENCRYPTION_KEY:

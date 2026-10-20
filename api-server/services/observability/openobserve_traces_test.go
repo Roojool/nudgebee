@@ -36,7 +36,7 @@ func TestOpenObserveTraceSource_BuildSQLWhere(t *testing.T) {
 	sql, err := buildOpenObserveTraceWhereClause(where)
 	require.NoError(t, err)
 
-	expected := "(service_name = 'checkout-service' AND str_match_ignore_case(operation_name, 'POST /checkout'))"
+	expected := "(service_name = 'checkout-service' AND operation_name ILIKE 'POST /checkout')"
 	assert.Equal(t, expected, sql)
 }
 

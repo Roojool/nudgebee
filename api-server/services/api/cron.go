@@ -7,12 +7,15 @@ import (
 	"nudgebee/services/anomoly"
 	"nudgebee/services/application"
 	"nudgebee/services/common"
+	"nudgebee/services/config"
 	"nudgebee/services/crawl"
 	"nudgebee/services/event"
 	"nudgebee/services/eventrule"
 	"nudgebee/services/insight"
 	"nudgebee/services/integrations"
+	integrationscore "nudgebee/services/integrations/core"
 	"nudgebee/services/internal/database"
+	"nudgebee/services/knowledge_graph/changedetect"
 	"nudgebee/services/knowledge_graph/core"
 	kgmodels "nudgebee/services/knowledge_graph/models"
 	kgqueue "nudgebee/services/knowledge_graph/queue"
@@ -501,6 +504,25 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 				}
 			}()
 			c.JSON(200, gin.H{"status": "ok"})
+		case "kg_detect_inventory_changes":
+			if !config.Config.KGInventoryChangeDetectionEnabled {
+				c.JSON(200, gin.H{"status": "disabled"})
+				return
+			}
+			dbManager, err := database.GetDatabaseManager(database.Metastore)
+			if err != nil {
+				ctx.GetLogger().Error("cron: failed to get database manager", "error", err)
+				c.JSON(500, gin.H{"status": "error", "message": "Failed to initialize database"})
+				return
+			}
+			detector, err := changedetect.NewDetector(dbManager, ctx.GetLogger())
+			if err != nil {
+				ctx.GetLogger().Error("cron: failed to create inventory change detector", "error", err)
+				c.JSON(500, gin.H{"status": "error", "message": "Failed to create detector"})
+				return
+			}
+			go detector.Run(ctx)
+			c.JSON(200, gin.H{"status": "ok"})
 		case "build_knowledge_graph":
 			ctx.GetLogger().Info("cron: starting build_knowledge_graph - publishing to queue")
 
@@ -670,6 +692,18 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 				}
 			}()
 			c.JSON(200, gin.H{"status": "ok"})
+		case "Stuck Webhook Recovery":
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						ctx.GetLogger().Error("cron: panic in stuck webhook recovery", "panic", r)
+					}
+				}()
+				if err := integrationscore.RecoverStuckWebhooks(ctx); err != nil {
+					ctx.GetLogger().Error("cron: failed to recover stuck webhooks", "error", err)
+				}
+			}()
+			c.JSON(200, gin.H{"status": "ok"})
 		case "pr-lifecycle-check":
 			go func() {
 				if err := account.CheckAndFollowupOpenPRs(ctx); err != nil {
@@ -719,6 +753,20 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 			}
 			ctx.GetLogger().Info("cron: vm vulnerability scan queued", "queued", queued, "failed", failed)
 			c.JSON(200, gin.H{"status": "ok", "queued": queued, "failed": failed})
+		case "VM Scan Status Sweep":
+			// Deliberately its own, independently-scheduled (every 5
+			// minutes, see cron_triggers.yaml) job rather than riding on
+			// "VM Vulnerability Scan" above (once daily): a scan stuck in
+			// "started" — process evicted/restarted mid-scan, or a path
+			// that somehow skipped a terminal write — must be caught
+			// within the scan timeout, not up to a day later. See #38466
+			// and the review that flagged the daily cadence as too slow.
+			if err := vmpackage.SweepStaleScanStatuses(); err != nil {
+				ctx.GetLogger().Error("cron: failed to sweep stale vm scan statuses", "error", err)
+				c.JSON(500, gin.H{"status": "error", "message": "Failed to sweep stale vm scan statuses"})
+				return
+			}
+			c.JSON(200, gin.H{"status": "ok"})
 		default:
 			common.MetricsApiRequestsFailedTotal(c.Request.Context(), "rpc_cron", "invalid_cron_job")
 			c.JSON(400, common.ErrorActionBadRequest("Invalid cron job"))
@@ -777,6 +825,7 @@ func triggerVerticalRightsizing(ctx *security.RequestContext, accountIds []strin
 			FROM cloud_accounts ca
 			INNER JOIN agent a ON ca.id = a.cloud_account_id
 			WHERE ca.cloud_provider = 'K8s'
+			AND ca.status = 'active'
 			AND a.status = 'CONNECTED'
 			AND a.last_connected_at > now() - interval '1 DAY'
 			GROUP BY ca.id, ca.tenant
@@ -794,6 +843,7 @@ func triggerVerticalRightsizing(ctx *security.RequestContext, accountIds []strin
     INNER JOIN agent a ON ca.id = a.cloud_account_id
     WHERE ca.id = ANY($1::uuid[]) -- Cast the input array, not the column
     AND ca.cloud_provider = 'K8s'
+    AND ca.status = 'active'
     AND a.status = 'CONNECTED'
     AND a.last_connected_at > now() - interval '1 DAY'
     GROUP BY ca.id, ca.tenant

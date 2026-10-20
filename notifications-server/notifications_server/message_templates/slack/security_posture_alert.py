@@ -126,7 +126,16 @@ def get_security_posture_alert_message_template(params: SecurityPostureAlertPara
         )
         footer_actions = [link_button(view_all_label, view_all_url, style="primary")]
     else:
-        footer_lines.append(f"View all findings on {settings.urls.branding_link('slack')}")
+        # No cross-account security view exists — land on the first account's instead.
+        first_account = next(iter(params.recommendations_by_account), None)
+        if first_account:
+            view_all_url = (
+                f"{base_url.rstrip('/')}/kubernetes/details/{first_account}"
+                f"?accountId={first_account}&utm=security-alert#security/image-scan"
+            )
+            footer_lines.append(f"View all findings on <{view_all_url}|{settings.urls.branding_name}>")
+        else:
+            footer_lines.append(f"View all findings on {settings.urls.branding_link('slack')}")
     attachments.append(
         neutral_footer_attachment(
             text="\n".join(footer_lines),

@@ -24,6 +24,7 @@ import recommendationApi from '@api1/recommendation';
 import { daysSinceLong, dismissalLabel, getResourceDisplayName } from './utils';
 import { splitSavings } from './rightSizingData';
 import CommandExecutionHistory from '@components/cloudaccount/CommandExecutionHistory';
+import { useRightSizingTrend } from '@hooks/useRightSizingTrend';
 
 // Severity → DS Label tone (mirrors the summary list mapping).
 const SEVERITY_TONE: Record<string, LabelTone> = {
@@ -53,7 +54,7 @@ interface RecommendationDetailPanelProps {
   open: boolean;
   onClose: () => void;
   recommendation: any;
-  accounts?: Record<string, { name: string; cloud_provider: string; account_access?: string }>;
+  accounts?: Record<string, { name: string; cloud_provider: string; account_access?: string; agentConnected?: boolean }>;
   initialTab?: number;
   onCreateTicket?: (rec: any) => void;
   onDismiss?: (rec: any) => void;
@@ -204,6 +205,11 @@ const RecommendationDetailPanel = ({
       refreshHistory(initialTab);
     }
   }, [open, initialTab]);
+
+  // One fetch of the usage trend for both tabs: the Details tab draws it
+  // compact under the change, the Evidence tab in full. Non-right-sizing
+  // recommendations never fetch.
+  const trend = useRightSizingTrend(recommendation);
 
   if (!recommendation) return null;
 
@@ -359,6 +365,7 @@ const RecommendationDetailPanel = ({
         <Box sx={{ flex: 1, overflow: 'auto', display: activeTab === 0 ? 'block' : 'none' }}>
           <DetailsPanel
             fullRecommendation={rec}
+            trend={trend}
             accounts={accounts}
             onViewEvidence={() => setActiveTab(1)}
             onMitigationExecuted={() => setPrevHistoryRefreshKey((k) => k + 1)}
@@ -367,6 +374,7 @@ const RecommendationDetailPanel = ({
 
         <Box sx={{ flex: 1, overflow: 'auto', display: activeTab === 1 ? 'block' : 'none' }}>
           <EvidencePanel
+            trend={trend}
             recommendation={rec.recommendation}
             category={category}
             ruleName={ruleName}
@@ -477,6 +485,7 @@ const RecommendationDetailPanel = ({
         <ActionBar
           fullRecommendation={rec}
           provider={accounts[rec.account_id]?.cloud_provider}
+          agentConnected={accounts[rec.account_id]?.agentConnected}
           onCreateTicket={onCreateTicket}
           onDismiss={onDismiss}
           onResolve={onResolve}

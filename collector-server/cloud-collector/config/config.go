@@ -25,6 +25,9 @@ type appConfig struct {
 	CloudCollectorServerCostBackfillMonths       int    `mapstructure:"cloud_collector_server_cost_backfill_months"`
 	CloudCollectorServerMetricsWorkersMax        int    `mapstructure:"cloud_collector_server_metrics_workers_max"`
 	CloudCollectorServerEventsWorkersMax         int    `mapstructure:"cloud_collector_server_events_workers_max"`
+	CloudCollectorCliMaxConcurrent               int    `mapstructure:"cloud_collector_cli_max_concurrent"`
+	CloudCollectorCliMaxOutputBytes              int    `mapstructure:"cloud_collector_cli_max_output_bytes"`
+	CloudCollectorCliTimeoutSeconds              int    `mapstructure:"cloud_collector_cli_timeout_seconds"`
 
 	Env     string `mapstructure:"env"`
 	BaseUrl string `mapstructure:"base_url"`
@@ -74,7 +77,12 @@ type appConfig struct {
 	RabbitMqCloudAccountPostReportDLQExchange string `mapstructure:"rabbit_mq_cloud_account_post_report_dlq_exchange"`
 
 	RabbitMqKGUpdateExchange string `mapstructure:"rabbit_mq_kg_update_exchange"`
-	RabbitMqKGUpdateQueue    string `mapstructure:"rabbit_mq_kg_update_queue"`
+	// KGUpdateNotificationsEnabled gates every knowledge-graph update this
+	// collector publishes: account updates from the usage report and the events
+	// job, and per-resource refs from EventBridge and EventGrid. Off unless an
+	// environment turns it on, so the graph falls back to its scheduled build.
+	KGUpdateNotificationsEnabled bool   `mapstructure:"kg_update_notifications_enabled"`
+	RabbitMqKGUpdateQueue        string `mapstructure:"rabbit_mq_kg_update_queue"`
 
 	RabbitMqEventPostProcessExchange string `mapstructure:"rabbit_mq_event_post_process_exchange"`
 	RabbitMqEventPostProcessQueue    string `mapstructure:"rabbit_mq_event_post_process_queue"`
@@ -205,6 +213,7 @@ func init() {
 	viper.SetDefault("rabbit_mq_cloud_account_post_report_dlq_exchange", "cloud_account_post_report_exchange_dlx")
 
 	viper.SetDefault("rabbit_mq_kg_update_exchange", "kg_update_exchange")
+	viper.SetDefault("kg_update_notifications_enabled", false)
 	viper.SetDefault("rabbit_mq_kg_update_queue", "kg_update")
 
 	viper.SetDefault("rabbit_mq_event_post_process_exchange", "event_post_process_exchange")
@@ -244,6 +253,9 @@ func init() {
 	viper.SetDefault("cloud_collector_server_cost_backfill_months", 6)
 	viper.SetDefault("cloud_collector_server_metrics_workers_max", 1)
 	viper.SetDefault("cloud_collector_server_events_workers_max", 1)
+	viper.SetDefault("cloud_collector_cli_max_concurrent", 8)
+	viper.SetDefault("cloud_collector_cli_max_output_bytes", 1024*1024)
+	viper.SetDefault("cloud_collector_cli_timeout_seconds", 120)
 
 	viper.SetDefault("cloud_collector_notifications_slack_channel", "")
 

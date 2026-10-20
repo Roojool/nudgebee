@@ -90,6 +90,21 @@ class TestFailureBehaviourUnchanged:
         result = _fetch(_response(status=400, text=json.dumps({"message": "agent not connected"})))
         assert result == []
 
+    def test_agent_not_connected_as_503_returns_empty(self):
+        # The relay reports a missing agent as 503, which this classifies as "no data".
+        result = _fetch(_response(status=503, text=json.dumps({"message": "agent not connected"})))
+        assert result == []
+
+    def test_503_is_not_retried_at_the_status_layer(self):
+        # The check above only reaches the status classification if the retry policy
+        # lets the 503 through. A policy carrying 503 in its status_forcelist retries it
+        # and then raises RetryError instead, so the response is never classified and an
+        # ordinary "no agent yet" account fails its whole scan. Guarding the policy
+        # rather than the handler, because the mocked session above cannot see it.
+        from server.metrics.api_server_metrics import _CONNECT_RETRY
+
+        assert _CONNECT_RETRY.is_retry("POST", 503) is False
+
     def test_query_error_raises_when_not_raw(self):
         with pytest.raises(ValueError):
             _fetch(_response(error="bad query"))
@@ -128,7 +143,8 @@ class TestHPAFailsLoudly:
 
         hpa = self._hpa()
         with patch(
-            "server.metrics.prometheus_metrics_hpa.query_metrics_via_api_server",
+            # Both fetch paths route through _entries_for, which lives here.
+            "server.metrics.prometheus_metrics.query_metrics_via_api_server",
             side_effect=AgentNotConnectedError("agent not connected", 400),
         ):
             with pytest.raises(ValueError):
@@ -139,7 +155,8 @@ class TestHPAFailsLoudly:
 
         hpa = self._hpa()
         with patch(
-            "server.metrics.prometheus_metrics_hpa.query_metrics_via_api_server",
+            # Both fetch paths route through _entries_for, which lives here.
+            "server.metrics.prometheus_metrics.query_metrics_via_api_server",
             side_effect=PromQLQueryError("bad query", 200),
         ):
             with pytest.raises(ValueError):
@@ -194,3 +211,83 @@ class TestConcurrencyClamp:
         svc._metrics_semaphores.clear()
         assert svc._get_relay_semaphore(0)._value == 1
         assert svc._get_relay_semaphore(-5)._value == 1
+
+
+class TestConnectRetryPolicy:
+    """A services-server restart is a connect-phase failure, and only that is retried.
+
+    services-server runs a single replica on many installs, so a restart is a ~30s
+    window in which every metrics query is refused. Retrying the connect phase rides
+    that out; retrying the read phase would re-run a query api-server may already be
+    executing, which is what the call site's original "no retries" comment guarded.
+    """
+
+    def _adapter(self):
+        from server.metrics.api_server_metrics import _CONNECT_RETRY
+        from server.utils.utils import get_http_session_with_retry
+
+        session = get_http_session_with_retry(retry_strategy=_CONNECT_RETRY)
+        return session.get_adapter("http://services-server:8000")
+
+    def test_connect_is_retried_with_backoff(self):
+        retry = self._adapter().max_retries
+        assert retry.connect == 4
+        assert retry.backoff_factor == 1
+
+    def test_connect_phase_has_its_own_short_timeout(self):
+        # A refused connection fails instantly, so retries cost only backoff. A connect
+        # that hangs burns the whole timeout per attempt, so sharing the 170s read budget
+        # across both phases would make five attempts cost ~14 minutes.
+        from server.metrics.api_server_metrics import _CONNECT_TIMEOUT_SECONDS
+
+        attempts = 1 + 4  # the initial connect plus connect=4
+        backoff = 0 + 2 + 4 + 8
+        assert attempts * _CONNECT_TIMEOUT_SECONDS + backoff <= 30  # api-server's budget
+
+    def test_read_and_status_are_not_retried(self):
+        # An accepted request may already be running the query; re-sending doubles it.
+        retry = self._adapter().max_retries
+        assert retry.read == 0
+        assert retry.status == 0
+
+    def test_zero_attempts_means_zero_retries(self):
+        # requests maps max_retries=None onto Retry.DEFAULT (total=3), so the old
+        # `retry_strategy = None` turned "no retries" into three of them for any method
+        # urllib3 retries by default. POST was never among those, which is why this call
+        # site was unaffected -- but a GET caller asking for none would have got three.
+        from server.utils.utils import get_http_session_with_retry
+
+        retry = get_http_session_with_retry(retry_attempts=0).get_adapter("http://x").max_retries
+        assert retry.total == 0
+
+
+class TestOutageStaysLoud:
+    """A refused connection must still raise once the retries are spent.
+
+    api-server's GetAnomaly turns any non-200 into an empty list, so softening this to
+    []` would not recover the evaluation -- it would only drop the one ERROR that says
+    api-server is unreachable, and it would bypass the fallback in
+    cluster_rightsizing_recommendation.get_historical_pod_allocation, which reads an
+    exception as "use current allocation" and an empty list as "every pod requests 0".
+    """
+
+    def test_connection_error_still_raises(self):
+        import requests
+
+        from server.metrics.prometheus_metrics import fetch_metrics
+
+        session = MagicMock()
+        session.request.side_effect = requests.exceptions.ConnectionError("refused")
+        with patch("server.metrics.prometheus_metrics.resolve_tenant_id", return_value="tenant-1"), patch(
+            "server.metrics.api_server_metrics.get_http_session_with_retry", return_value=session
+        ):
+            with pytest.raises(ValueError):
+                fetch_metrics(
+                    queries_obj=[QUERY],
+                    start_time=START,
+                    end_time=END,
+                    duration=None,
+                    step="1h",
+                    account_id="acct-1",
+                    tenant_id="tenant-1",
+                )

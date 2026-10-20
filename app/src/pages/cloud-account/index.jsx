@@ -8,6 +8,7 @@ import SafeIcon from '@shared/icons/SafeIcon';
 import { Button as DsButton } from '@ui/Button';
 import { hasWriteAccess } from '@lib/auth';
 import { ds } from '@utils/colors';
+import { isCloudProvider } from '@components/overview/providers';
 
 const CloudAccount = () => {
   const router = useRouter();
@@ -19,7 +20,7 @@ const CloudAccount = () => {
     let cancelled = false;
     let redirectTimer;
     const navigateToCloudAccount = async () => {
-      if (selectedCluster?.value && selectedCluster?.cloud_provider !== 'K8s') {
+      if (selectedCluster?.value && isCloudProvider(selectedCluster?.cloud_provider)) {
         setSelectedCluster({ ...selectedCluster });
         redirectTimer = setTimeout(() => {
           router.push(`/cloud-account/details/${selectedCluster.value}#summary`);
@@ -30,7 +31,7 @@ const CloudAccount = () => {
       try {
         const cloudAccounts = await apiHome.getCloudAccounts();
         if (cancelled) return;
-        const validCloudAccounts = cloudAccounts.filter((acc) => acc.cloud_provider !== 'K8s' && acc.status === 'active');
+        const validCloudAccounts = cloudAccounts.filter((acc) => isCloudProvider(acc.cloud_provider) && acc.status === 'active');
 
         if (validCloudAccounts.length > 0) {
           const firstCloudAccount = validCloudAccounts[0];

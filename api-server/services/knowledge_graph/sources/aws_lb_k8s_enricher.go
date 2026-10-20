@@ -286,7 +286,7 @@ func (e *LoadBalancerK8sEnricher) linkManagedClusterToK8sCluster(
 			},
 			tenantID,
 			n.CloudAccountID,
-			"aws_lb_k8s_enricher",
+			e.GetName(),
 		)
 		newEdges = append(newEdges, edge)
 		e.logger.Debug("linked ManagedCluster → K8s Cluster",
@@ -372,7 +372,7 @@ func (e *LoadBalancerK8sEnricher) linkBackendPoolToWorkload(
 						},
 						tenantID,
 						bpNode.CloudAccountID,
-						"aws_lb_k8s_enricher",
+						e.GetName(),
 					)
 					newEdges = append(newEdges, edge)
 					e.logger.Debug("linked BackendPool → Workload via EC2 node resolution",
@@ -713,7 +713,7 @@ func (e *LoadBalancerK8sEnricher) createEdge(
 		properties,
 		tenantID,
 		lbNode.CloudAccountID,
-		"aws_lb_k8s_enricher",
+		e.GetName(),
 	)
 }
 

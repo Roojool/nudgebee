@@ -12,7 +12,7 @@ export const E2E_NAME_PREFIX = "nb_e2e_acctx_";
 
 // Nubi > b-Cortex > Knowledge > Account Context (app/src/components/llm/GlobalContextTab.jsx).
 // `grep -c data-testid app/src/components/llm/GlobalContextTab.jsx` returns 0, and the
-// same holds for ScopeChip.jsx and ds/WidgetCard, so there is no rung-1 handle anywhere
+// same holds for ScopeChip.jsx and the ds/Card wrapping each context, so there is no rung-1 handle anywhere
 // on this surface. ds/Input DOES render a real <label htmlFor>, so the three form fields
 // are reached at rung 2 by their accessible name with the placeholder as the scoped
 // fallback; the cards, banners and empty state carry no role at all and are taken at
@@ -171,7 +171,7 @@ export class AccountContextLocators extends CommonLocators {
   // (or a reordered list) can never point an assertion at the wrong record. The name
   // <Typography> sits in a Box holding the name/description/timestamps, whose parent is the
   // card's flex row — the row that also holds the card's ThreeDotsMenu, which is why the
-  // walk stops there rather than at the WidgetCard above it.
+  // walk stops there rather than at the ds/Card above it.
   contextCard(name: string): Locator {
     return this.dialog.getByText(name, { exact: true }).locator("xpath=../..").first();
   }
@@ -210,10 +210,9 @@ export class AccountContextLocators extends CommonLocators {
       .first();
   }
 
-  // The synthetic "All accounts" entry, and the nth real account, in the open picker.
-  // Both are built off the listbox field rather than a passed-in handle so a caller can
-  // name the option it wants *before* the panel is open — which is what lets
-  // openAccountPanel below expand only as far as that option.
+  // The nth real account in the open picker. Built off the listbox field rather than a
+  // passed-in handle so a caller can name the option it wants *before* the panel is
+  // open — which is what lets openAccountPanel below expand only as far as that option.
 
   realAccountOption(index: number): Locator {
     return this.accountListbox.locator('[role="option"]').filter({ hasNotText: "All accounts" }).nth(index);
@@ -239,8 +238,13 @@ export class AccountContextLocators extends CommonLocators {
     await this.accountListbox.waitFor({ state: "visible", timeout });
 
     const groupHeaders = this.accountListbox.locator('[role="button"]');
+    const options = this.accountListbox.locator('[role="option"]');
+    // A single-provider tenant renders a flat list: no headers, options visible directly.
     await expect
-      .poll(() => groupHeaders.count(), { timeout, message: "the account picker never listed a group to expand" })
+      .poll(async () => (await groupHeaders.count()) + (await options.count()), {
+        timeout,
+        message: "the account picker never listed a group or an account",
+      })
       .toBeGreaterThan(0);
 
     const groupCount = await groupHeaders.count();

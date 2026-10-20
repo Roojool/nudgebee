@@ -39,6 +39,13 @@ import (
 type MockTemporalClient struct {
 	client.Client
 	mock.Mock
+	// Run IDs passed to CancelWorkflow / TerminateWorkflow. Recorded on the
+	// struct rather than through mock expectations so tests that never look at
+	// them keep working without registering a call.
+	canceled   []string
+	terminated []string
+	// Error TerminateWorkflow returns, for the paths that have to survive one.
+	terminateErr error
 }
 
 // ScheduleClient returns a mock ScheduleClient.
@@ -47,6 +54,11 @@ func (m *MockTemporalClient) ScheduleClient() client.ScheduleClient {
 }
 
 func (m *MockTemporalClient) ListWorkflow(ctx context.Context, request *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
+	// A real gRPC call fails on a canceled context; the mock has to, or a test
+	// cannot tell detached work from work that merely looked detached.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	args := m.Called(ctx, request)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -55,6 +67,9 @@ func (m *MockTemporalClient) ListWorkflow(ctx context.Context, request *workflow
 }
 
 func (m *MockTemporalClient) DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	args := m.Called(ctx, workflowID, runID)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -68,6 +83,18 @@ func (m *MockTemporalClient) GetWorkflowHistory(ctx context.Context, workflowID,
 }
 
 func (m *MockTemporalClient) TerminateWorkflow(ctx context.Context, workflowID string, runID string, reason string, details ...interface{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.terminated = append(m.terminated, runID)
+	return m.terminateErr
+}
+
+func (m *MockTemporalClient) CancelWorkflow(ctx context.Context, workflowID string, runID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.canceled = append(m.canceled, runID)
 	return nil
 }
 
@@ -461,6 +488,8 @@ func TestGetDetailedWorkflowExecutionInputs(t *testing.T) {
 	mockStore := new(MockWorkflowStore)
 	mockTaskRegistry := tasks.NewInitializedTaskRegistry()
 	mockConfigService := new(MockConfigService)
+	// Error text is scrubbed of the account's secret values, which are read here.
+	mockConfigService.On("ListConfigsDecrypted", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return([]model.Config{}, nil).Maybe()
 	workflowExector := &WorkflowExecutor{
 		temporalClient: mockTemporalClient,
 		workflowStore:  mockStore,
@@ -708,6 +737,9 @@ func (m *MockWorkflowStore) DeleteExpiredState(ctx context.Context, limit int) (
 }
 
 func (m *MockWorkflowStore) SetLastExecutionStatus(ctx context.Context, tenantID, accountID, id string, status model.WorkflowExecutionStatus, executionTime time.Time, statusMessage string, version *int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	args := m.Called(ctx, tenantID, accountID, id, status, executionTime, statusMessage, version)
 	if args.Get(0) == nil {
 		return nil

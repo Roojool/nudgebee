@@ -21,8 +21,9 @@ import {
   Storage as ValueIcon,
   WarningAmber as WarningIcon,
   Add as AddIcon,
-  Delete as DeleteIconMui,
 } from '@mui/icons-material';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import { toast as snackbar } from '@ui/Toast';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import observability from '@api1/observability';
@@ -272,7 +273,7 @@ export const PropertyFilterHelp = ({ heading }) => (
           backgroundColor: 'var(--ds-blue-100)',
           borderRadius: 'var(--ds-radius-sm)',
           padding: 'var(--ds-space-1) var(--ds-space-2)',
-          fontFamily: 'monospace',
+          fontFamily: ds.font.mono,
           fontSize: 'var(--ds-text-small)',
           color: 'var(--ds-gray-700)',
         }}
@@ -308,7 +309,7 @@ export const PropertyFilterHelp = ({ heading }) => (
               sx={{
                 fontSize: 'var(--ds-text-caption)',
                 fontWeight: 'var(--ds-font-weight-semibold)',
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 color: 'var(--ds-gray-700)',
                 backgroundColor: 'var(--ds-blue-100)',
                 border: '1px solid var(--ds-blue-300)',
@@ -1937,7 +1938,7 @@ const LogQueryBuilderAutocomplete = ({
                                 backgroundColor: 'var(--ds-blue-100)',
                                 borderRadius: 'var(--ds-radius-sm)',
                                 padding: 'var(--ds-space-1) var(--ds-space-2)',
-                                fontFamily: 'monospace',
+                                fontFamily: ds.font.mono,
                                 fontSize: 'var(--ds-text-small)',
                                 color: 'var(--ds-gray-700)',
                               }}
@@ -1979,7 +1980,7 @@ const LogQueryBuilderAutocomplete = ({
                                     sx={{
                                       fontSize: 'var(--ds-text-caption)',
                                       fontWeight: 'var(--ds-font-weight-semibold)',
-                                      fontFamily: 'monospace',
+                                      fontFamily: ds.font.mono,
                                       color: 'var(--ds-gray-700)',
                                       backgroundColor: 'var(--ds-blue-100)',
                                       border: '1px solid var(--ds-blue-300)',
@@ -2189,11 +2190,11 @@ const LogQueryBuilderAutocomplete = ({
                   </Box>
 
                   <DsButton
-                    tone='danger'
+                    tone='ghost'
                     size='sm'
                     composition='icon-only'
                     aria-label='Delete operation'
-                    icon={<DeleteIconMui fontSize='small' />}
+                    icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                     onClick={() => deleteOperation(op.id)}
                   />
                 </Box>

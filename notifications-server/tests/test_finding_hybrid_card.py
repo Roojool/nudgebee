@@ -1153,6 +1153,85 @@ class TestEventAnalysisPoller:
         assert actions_common._post_investigation_content(service, context, "   ", "preamble") is True
         assert actions_common._post_investigation_content(service, context, None, "preamble") is True
 
+    def test_final_writeup_does_not_repeat_the_investigation(self, monkeypatch):
+        # nudgebee/nudgebee#38925: detailed_response now opens with the
+        # investigation verbatim and appends the extra sections. The
+        # investigation was already posted to this thread one message earlier,
+        # so only what the write-up adds goes out.
+        investigation = "### Causality Chain\n- Root Cause: OOMKilled."
+        calls = _run_poller(
+            monkeypatch,
+            [
+                {
+                    "status": "COMPLETED",
+                    "task_statuses": {
+                        "summary": "COMPLETED",
+                        "investigation": "COMPLETED",
+                        "detailed_response": "COMPLETED",
+                    },
+                    "summary": "Pods are crash-looping.",
+                    "investigation": investigation,
+                    "detailed_response": investigation + "\n\n### Affected Components\n- Resource: `pod/api-7f`",
+                }
+            ],
+        )
+
+        assert len(calls["posted"]) == 3
+        assert "Root Cause: OOMKilled." in calls["posted"][1]
+        assert "Root Cause: OOMKilled." not in calls["posted"][2], "the investigation must not be posted twice"
+        assert "Affected Components" in calls["posted"][2]
+        assert "<@U1>" in calls["posted"][2]  # the closing message still pings
+
+    def test_final_writeup_still_pings_when_it_adds_nothing(self, monkeypatch):
+        # A write-up that is the investigation and nothing else leaves nothing
+        # to post -- but the user still has to learn the analysis finished.
+        investigation = "### Causality Chain\n- Root Cause: OOMKilled."
+        calls = _run_poller(
+            monkeypatch,
+            [
+                {
+                    "status": "COMPLETED",
+                    "task_statuses": {
+                        "summary": "COMPLETED",
+                        "investigation": "COMPLETED",
+                        "detailed_response": "COMPLETED",
+                    },
+                    "summary": "Pods are crash-looping.",
+                    "investigation": investigation,
+                    "detailed_response": investigation,
+                }
+            ],
+        )
+
+        assert len(calls["posted"]) == 3
+        assert "Root Cause: OOMKilled." not in calls["posted"][2]
+        assert "That's everything I found." in calls["posted"][2]
+        assert "<@U1>" in calls["posted"][2]
+        assert "Analyzed" in calls["update"][0]["text"]
+
+    def test_final_writeup_posts_in_full_when_it_is_not_the_investigation(self, monkeypatch):
+        # An unrelated write-up (older rows, or a stage that produced its own
+        # text) must still go out whole -- the trim is a prefix match, not a
+        # blanket suppression.
+        calls = _run_poller(
+            monkeypatch,
+            [
+                {
+                    "status": "COMPLETED",
+                    "task_statuses": {
+                        "summary": "COMPLETED",
+                        "investigation": "COMPLETED",
+                        "detailed_response": "COMPLETED",
+                    },
+                    "summary": "Pods are crash-looping.",
+                    "investigation": "Root cause: OOMKilled.",
+                    "detailed_response": "Full write-up: OOMKilled due to a memory limit regression.",
+                }
+            ],
+        )
+
+        assert "Full write-up: OOMKilled due to a memory limit regression." in calls["posted"][2]
+
     def test_post_investigation_content_returns_false_on_slack_failure(self):
         context = _poller_context()
 

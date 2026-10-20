@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Grid, Typography, Box, Divider, ButtonBase } from '@mui/material';
+import { Grid, Typography, Box, ButtonBase } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 import apiAccount from '@api1/account';
 import apiKubernetes1 from '@api1/kubernetes1';
@@ -67,7 +68,7 @@ const terminalBarSx = {
 
 const terminalCodeSx = {
   m: 0,
-  fontFamily: 'monospace',
+  fontFamily: ds.font.mono,
   fontSize: 'var(--ds-text-small)',
   lineHeight: 1.65,
   color: 'var(--ds-brand-150)',
@@ -102,7 +103,7 @@ const WhyNote = ({ children }) => (
     <Box
       component='span'
       sx={{
-        fontFamily: 'monospace',
+        fontFamily: ds.font.mono,
         fontSize: '9px',
         fontWeight: 'var(--ds-font-weight-medium)',
         letterSpacing: '0.11em',
@@ -474,7 +475,7 @@ helm repo update`;
           >
             Learn How to Install
           </Button>
-          <Divider orientation='vertical' flexItem sx={{ borderColor: ds.gray[300], my: 0.5 }} />
+          <Divider orientation='vertical' color={ds.gray[300]} sx={{ my: 0.5, mx: 0 }} />
           <Button
             id='required-permissions-btn'
             tone='link'
@@ -621,14 +622,7 @@ helm repo update`;
               </Grid>
             </Card>
 
-            <Divider
-              sx={{
-                my: 3,
-                borderStyle: 'dotted',
-                borderColor: 'var(--ds-brand-200)',
-                borderBottomWidth: '2px',
-              }}
-            />
+            <Divider color='var(--ds-brand-200)' thickness={2} sx={{ my: 3, borderTopStyle: 'dotted' }} />
 
             <Card
               id='k8s-prerequisites'
@@ -651,7 +645,7 @@ helm repo update`;
                 Kubernetes cluster nodes must run at least Linux Kernel version 4.2 or later to ensure eBPF compatibility for the Node Agent.
               </PrereqItem>
 
-              <Divider sx={{ my: 'var(--ds-space-3)', borderColor: ds.gray[200] }} />
+              <Divider color={ds.gray[200]} sx={{ my: 'var(--ds-space-3)' }} />
 
               <PrereqGroupHeader>Network</PrereqGroupHeader>
               <PrereqItem label='Docker Registry Access'>
@@ -797,7 +791,7 @@ helm repo update`;
                 )}
               </Box>
 
-              <Divider sx={{ my: 'var(--ds-space-6)', borderColor: ds.gray[300] }} />
+              <Divider color={ds.gray[300]} sx={{ my: 'var(--ds-space-6)' }} />
 
               <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
                 <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.brand[600] }}>
@@ -808,7 +802,7 @@ helm repo update`;
                 Run the command on any machine with{' '}
                 <code
                   style={{
-                    fontFamily: 'monospace',
+                    fontFamily: ds.font.mono,
                     fontSize: '11.5px',
                     background: 'var(--ds-background-300)',
                     padding: 'var(--ds-space-1) var(--ds-space-1)',
@@ -891,7 +885,7 @@ helm repo update`;
                         <TerminalDots />
                         <Typography
                           sx={{
-                            fontFamily: 'monospace',
+                            fontFamily: ds.font.mono,
                             fontSize: 'var(--ds-text-caption)',
                             color: 'var(--ds-brand-300)',
                             letterSpacing: '0.3px',
@@ -958,7 +952,7 @@ helm repo update`;
                         <TerminalDots />
                         <Typography
                           sx={{
-                            fontFamily: 'monospace',
+                            fontFamily: ds.font.mono,
                             fontSize: 'var(--ds-text-caption)',
                             color: 'var(--ds-brand-300)',
                             letterSpacing: '0.3px',

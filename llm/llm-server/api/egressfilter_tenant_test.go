@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"nudgebee/llm/config"
 	"nudgebee/llm/security/egressfilter"
 )
 
@@ -505,4 +506,87 @@ func TestParseMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// PUT omitting entropy_enabled inherits the platform default, rather than
+// forcing false. Explicit true/false in the PUT body overrides the default.
+func TestUpsert_EntropyOmissionSemantics(t *testing.T) {
+	orig := config.Config.LlmServerEgressFilterEntropyEnabled
+	t.Cleanup(func() { config.Config.LlmServerEgressFilterEntropyEnabled = orig })
+
+	t.Run("omitted inherits platform default true", func(t *testing.T) {
+		config.Config.LlmServerEgressFilterEntropyEnabled = true
+		var captured *egressfilter.TenantConfig
+		stubDAO(t,
+			func(_ context.Context, _ uuid.UUID) (*egressfilter.TenantConfig, error) { return nil, nil },
+			func(_ context.Context, cfg *egressfilter.TenantConfig) error { captured = cfg; return nil },
+			nil, nil,
+		)
+		r := setupEgressfilterRouter(t)
+		tid := uuid.New()
+		body := map[string]any{"mode": "detect", "enabled": true}
+		w := doRequest(t, r, http.MethodPut, fmt.Sprintf("/api/admin/egressfilter/tenant/%s", tid), body)
+		require.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, captured)
+		assert.True(t, captured.EntropyEnabled, "omitted entropy_enabled must inherit platform true")
+	})
+
+	t.Run("explicit false overrides platform default true", func(t *testing.T) {
+		config.Config.LlmServerEgressFilterEntropyEnabled = true
+		var captured *egressfilter.TenantConfig
+		stubDAO(t,
+			func(_ context.Context, _ uuid.UUID) (*egressfilter.TenantConfig, error) { return nil, nil },
+			func(_ context.Context, cfg *egressfilter.TenantConfig) error { captured = cfg; return nil },
+			nil, nil,
+		)
+		r := setupEgressfilterRouter(t)
+		tid := uuid.New()
+		body := map[string]any{"mode": "detect", "enabled": true, "entropy_enabled": false}
+		w := doRequest(t, r, http.MethodPut, fmt.Sprintf("/api/admin/egressfilter/tenant/%s", tid), body)
+		require.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, captured)
+		assert.False(t, captured.EntropyEnabled, "explicit false must override platform default")
+	})
+}
+
+// PATCH on a new tenant row (nil DB record) must initialize EntropyEnabled
+// from the platform configuration so an unrelated update (e.g. allowlist)
+// does not silently disable the platform entropy policy.
+func TestPatch_EntropyOmissionSemantics(t *testing.T) {
+	orig := config.Config.LlmServerEgressFilterEntropyEnabled
+	t.Cleanup(func() { config.Config.LlmServerEgressFilterEntropyEnabled = orig })
+
+	t.Run("new tenant patch inherits platform default true", func(t *testing.T) {
+		config.Config.LlmServerEgressFilterEntropyEnabled = true
+		var captured *egressfilter.TenantConfig
+		stubDAO(t,
+			func(_ context.Context, _ uuid.UUID) (*egressfilter.TenantConfig, error) { return nil, nil },
+			func(_ context.Context, cfg *egressfilter.TenantConfig) error { captured = cfg; return nil },
+			nil, nil,
+		)
+		r := setupEgressfilterRouter(t)
+		tid := uuid.New()
+		body := map[string]any{"allowlist_add": []string{"sample-key"}}
+		w := doRequest(t, r, http.MethodPatch, fmt.Sprintf("/api/admin/egressfilter/tenant/%s", tid), body)
+		require.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, captured)
+		assert.True(t, captured.EntropyEnabled, "patching new tenant must inherit platform entropy true")
+	})
+
+	t.Run("explicit entropy_enabled false in patch sets false", func(t *testing.T) {
+		config.Config.LlmServerEgressFilterEntropyEnabled = true
+		var captured *egressfilter.TenantConfig
+		stubDAO(t,
+			func(_ context.Context, _ uuid.UUID) (*egressfilter.TenantConfig, error) { return nil, nil },
+			func(_ context.Context, cfg *egressfilter.TenantConfig) error { captured = cfg; return nil },
+			nil, nil,
+		)
+		r := setupEgressfilterRouter(t)
+		tid := uuid.New()
+		body := map[string]any{"entropy_enabled": false}
+		w := doRequest(t, r, http.MethodPatch, fmt.Sprintf("/api/admin/egressfilter/tenant/%s", tid), body)
+		require.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, captured)
+		assert.False(t, captured.EntropyEnabled, "explicit false in patch must be respected")
+	})
 }

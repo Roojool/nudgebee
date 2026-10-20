@@ -2,7 +2,6 @@ package k8s
 
 import (
 	"fmt"
-	"nudgebee/runbook/common"
 	"nudgebee/runbook/internal/tasks/types"
 	"nudgebee/runbook/services/relay"
 	"strconv"
@@ -28,11 +27,7 @@ func (t *ContinuousRightsizeTask) GetDisplayName() string {
 }
 
 func (t *ContinuousRightsizeTask) Execute(taskCtx types.TaskContext, params map[string]any) (any, error) {
-	taskCtx.GetLogger().Debug("Executing ContinuousRightsizeTask", "params", params)
-
-	if paramsStr, err := common.MarshalJson(params); err == nil {
-		taskCtx.GetLogger().Info("params", "params", paramsStr)
-	}
+	taskCtx.GetLogger().Debug("Executing ContinuousRightsizeTask")
 
 	accountID := taskCtx.GetAccountID()
 	if id, ok := params["account_id"].(string); ok && id != "" {

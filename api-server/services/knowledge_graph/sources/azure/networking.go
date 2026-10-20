@@ -928,3 +928,100 @@ func extractVNetIDFromSubnetID(subnetID string) string {
 	}
 	return ""
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:  "microsoft.network",
+		NodeType: core.NodeTypeCloudResource,
+	})
+	registerKind(resourceKind{
+		Types:        []string{"natgateway", "natgateways"},
+		NodeType:     core.NodeTypeNetworkGateway,
+		SpecificType: "AzureNATGateway",
+	})
+	registerKind(resourceKind{
+		Types:        []string{"networkinterface", "networkinterfaces"},
+		NodeType:     core.NodeTypeNetworkInterface,
+		SpecificType: "AzureNetworkInterface",
+		Extract:      (*AzureSource).extractNICMetadata,
+	})
+	registerKind(resourceKind{
+		Types:        []string{"privateendpoint", "privateendpoints"},
+		NodeType:     core.NodeTypePrivateEndpoint,
+		SpecificType: "AzurePrivateEndpoint",
+	})
+	registerKind(resourceKind{
+		Types:        []string{"publicipaddress", "publicipaddresses"},
+		NodeType:     core.NodeTypePublicIP,
+		SpecificType: "AzurePublicIP",
+	})
+	registerKind(resourceKind{
+		Types:        []string{"routetable", "routetables"},
+		NodeType:     core.NodeTypeRouteTable,
+		SpecificType: "AzureRouteTable",
+	})
+	registerKind(resourceKind{
+		Types:        []string{"networksecuritygroup", "networksecuritygroups"},
+		NodeType:     core.NodeTypeSecurityGroup,
+		SpecificType: "AzureNetworkSecurityGroup",
+		Extract:      (*AzureSource).extractNSGMetadata,
+	})
+	registerKind(resourceKind{
+		Types:        []string{"subnet", "subnets"},
+		NodeType:     core.NodeTypeSubnet,
+		SpecificType: "AzureSubnet",
+		Extract:      (*AzureSource).extractSubnetMetadata,
+	})
+	registerKind(resourceKind{
+		Types:        []string{"virtualnetwork", "virtualnetworks"},
+		NodeType:     core.NodeTypeVPC,
+		SpecificType: "AzureVirtualNetwork",
+		Extract:      (*AzureSource).extractVNetMetadata,
+		KeepRawMeta:  true,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// VNets own their subnets and peer with each other.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeVPC, Name: "vnet",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return s.createVNetEdges(nodes, lookup, req)
+		}})
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeVPC, Name: "vnet_peering",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return s.createVNetPeeringEdges(nodes, req)
+		}})
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeSubnet, Name: "subnet",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return s.createSubnetEdges(nodes, lookup, req)
+		}})
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeNetworkInterface, Name: "nic",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return s.createNICEdges(nodes, lookup, req)
+		}})
+	// Network security groups have no outgoing edges: the resources that
+	// reference an NSG are the ones that emit the PROTECTS edge, so an NSG must
+	// not get the default VNet attachment either.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeSecurityGroup, Name: "nsg",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return nil
+		}})
+}
+
+// Per-resource updates (see patch.go). VNets, subnets, network interfaces and
+// network security groups are created or reshaped by ensureSubnetNodes,
+// ensureNICNodes (live) and ensureNSGNodes (live).
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{
+			"AzureVirtualNetwork", string(core.NodeTypeVPC),
+			"AzureSubnet", string(core.NodeTypeSubnet),
+			"AzureNetworkInterface", string(core.NodeTypeNetworkInterface),
+			"AzureNetworkSecurityGroup", string(core.NodeTypeSecurityGroup),
+		},
+		AccountLevel: true,
+	}, nil)
+}

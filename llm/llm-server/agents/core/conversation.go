@@ -288,7 +288,17 @@ func generateCompactResponse(ctx *security.RequestContext, accountId, conversati
 		llms.TextParts(llms.ChatMessageTypeHuman, userPrompt),
 	}
 
-	completion, err := GenerateAndTrackLLMContent(ctx, userId, accountId, conversationId, messageId, "compact_response_agent", true, messageContent, false)
+	// Reformatting a finished answer for Slack — no tools, no reasoning — so it
+	// resolves on the summary tier instead of the conversation's main model.
+	compactCtx := security.NewRequestContext(
+		context.WithValue(ctx.GetContext(), ContextKeyModelTier, ModelTierSummary),
+		ctx.GetSecurityContext(),
+		ctx.GetLogger(),
+		ctx.GetTracer(),
+		ctx.GetMeter(),
+	)
+
+	completion, err := GenerateAndTrackLLMContent(compactCtx, userId, accountId, conversationId, messageId, "compact_response_agent", true, messageContent, false)
 	if err != nil {
 		return "", fmt.Errorf("llm call for compact response generation failed: %w", err)
 	}
@@ -349,6 +359,7 @@ type additionalConversationSessionRequestConfig struct {
 	channelContext        string
 	channelContextRefs    map[string]any
 	replyRef              string
+	skipHistory           bool
 }
 
 type ConversationSessionRequestConfig interface {
@@ -655,8 +666,26 @@ func ConversationSessionRequestWithReplyRef(replyRef string) ConversationSession
 	}
 }
 
-func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgent, userId string, accountId string, sessionId string, query string, configs ...ConversationSessionRequestConfig) (NBAgentResponse, error) {
+type sessionRequestWithoutConversationHistory struct{}
 
+func (h sessionRequestWithoutConversationHistory) apply(c *additionalConversationSessionRequestConfig) {
+	c.skipHistory = true
+}
+
+// ConversationSessionRequestWithoutConversationHistory runs the turn without the
+// conversation's earlier messages or distilled conversation memory, while still
+// saving the turn into that conversation. For automated pipelines that reuse one
+// conversation across independent runs (event analysis per fingerprint), where
+// prior answers must not stand in for fresh investigation.
+func ConversationSessionRequestWithoutConversationHistory() ConversationSessionRequestConfig {
+	return sessionRequestWithoutConversationHistory{}
+}
+
+// resolveSessionRequestConfigs applies the options, then folds the fields that
+// live inside NBQueryConfig into it. The fold runs after every option so
+// WithConfig, which replaces config wholesale, cannot drop them whatever the
+// option order.
+func resolveSessionRequestConfigs(configs ...ConversationSessionRequestConfig) additionalConversationSessionRequestConfig {
 	defaultConfig := additionalConversationSessionRequestConfig{
 		source: ConversationSourceUserInvestigation,
 	}
@@ -670,6 +699,15 @@ func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgen
 	if !defaultConfig.capabilities.IsEmpty() {
 		defaultConfig.config.Capabilities = defaultConfig.capabilities
 	}
+	if defaultConfig.skipHistory {
+		defaultConfig.config.SkipConversationHistory = true
+	}
+	return defaultConfig
+}
+
+func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgent, userId string, accountId string, sessionId string, query string, configs ...ConversationSessionRequestConfig) (NBAgentResponse, error) {
+
+	defaultConfig := resolveSessionRequestConfigs(configs...)
 
 	if defaultConfig.enableQueryRefinement == nil {
 		defaultConfig.enableQueryRefinement = lo.ToPtr(true)
@@ -1250,6 +1288,35 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 		ctx.GetMeter(),
 	)
 
+	// Establish reporting attribution before saving/activating a message, so a
+	// history-read failure cannot strand newly accepted work in IN_PROGRESS.
+	// This also precedes contextualization and agent execution.
+	// The executor's context copies and child agents inherit this same scope.
+	// Include stored context because refinement can resend it independently of
+	// the recent-message window. Security still scans every outbound payload.
+	reportBaseline := ""
+	if !newConversation {
+		reportHistory, err := getExistingHistory(request, ctx)
+		if err != nil {
+			return NBAgentResponse{}, fmt.Errorf("conversation: load history for egress reporting baseline: %w", err)
+		}
+		reportBaseline = messageFormatterToString(reportHistory)
+	}
+	if len(conversation.Context) > 0 && !request.QueryConfig.SkipConversationHistory {
+		contextJSON, err := common.MarshalJson(conversation.Context)
+		if err != nil {
+			return NBAgentResponse{}, fmt.Errorf("conversation: encode egress reporting baseline: %w", err)
+		}
+		reportBaseline += "\n" + string(contextJSON)
+		// Match the executor's human-readable memory too: JSON escapes
+		// multiline values that appear literally in the outbound prompt.
+		var unified LlmUnifiedExtraction
+		if err := common.UnmarshalJson(contextJSON, &unified); err == nil {
+			reportBaseline += "\n" + unified.String()
+		}
+	}
+	ctx.SetContext(egressfilter.WithReportBaseline(ctx.GetContext(), reportBaseline, request.Query))
+
 	historyType := MessageTypeGeneration
 	status := ConversationStatusCompleted
 	if agent.GetName() == RouterAgentName {
@@ -1286,6 +1353,9 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 						if err != nil {
 							ctx.GetLogger().Error("conversation: unable to unmarshal message config from previous message", "error", err, "data", *v.MessageConfig, "id", v.ID)
 						}
+						// Skipping history is a property of the turn that asked for it; a
+						// user's follow-up after an automated re-analysis needs the history.
+						prevConfig.SkipConversationHistory = false
 						request.QueryConfig.MergeFrom(prevConfig)
 						break
 					}
@@ -1460,7 +1530,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	// When ConversationContextEnabled is true, skip query rewriting — the agent LLM resolves
 	// references naturally from the increased history window + summary context.
 	// Also skip if we are resuming an agent (request.AgentId is set) to prevent feedback turns from being rewritten.
-	if !config.Config.ConversationContextEnabled && (conversation.Context != nil) && request.EnableQueryRefinement && messageStatus != ConversationStatusWaiting && request.Query != "" && messageType != MessageTypeFollowup && agent.GetName() != RouterAgentName && agent.GetPlannerType() != AgentPlannerTypeCustom && request.AgentId == "" {
+	if !config.Config.ConversationContextEnabled && (conversation.Context != nil) && !request.QueryConfig.SkipConversationHistory && request.EnableQueryRefinement && messageStatus != ConversationStatusWaiting && request.Query != "" && messageType != MessageTypeFollowup && agent.GetName() != RouterAgentName && agent.GetPlannerType() != AgentPlannerTypeCustom && request.AgentId == "" {
 		contextualizedQuery, err := GetContextManager().ContextualizeQuery(ctx, request, conversation.Context)
 		if err == nil && contextualizedQuery != "" && contextualizedQuery != request.Query {
 			ctx.GetLogger().Info("conversation: query contextualized", "original", request.Query, "contextualized", contextualizedQuery)
@@ -1469,7 +1539,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	}
 
 	// Set the conversation context in the request
-	if len(conversation.Context) > 0 {
+	if len(conversation.Context) > 0 && !request.QueryConfig.SkipConversationHistory {
 		contextJSON, err := common.MarshalJson(conversation.Context)
 		if err != nil {
 			ctx.GetLogger().Warn("conversation: unable to marshal conversation context", "error", err)
@@ -1545,7 +1615,19 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	// After getting the agent response, update the context asynchronously.
 	// Single-shot internal classifiers use a throwaway conversation per call, so
 	// there is nothing to carry forward — skip context_memories_extractions.
-	if len(agentResponse.Response) > 0 && agentResponse.AgentName != RouterAgentName && agentResponse.AgentName != ToolLlm && !isSingleShotClassifier(agent) {
+	// Headless automated pipelines (alert investigations, PR lifecycle bots, workflow
+	// automations, and recommendation generators) also never reuse conversational context.
+	effectiveSource := source
+	if conversation.Source != nil && *conversation.Source != "" {
+		effectiveSource = *conversation.Source
+	} else if effectiveSource == "" {
+		effectiveSource = request.ConversationSource
+	}
+	if len(agentResponse.Response) > 0 &&
+		agentResponse.AgentName != RouterAgentName &&
+		agentResponse.AgentName != ToolLlm &&
+		!isSingleShotClassifier(agent) &&
+		isContextExtractionApplicable(effectiveSource) {
 		updateConversationContextAsync(ctx, request, agentResponseContent, conversation.ID.String(), conversation.Context, agentResponse.AgentName)
 	}
 	conversation, err = GetConversationDao().GetConversation(conversation.ID.String())
@@ -1684,7 +1766,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	}
 
 	// Generate compact response for InstantNotification source (Slack) and Investigation
-	if config.Config.SlackCompactResponse && (source == ConversationSourceInstantNotification || source == ConversationSourceInvestigation) && status == ConversationStatusCompleted && len(agentResponse.Response) > 0 && agentResponse.Response[0] != "" && agentResponse.AgentName != ToolLlm {
+	if config.Config.SlackCompactResponse && (effectiveSource == ConversationSourceInstantNotification || effectiveSource == ConversationSourceInvestigation) && status == ConversationStatusCompleted && len(agentResponse.Response) > 0 && agentResponse.Response[0] != "" && agentResponse.AgentName != ToolLlm {
 		compactResponse, compactErr := generateCompactResponse(ctx, request.AccountId, request.ConversationId, request.MessageId, request.UserId, request.Query, agentResponse.Response[0])
 
 		if compactErr != nil {
@@ -1693,7 +1775,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 			// For Investigation source, preserve the original structured response (used by event_analyzer
 			// for structured field parsing like git_diff, pr_list, etc.) and only save compact to DB.
 			// For Slack/InstantNotification, replace the response with compact version for display.
-			if source != ConversationSourceInvestigation {
+			if effectiveSource != ConversationSourceInvestigation {
 				agentResponse.Response = []string{compactResponse}
 			}
 			// Save compact response to DB asynchronously

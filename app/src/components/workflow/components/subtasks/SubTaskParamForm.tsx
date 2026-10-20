@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Box, Typography } from '@mui/material';
 import { Switch } from '@ui/Switch';
+import apiAccount from '@api1/account';
 import { ds } from 'src/utils/colors';
 import TemplateTextField, { TemplateSuggestion } from '../TemplateTextField';
 import HybridField from '../HybridField';
@@ -23,6 +24,7 @@ import {
   isTemplateString,
   parseJsonExample,
   resolveFieldType,
+  resolveObjectFieldValue,
   type SchemaProperty,
 } from '../../utils/fieldTypeUtils';
 import FieldGuidance from '../FieldGuidance';
@@ -33,7 +35,8 @@ interface SubTaskParamFormProps {
   // Task definition ({ name, input_schema }) for the sub-task's selected type
   taskDefinition: any;
   values: Record<string, any>;
-  onChange: (fieldName: string, value: any) => void;
+  // clearFields: dependent params to drop in the same update (e.g. user_id on provider change)
+  onChange: (fieldName: string, value: any, clearFields?: string[]) => void;
   // De-prefixed error slice for this sub-task's params (plain field-name keys)
   errors: Record<string, string>;
   disabled?: boolean;
@@ -80,6 +83,40 @@ const SubTaskParamForm: React.FC<SubTaskParamFormProps> = ({
   workflowConfigs,
 }) => {
   const [draggingOverField, setDraggingOverField] = useState<string | null>(null);
+  const [dmUserOptions, setDmUserOptions] = useState<{ label: string; value: string }[]>([]);
+  const [dmUserLoading, setDmUserLoading] = useState(false);
+  const isDmTask = taskDefinition?.name === 'notifications.dm';
+  const dmProvider = isDmTask && typeof values?.provider === 'string' ? values.provider : '';
+
+  // DM recipients load for the chosen provider, as in the action sidebar, so
+  // the user picks a person instead of hunting for a raw user ID.
+  useEffect(() => {
+    if (!dmProvider) {
+      setDmUserOptions([]);
+      return;
+    }
+    let cancelled = false;
+    setDmUserLoading(true);
+    apiAccount
+      .getNotificationUserList(dmProvider)
+      .then((res: any) => {
+        if (cancelled) return;
+        const users = (res?.data?.data || []).map((item: any) => ({
+          label: item.display_name || item.real_name || item.name || item.id,
+          value: item.id,
+        }));
+        setDmUserOptions(users);
+      })
+      .catch(() => {
+        if (!cancelled) setDmUserOptions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setDmUserLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dmProvider]);
 
   const inputSchema: Record<string, SchemaProperty> = taskDefinition?.input_schema || {};
 
@@ -148,29 +185,18 @@ const SubTaskParamForm: React.FC<SubTaskParamFormProps> = ({
     const isRequired = isFieldRequired(fieldName, fieldSchema);
     const isObjectType = fieldSchema.type === 'object' || fieldSchema.type === 'map[string]string' || fieldSchema.type === 'map[string]any';
     const rawValue = values[fieldName] ?? fieldSchema.default ?? (isObjectType ? {} : '');
-    // Coerce string values for object-type fields; template strings pass through
-    // so KeyValueHybridField can flip to expression mode (same as the sidebar).
-    let fieldValue = rawValue;
-    if (isObjectType && typeof rawValue === 'string') {
-      if (isTemplateString(rawValue)) {
-        fieldValue = rawValue;
-      } else if (rawValue.trim()) {
-        try {
-          fieldValue = JSON.parse(rawValue);
-        } catch {
-          fieldValue = {};
-        }
-      } else {
-        fieldValue = {};
-      }
-    }
+    // The sub-task form skips the sidebar's resource-name cascade heuristic
+    // (no hasResourceNameField opt-in) — `name` renders as a template field.
+    const fieldType = resolveFieldType(fieldName, fieldSchema);
+    // Coerce string values for object-type fields, except where the editor holds
+    // raw JSON text (same as the sidebar). Unlike the sidebar, nested_schema also
+    // renders in JsonEditor here. See resolveObjectFieldValue.
+    const rendersRawJsonText = fieldType === 'json' || fieldType === 'nested_schema';
+    const fieldValue = isObjectType ? resolveObjectFieldValue(rawValue, rendersRawJsonText) : rawValue;
 
     const error = errors[fieldName] || '';
     const label = fieldSchema.title || formatFieldLabel(fieldName);
     const placeholder = getExamplePlaceholder(fieldName, fieldSchema) || fieldSchema.description || `Enter ${fieldName.replace(/_/g, ' ')}`;
-    // The sub-task form skips the sidebar's resource-name cascade heuristic
-    // (no hasResourceNameField opt-in) — `name` renders as a template field.
-    const fieldType = resolveFieldType(fieldName, fieldSchema);
 
     const labelEl = (
       <Typography sx={LABEL_SX}>
@@ -269,13 +295,45 @@ const SubTaskParamForm: React.FC<SubTaskParamFormProps> = ({
       );
     }
 
-    if (fieldType === 'dropdown') {
-      const options = getDropdownOptionsForField(fieldName, fieldSchema, dropdownData);
+    if (isDmTask && fieldName === 'user_id') {
+      const userPlaceholder = !dmProvider
+        ? 'Select a provider first'
+        : dmUserLoading
+        ? 'Loading users...'
+        : dmUserOptions.length === 0
+        ? 'No users available'
+        : 'Select user';
       return row(
         <HybridField
           fieldName={fieldName}
           value={typeof fieldValue === 'string' ? fieldValue : ''}
           onChange={(newValue: string) => onChange(fieldName, newValue)}
+          placeholder={userPlaceholder}
+          disabled={disabled || !dmProvider}
+          error={error}
+          required={isRequired}
+          options={dmUserOptions}
+          optionsLoading={dmUserLoading}
+          previousTasks={previousTasks}
+          workflowInputs={workflowInputs}
+          workflowConfigs={workflowConfigs}
+          onDrop={disabled ? undefined : (e) => handleDrop(e, fieldName, fieldValue)}
+          onDragOver={disabled ? undefined : (e) => handleDragOver(e, fieldName)}
+          onDragLeave={disabled ? undefined : handleDragLeave}
+          isDropTarget={draggingOverField === fieldName}
+        />
+      );
+    }
+
+    if (fieldType === 'dropdown') {
+      const options = getDropdownOptionsForField(fieldName, fieldSchema, dropdownData);
+      // A DM recipient belongs to one provider — switching provider drops it
+      const clearOnChange = isDmTask && fieldName === 'provider' ? ['user_id'] : undefined;
+      return row(
+        <HybridField
+          fieldName={fieldName}
+          value={typeof fieldValue === 'string' ? fieldValue : ''}
+          onChange={(newValue: string) => onChange(fieldName, newValue, clearOnChange)}
           placeholder={`Select ${fieldName.replace(/_/g, ' ')}`}
           disabled={disabled}
           error={error}

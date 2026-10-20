@@ -4,8 +4,9 @@ import json
 import logging
 import time
 import uuid
-from datetime import timedelta
-from typing import Dict, Any, List
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
 
 from notifications_server.utils.datetime_utils import utc_now
 from asyncio import Lock
@@ -16,14 +17,24 @@ from sqlalchemy import select
 from notifications_server.clients.google_chat_client import GoogleChatClient
 from notifications_server.clients.google_chat_app_client import GoogleChatAppClient
 from notifications_server.clients.ms_teams_client import MsTeamsClient
+from notifications_server.clients.slack_client import SlackClient
 from notifications_server.configs import settings
 
 from notifications_server.models.enums import PlatformTypes
 from notifications_server.schemas.message import SendMessageRequest
 from notifications_server.services.cache import Cache
 from notifications_server.services.response_helpers import success_response, failed_response, system_response
-from notifications_server.services.rules import NotificationRulesService
+from notifications_server.services.rules import (
+    DEFAULT_CHANNELS,
+    DEFAULT_DELIVER,
+    OPTIMIZE_EVENT_BY_MESSAGE_TYPE,
+    OPTIMIZE_SOURCE,
+    NotificationRulesService,
+    rule_sort_key,
+    rule_sources,
+)
 from notifications_server.services import weekly_digest_report
+from notifications_server.services.delivery_split import account_sections, has_recommendations, merged_parameters
 from notifications_server.message_templates.slack.weekly_digest_events import digest_link, digest_verdict
 from notifications_server.services.slack.slack import retriable_slack_api_error, slack_channel_not_found_error
 from notifications_server.message_templates import template_mapping
@@ -33,6 +44,7 @@ from notifications_server.message_templates.slack.finding import (
     get_slack_finding_message,
     get_slack_resolved_finding_reply,
 )
+from notifications_server.message_templates.slack.webhook_sanitize import strip_interactive_slack_elements
 from notifications_server.models.db_base import BaseDB
 from notifications_server.models.models import (
     SentNotifications,
@@ -46,8 +58,10 @@ from notifications_server.services.messaging_installations import (
     ORIGIN_INTEGRATION,
     ORIGIN_LEGACY,
     WEBHOOK_PLATFORM_TYPES,
+    load_google_chat_webhook_installations_async,
     load_integration_installations_async,
     load_ms_teams_webhook_installations_async,
+    load_slack_webhook_installations_async,
     persist_messaging_token_async,
 )
 
@@ -63,17 +77,6 @@ def get_fingerprint(type_, kwargs):
     if type_ == "finding":
         return (parameters.get("finding") or {}).get("fingerprint")
     return parameters.get("fingerprint")
-
-
-def is_suppressed(matched_rules: List[Dict[str, Any]]):
-    return any(rule["suppressed"] for rule in matched_rules)
-
-
-def is_snoozed(matched_rules: List[Dict[str, Any]]):
-    # expires_at is stored as a naive datetime (UTC) in DB and cache,
-    # so compare with naive UTC to avoid TypeError.
-    now = utc_now()
-    return any(rule["expires_at"] and rule["expires_at"] > now for rule in matched_rules)
 
 
 def is_batch_delivery(matched_rules: List[Dict[str, Any]]):
@@ -133,6 +136,114 @@ def normalize_channel(channel):
     return channel
 
 
+@dataclass
+class RuleOutcome:
+    """What the matched rules decide for one message. `response` is set when
+    nothing is delivered (`stopped_by` names the rule that stopped it, if one
+    did); otherwise `targets` are the mapping entries that receive the message,
+    and `use_defaults` says whether platforms no target names still get the
+    installation's default channel."""
+
+    response: Optional[List[Dict[str, Any]]]
+    targets: List[Dict[str, Any]]
+    use_defaults: bool
+    stopped_by: Any = None
+
+
+def resolve_outcome(matched_rules, source=None, event_type=None, honour_batch=True, default_policy=None) -> RuleOutcome:
+    """Every matching rule applies. Any matching suppress rule or active snooze
+    stops the message on every channel; otherwise any matching batch rule queues
+    it (email tasks, which have no digest, pass honour_batch=False); otherwise it
+    goes to the channels of every matching rule. Approval requests are never
+    stopped.
+
+    When no deliver rule matched, the source's default policy decides: each
+    platform's default channel (also when there is no policy), the policy's own
+    channels, or nothing. When deliver rules matched, platforms they do not name
+    get their default channel only under the first of those."""
+    non_suppressible = event_type in NON_SUPPRESSIBLE_EVENT_TYPES
+    now = utc_now()
+
+    def snoozed(entry):
+        return bool(entry["expires_at"]) and entry["expires_at"] > now
+
+    # A suppressed rule with an expiry stops messages until then and does nothing after.
+    matched_rules = [
+        entry for entry in matched_rules if not (entry["suppressed"] and entry["expires_at"] and not snoozed(entry))
+    ]
+
+    if not non_suppressible:
+        suppressing = next((entry for entry in matched_rules if entry["suppressed"]), None)
+        if suppressing is not None:
+            response = system_response("suppressed", "Notification suppressed by notification rule configuration")
+            return RuleOutcome([response], [], False, suppressing["rule_id"])
+        snoozing = next((entry for entry in matched_rules if snoozed(entry)), None)
+        if snoozing is not None:
+            response = system_response("snoozed", f"Notification snoozed until {snoozing['expires_at']}")
+            return RuleOutcome([response], [], False, snoozing["rule_id"])
+
+    # The batch digest is built from the events table, so a queued automation
+    # message would never be delivered.
+    if honour_batch and not non_suppressible and source != AUTOMATION_SOURCE and is_batch_delivery(matched_rules):
+        return RuleOutcome([system_response("queued", "Notification queued for batch delivery")], [], False)
+
+    delivering = [
+        entry
+        for entry in matched_rules
+        if not entry["suppressed"]
+        and not snoozed(entry)
+        and not (honour_batch and entry.get("delivery_mode") == "batch")
+    ]
+    targets = [entry for entry in delivering if entry.get("platform")]
+    policy_action = (default_policy or {}).get("action", DEFAULT_DELIVER)
+    if delivering:
+        return RuleOutcome(None, targets, policy_action == DEFAULT_DELIVER)
+    if policy_action == DEFAULT_DELIVER or (non_suppressible and policy_action != DEFAULT_CHANNELS):
+        return RuleOutcome(None, [], True)
+    if policy_action == DEFAULT_CHANNELS:
+        default_targets = [
+            {"rule_id": None, "platform": mapping["platform"], "channels": mapping["channels"]}
+            for mapping in default_policy.get("mappings") or []
+        ]
+        return RuleOutcome(None, default_targets, False)
+    return RuleOutcome(
+        [system_response("suppressed", "No notification rule matched and the default for this source is to drop")],
+        [],
+        False,
+    )
+
+
+def _distinct_rule_channels(matched_rules, platform):
+    channels = []
+    seen = set()
+    for rule in matched_rules:
+        if rule.get("platform") != platform or not rule.get("channels"):
+            continue
+        key = json.dumps(rule["channels"], sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            channels.append(rule["channels"])
+    return channels
+
+
+async def send_in_rounds(installed_platforms, send):
+    """Deliver to every target channel. Senders read one channel per installation
+    (`to_channel`), so the first channel of each platform goes in one call and
+    each further channel in a later call through the same installation object."""
+    responses = list(await send(installed_platforms) or [])
+    round_index = 0
+    while True:
+        pending = [
+            ip for ip in installed_platforms if round_index < len(getattr(ip, "additional_channels", None) or [])
+        ]
+        if not pending:
+            return responses
+        for ip in pending:
+            ip.to_channel = ip.additional_channels[round_index]
+        responses.extend(await send(pending) or [])
+        round_index += 1
+
+
 # ----------------------------- Rule Matcher -----------------------------
 
 
@@ -147,17 +258,92 @@ def _ids_match(rule_id, payload_id):
 
 
 # Notification rules are keyed by category — the tabs in the UI: "troubleshoot",
-# "optimize", "slo", "cloud" (plus "auto_pilot"). A finding's `source`, however,
-# is the raw *ingestion* source (e.g. "prometheus", "anomaly", "ebpf", "traces",
-# "grafana", "newrelic"). Those never equal "troubleshoot", so
-# matching them verbatim against rule.source sends every troubleshoot finding to
-# the default channel (#28130). Map any source that is not itself a rule category
-# to "troubleshoot"; "cloud"/"optimize"/"slo" findings keep their category.
-RULE_SOURCE_CATEGORIES = {"troubleshoot", "optimize", "slo", "cloud", "auto_pilot"}
+# "optimize", "slo", "cloud". A finding's `source`, however, is the raw
+# *ingestion* source (e.g. "prometheus", "anomaly", "ebpf", "traces", "grafana",
+# "newrelic", or "automation" for workflow-stored events). Those never equal
+# "troubleshoot", so matching them verbatim against rule.source sends every
+# troubleshoot finding to the default channel (#28130). Map any source that is
+# not itself a rule category to "troubleshoot"; "cloud"/"optimize"/"slo" findings
+# keep their category. "automation" is deliberately absent: automation *rules*
+# select non-finding automation messages by event type, while automation
+# *findings* stay troubleshoot findings.
+RULE_SOURCE_CATEGORIES = {"troubleshoot", "optimize", "slo", "cloud"}
+
+# Non-finding messages from runbook-server. They carry a top-level `event_type`
+# and `parameters.account_id`; rules select them by event type.
+AUTOMATION_SOURCE = "automation"
+
+# An approval prompt suspends a workflow until a person answers, so no rule may
+# silence it — a dropped prompt is a run that never finishes.
+NON_SUPPRESSIBLE_EVENT_TYPES = {"automation.approval.requested"}
+
+
+def _scope_matches(rule, account_id):
+    """Whether a message from account_id is in the rule's scope. A rule loaded
+    from a database that predates scope_mode still uses account_id, which is the
+    truth there; otherwise account_id is never read. Unknown scope matches nothing."""
+    if "scope_mode" in getattr(rule, "missing_columns", frozenset()):
+        return _ids_match(rule.account_id, account_id)
+    scope_mode = getattr(rule, "scope_mode", None)
+    if scope_mode == "all":
+        return True
+    if scope_mode == "accounts":
+        account_ids = getattr(rule, "account_ids", None)
+        return bool(account_ids) and account_id is not None and str(account_id) in account_ids
+    return False
+
+
+_EXCEPTION_FIELDS = {
+    "account_ids": "account_id",
+    "namespaces": "namespace",
+    "workloads": "workload",
+    "aggregation_keys": "aggregation_key",
+}
+
+
+def _excluded(rule, account_id, namespace, workload, aggregation_key):
+    """Whether the rule's exceptions leave this finding out: some group lists the
+    finding's value under every key the group has. Saves store exceptions as
+    lists of strings; anything else is ignored so one bad row cannot break
+    matching for the whole tenant."""
+    exceptions = getattr(rule, "exceptions", None)
+    if not isinstance(exceptions, list):
+        return False
+    values = {
+        "account_id": account_id,
+        "namespace": namespace,
+        "workload": workload,
+        "aggregation_key": aggregation_key,
+    }
+    for group in exceptions:
+        if not isinstance(group, dict) or not group:
+            continue
+        for key, listed in group.items():
+            value = values.get(_EXCEPTION_FIELDS.get(key))
+            if value is None or not isinstance(listed, list) or str(value) not in listed:
+                break
+        else:
+            return True
+    return False
 
 
 def _finding_rule_source(source):
     return source if source in RULE_SOURCE_CATEGORIES else "troubleshoot"
+
+
+def _event_type_matches(rule, source, event_type):
+    """A rule for automation alone must name the event types it covers; one with
+    none matches nothing (fail closed). A rule for optimize alone may name event
+    types; none covers them all. A rule over several types covers every event of
+    each. Other sources ignore event types."""
+    if source not in (AUTOMATION_SOURCE, OPTIMIZE_SOURCE) or rule_sources(rule) != (source,):
+        return True
+    event_types = getattr(rule, "event_types", None)
+    if source == OPTIMIZE_SOURCE and not event_types:
+        return True
+    if not event_types or not event_type:
+        return False
+    return event_type in event_types
 
 
 class NotificationRuleMatcher:
@@ -180,7 +366,7 @@ class NotificationRuleMatcher:
                 finding_params.get("aggregation_key"),
             )
 
-        if source in {"auto_pilot", "slo", "optimize"}:
+        if source in {AUTOMATION_SOURCE, "slo", "optimize"}:
             return (
                 source,
                 params.get("account_id"),
@@ -207,25 +393,33 @@ class NotificationRuleMatcher:
         finding_priority = None
         if type_ == "finding":
             finding_priority = ((kwargs.get("parameters") or {}).get("finding") or {}).get("priority")
+        event_type = kwargs.get("event_type")
+        if source == OPTIMIZE_SOURCE:
+            event_type = OPTIMIZE_EVENT_BY_MESSAGE_TYPE.get(type_)
 
         all_rules = await self.rules_service.get_notification_rules(tenant_id)
         if not all_rules:
             LOG.debug("No rules found for tenant %s (source=%s), using defaults", tenant_id, source)
             return [], source
 
-        truly_matched_rules = [
-            rule
-            for rule in all_rules
-            if (
-                rule.source == source
-                and _ids_match(rule.account_id, account_id)
-                and (rule.namespace == namespace or rule.namespace is None)
-                and (rule.workload == workload or rule.workload is None)
-                and (rule.aggregation_key == aggregation_key or rule.aggregation_key is None)
-                and (type_ != "finding" or _severity_matches(rule.severity, finding_priority))
-                and rule.is_active
-            )
-        ]
+        truly_matched_rules = sorted(
+            (
+                rule
+                for rule in all_rules
+                if (
+                    source in rule_sources(rule)
+                    and _scope_matches(rule, account_id)
+                    and (rule.namespace == namespace or rule.namespace is None)
+                    and (rule.workload == workload or rule.workload is None)
+                    and (rule.aggregation_key == aggregation_key or rule.aggregation_key is None)
+                    and (type_ != "finding" or _severity_matches(rule.severity, finding_priority))
+                    and _event_type_matches(rule, source, event_type)
+                    and rule.is_active
+                    and not _excluded(rule, account_id, namespace, workload, aggregation_key)
+                )
+            ),
+            key=rule_sort_key,
+        )
 
         if not truly_matched_rules:
             LOG.debug(
@@ -536,6 +730,14 @@ class DiscordSender(BaseSender):
 # ----------------------------- Grouped Message Handler -----------------------------
 
 
+def grouped_unit(index, group_type, item):
+    """(key, message type, payload) to match one queued alert of a group. An
+    anomaly is queued as its finding, so it is matched as the finding it is."""
+    if group_type == "anomaly":
+        return index, "finding", {"source": "anomaly", "parameters": {"finding": item.get("parameters") or {}}}
+    return index, group_type, item
+
+
 class GroupedMessageHandler:
     def __init__(self, cache: Cache, message_service: "MessageService"):
         self.cache = cache
@@ -611,17 +813,6 @@ class GroupedMessageHandler:
                 batch = [json.loads(item) for item in raw_list]
 
                 async with BaseDB.async_session(self.message_service.engine)() as session:
-                    first_msg = batch[0]
-                    matched_rules, source = await self.message_service.rule_matcher.match_notification_rules(
-                        session, tenant_id, orig_type, first_msg
-                    )
-
-                    if matched_rules and (
-                        is_suppressed(matched_rules) or is_snoozed(matched_rules) or is_batch_delivery(matched_rules)
-                    ):
-                        LOG.debug("Skipping flush for %s due to suppression or batch rule", key)
-                        return {"status": "ok"}
-
                     installed_platforms = await self.message_service.get_installed_platforms_from_cache_or_db(
                         session, tenant_id
                     )
@@ -629,21 +820,29 @@ class GroupedMessageHandler:
                         LOG.warning("No messaging platform installation for tenant %s", tenant_id)
                         return {"status": "ok"}
 
-                    self.message_service.get_channels_from_request_or_defaults(
-                        installed_platforms, matched_rules, source, first_msg
-                    )
-                    await self.message_service._apply_gchat_default_fallback(
-                        session, tenant_id, installed_platforms, first_msg
-                    )
-                    params = {"events": [p["parameters"] for p in batch]}
-
-                    platform_responses = await self.message_service.send_template_notification(
+                    # Each alert is matched on its own, so every channel gets only
+                    # the alerts routed to it; anomalies match as troubleshooting findings.
+                    routes = await self.message_service.route_units(
                         session,
                         tenant_id,
-                        {"parameters": params},
-                        f"grouped_{orig_type}",
+                        [grouped_unit(index, orig_type, item) for index, item in enumerate(batch)],
                         installed_platforms,
                     )
+                    if not routes:
+                        LOG.debug("Nothing to send for %s: every alert was stopped by the rules", key)
+                        await asyncio.to_thread(redis.delete, key)
+                        return {"status": "ok"}
+
+                    platform_responses = []
+                    for ip, channel, indexes in routes:
+                        self.message_service.point_at(installed_platforms, ip, channel)
+                        params = {"events": [batch[index]["parameters"] for index in indexes]}
+                        platform_responses.extend(
+                            await self.message_service.send_template_notification(
+                                session, tenant_id, {"parameters": params}, f"grouped_{orig_type}", [ip]
+                            )
+                            or []
+                        )
 
                     if platform_responses and all(
                         resp.get("status") == "success" for resp in platform_responses if isinstance(resp, dict)
@@ -700,6 +899,22 @@ class MessageService:
 
         try:
             if thread:
+                # Threaded replies bypass rules, except automation messages: a
+                # rule that silences task chatter has to cover threaded posts too.
+                if source == AUTOMATION_SOURCE:
+                    async with BaseDB.async_session(self.engine)() as session:
+                        matched_rules, _ = await self.rule_matcher.match_notification_rules(
+                            session, tenant_id, type_, payload
+                        )
+                    default_policy = await self.rule_matcher.rules_service.get_default_policy(tenant_id, source)
+                    outcome = resolve_outcome(
+                        matched_rules,
+                        source=source,
+                        event_type=payload.get("event_type"),
+                        default_policy=default_policy,
+                    )
+                    if outcome.response is not None:
+                        return outcome.response
                 return await self.send_threaded_reply(tenant_id, thread, parameters)
 
             if type_ == "finding_resolved":
@@ -708,6 +923,10 @@ class MessageService:
             group_result = await self._maybe_handle_grouped_message(source, parameters, tenant_id, payload)
             if group_result is not None:
                 return group_result
+
+            sections = account_sections(type_, parameters)
+            if sections:
+                return await self.send_rollup(tenant_id, type_, payload, sections)
 
             async with BaseDB.async_session(self.engine)() as session:
                 matched_rules, source = await self.rule_matcher.match_notification_rules(
@@ -730,30 +949,29 @@ class MessageService:
                             )
                         ]
 
-                rule_result = self._maybe_return_rule_effect(matched_rules, tenant_id)
-                if rule_result is not None:
-                    return rule_result
+                default_policy = await self.rule_matcher.rules_service.get_default_policy(tenant_id, source)
+                outcome = resolve_outcome(
+                    matched_rules, source=source, event_type=payload.get("event_type"), default_policy=default_policy
+                )
+                if outcome.response is not None:
+                    return outcome.response
 
                 installed_platforms = await self.get_installed_platforms_from_cache_or_db(session, tenant_id)
                 if not installed_platforms:
                     return [failed_response("", reason="No messaging platform installation found for this tenant")]
 
-                self.get_channels_from_request_or_defaults(installed_platforms, matched_rules, source, payload)
+                self.get_channels_from_request_or_defaults(
+                    installed_platforms, outcome.targets, source, payload, use_defaults=outcome.use_defaults
+                )
                 await self._apply_gchat_default_fallback(session, tenant_id, installed_platforms, payload)
 
                 fingerprint = get_fingerprint(type_, payload)
-                platform_responses = await self.trigger_notification(
-                    session,
-                    fingerprint,
+                return await send_in_rounds(
                     installed_platforms,
-                    payload,
-                    parameters,
-                    [],
-                    tenant_id,
-                    type_,
+                    lambda platforms: self.trigger_notification(
+                        session, fingerprint, platforms, payload, parameters, [], tenant_id, type_
+                    ),
                 )
-
-                return platform_responses
 
         except Exception as exc:
             parameters_copy = dict(parameters)
@@ -777,25 +995,6 @@ class MessageService:
                 "parameters": finding,
             }
             return await self.group_handler.enqueue(anomaly)
-
-        return None
-
-    @staticmethod
-    def _maybe_return_rule_effect(matched_rules, tenant_id):
-        if not matched_rules:
-            return None
-
-        if is_suppressed(matched_rules):
-            return [system_response("suppressed", "Notification suppressed by notification rule configuration")]
-
-        if is_snoozed(matched_rules):
-            snooze_rule = next((r for r in matched_rules if r.get("expires_at")), None)
-            expires_at = snooze_rule.get("expires_at") if snooze_rule else None
-            reason = f"Notification snoozed until {expires_at}" if expires_at else "Notification snoozed"
-            return [system_response("snoozed", reason)]
-
-        if is_batch_delivery(matched_rules):
-            return [system_response("queued", "Notification queued for batch delivery")]
 
         return None
 
@@ -867,17 +1066,83 @@ class MessageService:
         # in get_channels_from_request_or_defaults (never a tenant default).
         if requested is None or requested in WEBHOOK_PLATFORM_TYPES:
             integration_installs += await load_ms_teams_webhook_installations_async(session, tenant_id)
+            integration_installs += await load_slack_webhook_installations_async(session, tenant_id)
+            integration_installs += await load_google_chat_webhook_installations_async(session, tenant_id)
         if not integration_installs:
             return installs
         overridden = {ip.platform for ip in integration_installs}
         return [ip for ip in installs if ip.platform not in overridden] + integration_installs
 
+    async def route_units(self, session, tenant_id, units, installed_platforms):
+        """Match each unit — (key, message type, payload) for one account or one
+        alert — on its own and group the keys by the channel they go to. Returns
+        [(installation, channel, [keys])]; stopped units go nowhere."""
+        channels = {}
+        for key, type_, payload in units:
+            matched_rules, source = await self.rule_matcher.match_notification_rules(session, tenant_id, type_, payload)
+            default_policy = await self.rule_matcher.rules_service.get_default_policy(tenant_id, source)
+            outcome = resolve_outcome(
+                matched_rules, source=source, event_type=payload.get("event_type"), default_policy=default_policy
+            )
+            if outcome.response is not None:
+                continue
+            self.get_channels_from_request_or_defaults(
+                installed_platforms, outcome.targets, source, payload, use_defaults=outcome.use_defaults
+            )
+            await self._apply_gchat_default_fallback(session, tenant_id, installed_platforms, payload)
+            for ip in installed_platforms:
+                for channel in [ip.to_channel] + list(getattr(ip, "additional_channels", None) or []):
+                    if not channel:
+                        continue
+                    channel_key = (str(ip.id), ip.platform, json.dumps(channel, sort_keys=True, default=str))
+                    channels.setdefault(channel_key, (ip, channel, []))[2].append(key)
+        return list(channels.values())
+
     @staticmethod
-    def get_channels_from_request_or_defaults(installed_platforms, matched_rules, source, kwargs):
+    def point_at(installed_platforms, ip, channel):
+        """Aim delivery at one channel of one installation only."""
+        for other in installed_platforms:
+            other.to_channel = None
+            other.additional_channels = []
+        ip.to_channel = channel
+
+    async def send_rollup(self, tenant_id, type_, payload, sections):
+        """Send a message covering several accounts: one message per channel, each
+        with only the accounts routed to that channel."""
+        parameters = payload.get("parameters") or {}
+        unit = {key: payload[key] for key in ("source", "type", "channels") if payload.get(key)}
+        units = [(account_id, type_, {**unit, "parameters": {"account_id": account_id}}) for account_id in sections]
+        async with BaseDB.async_session(self.engine)() as session:
+            installed_platforms = await self.get_installed_platforms_from_cache_or_db(session, tenant_id)
+            if not installed_platforms:
+                return [failed_response("", reason="No messaging platform installation found for this tenant")]
+            routes = await self.route_units(session, tenant_id, units, installed_platforms)
+            if not routes:
+                return [system_response("suppressed", "Every account in this message was left out by the rules")]
+            routes = [route for route in routes if has_recommendations(parameters, route[2])]
+            if not routes:
+                return [system_response("dropped", "No account routed to a channel has anything to send")]
+            responses = []
+            for ip, channel, account_ids in routes:
+                self.point_at(installed_platforms, ip, channel)
+                responses.extend(
+                    await self.send_template_notification(
+                        session, tenant_id, {"parameters": merged_parameters(parameters, account_ids)}, type_, [ip]
+                    )
+                    or []
+                )
+            return responses
+
+    @staticmethod
+    def get_channels_from_request_or_defaults(installed_platforms, matched_rules, source, kwargs, use_defaults=True):
+        """Set each installation's target channel(s) from the rules that receive
+        the message. A platform no rule names gets its default channel only when
+        use_defaults; further channels on one platform go in additional_channels."""
         all_channels = kwargs.get("channels", {})
 
         for ip in installed_platforms:
             platform = ip.platform
+            ip.additional_channels = []
 
             # Webhooks route only to the target a rule names by id in its channels
             # JSON; no rule -> to_channel stays None -> skipped (no tenant default).
@@ -907,32 +1172,26 @@ class MessageService:
                 continue
 
             if to_channel is not None:
-                ip.to_channel = MessageService.get_payload_channel(ip, matched_rules, platform, to_channel)
-            else:
-                rule_channel = next(
-                    (
-                        rule["channels"]
-                        for rule in matched_rules
-                        if rule["platform"] == platform and rule.get("channels")
-                    ),
-                    None,
+                ip.to_channel = MessageService.get_payload_channel(
+                    ip, matched_rules, platform, to_channel, use_defaults
                 )
-                if rule_channel is not None:
-                    ip.to_channel = rule_channel
+            else:
+                rule_channels = _distinct_rule_channels(matched_rules, platform)
+                if rule_channels:
+                    ip.to_channel = rule_channels[0]
+                    ip.additional_channels = rule_channels[1:]
                 else:
-                    ip.to_channel = ip.channels
+                    ip.to_channel = ip.channels if use_defaults else None
 
     @staticmethod
-    def get_payload_channel(ip, matched_rules, platform, to_channel):
+    def get_payload_channel(ip, matched_rules, platform, to_channel, use_defaults=True):
         if to_channel:
             return to_channel
 
-        to_channel = next(
-            (rule["channels"] for rule in matched_rules if rule["platform"] == platform and rule.get("channels")),
-            ip.channels,
-        )
-
-        return to_channel
+        rule_channels = _distinct_rule_channels(matched_rules, platform)
+        if rule_channels:
+            return rule_channels[0]
+        return ip.channels if use_defaults else None
 
     @staticmethod
     def _normalize_teams_channels(ip):
@@ -976,7 +1235,9 @@ class MessageService:
             PlatformTypes.SLACK.value: self._send_finding_to_slack,
             PlatformTypes.MS_TEAMS.value: self._send_finding_to_teams,
             PlatformTypes.MS_TEAMS_WEBHOOK.value: self._send_finding_to_teams_webhook,
+            PlatformTypes.SLACK_WEBHOOK.value: self._send_finding_to_slack_webhook,
             PlatformTypes.GOOGLE_CHAT.value: self._send_finding_to_gchat,
+            PlatformTypes.GOOGLE_CHAT_WEBHOOK.value: self._send_finding_to_gchat_webhook,
             PlatformTypes.DISCORD.value: self._send_finding_to_discord,
         }.get(platform)
 
@@ -1146,6 +1407,31 @@ class MessageService:
 
         return success_response("ms_teams_webhook", channel_id=str(ip.id)), None
 
+    async def _send_finding_to_slack_webhook(self, session, tenant_id, ip, finding, _):
+        """POST a finding card to ip.webhook_url. Reuses the slack finding
+        template, minus anything needing the app's interactivity endpoint (see
+        strip_interactive_slack_elements) - webhooks don't thread, so no
+        sent_notification row."""
+        if not getattr(ip, "webhook_url", None):
+            return None, None
+
+        message, output_blocks, attachments = get_slack_finding_message(self.slack_app, ip, finding)
+        payload = strip_interactive_slack_elements(
+            {"text": message or None, "blocks": output_blocks or None, "attachments": attachments or None}
+        )
+        payload = {key: value for key, value in payload.items() if value}
+
+        response = await asyncio.to_thread(
+            SlackClient.post_to_slack_webhook,
+            ip.webhook_url,
+            payload,
+            tenant_id,
+        )
+        if not (response is not None and 200 <= response.status_code < 300):
+            return None, None
+
+        return success_response("slack_webhook", channel_id=str(ip.id)), None
+
     @staticmethod
     async def _resolve_default_gchat_space(session, tenant_id):
         """Tenant's default Google Chat space (single binding = implicit default; else
@@ -1163,12 +1449,16 @@ class MessageService:
         if len(bindings) == 1:
             return bindings[0].name
         by_id = {binding.id: binding.name for binding in bindings}
+        # Deterministic pick if the single-default invariant is ever violated
+        # (e.g. a partial set-default write left two rows flagged).
         cfg = await session.execute(
-            select(IntegrationConfigValue).where(
+            select(IntegrationConfigValue)
+            .where(
                 IntegrationConfigValue.integration_id.in_(list(by_id.keys())),
                 IntegrationConfigValue.name == "is_default",
                 IntegrationConfigValue.value == "true",
             )
+            .order_by(IntegrationConfigValue.integration_id)
         )
         row = cfg.scalars().first()
         return by_id.get(row.integration_id) if row else None
@@ -1220,6 +1510,24 @@ class MessageService:
             ),
             None,
         )
+
+    async def _send_finding_to_gchat_webhook(self, session, tenant_id, ip, finding, _):
+        """POST a finding card to ip.webhook_url. Reuses the plain-text/markdown
+        finding template (no interactive elements exist in it) - webhooks don't
+        thread, so no sent_notification row."""
+        if not getattr(ip, "webhook_url", None):
+            return None, None
+
+        response = await asyncio.to_thread(
+            GoogleChatClient.post_to_google_chat_webhook,
+            ip.webhook_url,
+            get_markdown_message_template(finding),
+            tenant_id,
+        )
+        if not (response is not None and 200 <= response.status_code < 300):
+            return None, None
+
+        return success_response("google_chat_webhook", channel_id=str(ip.id)), None
 
     async def _send_finding_to_discord(self, session, tenant_id, ip, finding, fingerprint):
         token = await self.discord_sender.acquire_discord_access_token(session, ip)
@@ -1300,10 +1608,16 @@ class MessageService:
                 if not ip.to_channel:
                     continue
 
-                # Webhooks reuse the ms_teams templates (only the transport differs).
-                template_key = (
-                    PlatformTypes.MS_TEAMS.value if ip.platform == PlatformTypes.MS_TEAMS_WEBHOOK.value else ip.platform
-                )
+                # Webhooks reuse the app-install templates (only the transport, and for
+                # Slack the interactivity, differ).
+                if ip.platform == PlatformTypes.MS_TEAMS_WEBHOOK.value:
+                    template_key = PlatformTypes.MS_TEAMS.value
+                elif ip.platform == PlatformTypes.SLACK_WEBHOOK.value:
+                    template_key = PlatformTypes.SLACK.value
+                elif ip.platform == PlatformTypes.GOOGLE_CHAT_WEBHOOK.value:
+                    template_key = PlatformTypes.GOOGLE_CHAT.value
+                else:
+                    template_key = ip.platform
                 template_func = template_mapping[notification_type].get(template_key)
                 if not template_func:
                     LOG.warning(
@@ -1334,10 +1648,14 @@ class MessageService:
                 return await self.send_teams_template_notification(ip, template_func, param_value, session, tenant)
             case PlatformTypes.MS_TEAMS_WEBHOOK.value:
                 return await self.send_teams_webhook_template_notification(ip, template_func, param_value, tenant)
+            case PlatformTypes.SLACK_WEBHOOK.value:
+                return await self.send_slack_webhook_template_notification(ip, template_func, param_value, tenant)
             case PlatformTypes.GOOGLE_CHAT.value:
                 return await self.send_google_chat_template_notification(
                     ip, template_func, param_value, session, tenant
                 )
+            case PlatformTypes.GOOGLE_CHAT_WEBHOOK.value:
+                return await self.send_google_chat_webhook_template_notification(ip, template_func, param_value, tenant)
             case PlatformTypes.DISCORD.value:
                 return await self.send_discord_template_notification(ip, template_func, param_value, session, tenant)
             case _:
@@ -1465,6 +1783,23 @@ class MessageService:
         reason = response.text[:512] if response is not None else "Unable to send teams webhook notification"
         return failed_response("ms_teams_webhook", reason=reason)
 
+    async def send_slack_webhook_template_notification(self, ip, template_func, param_value, tenant):
+        """Template send via webhook: same slack template, minus interactive
+        elements the webhook has no app behind to service, POSTed to
+        ip.webhook_url."""
+        if not getattr(ip, "webhook_url", None):
+            return failed_response("slack_webhook", reason="Webhook target has no URL")
+
+        payload = strip_interactive_slack_elements(template_func(param_value))
+
+        response = await asyncio.to_thread(SlackClient.post_to_slack_webhook, ip.webhook_url, payload, tenant)
+
+        if response is not None and 200 <= response.status_code < 300:
+            return success_response("slack_webhook", channel_id=str(ip.id))
+
+        reason = response.text[:512] if response is not None else "Unable to send slack webhook notification"
+        return failed_response("slack_webhook", reason=reason)
+
     async def send_google_chat_template_notification(self, ip, template_func, param_value, session, tenant_id):
         if not GoogleChatAppClient.is_enabled():
             return failed_response("google_chat", reason="Google Chat service account is not configured")
@@ -1488,6 +1823,22 @@ class MessageService:
             reason=result.get("reason"),
             channel_id=result.get("channel_id"),
         )
+
+    async def send_google_chat_webhook_template_notification(self, ip, template_func, param_value, tenant):
+        """Template send via webhook: same google_chat template, POSTed to
+        ip.webhook_url."""
+        if not getattr(ip, "webhook_url", None):
+            return failed_response("google_chat_webhook", reason="Webhook target has no URL")
+
+        response = await asyncio.to_thread(
+            GoogleChatClient.post_to_google_chat_webhook, ip.webhook_url, template_func(param_value), tenant
+        )
+
+        if response is not None and 200 <= response.status_code < 300:
+            return success_response("google_chat_webhook", channel_id=str(ip.id))
+
+        reason = response.text[:512] if response is not None else "Unable to send google chat webhook notification"
+        return failed_response("google_chat_webhook", reason=reason)
 
     async def send_discord_template_notification(self, ip, template_func, param_value, session, tenant):
         token = await self.discord_sender.acquire_discord_access_token(session, ip)

@@ -58,6 +58,8 @@ export interface RightSizingSummary {
   direction: RightSizingDirection;
   /** Primary container change, e.g. "CPU 20m → 10m · Mem 100 Mi → 68 Mi". */
   changeText: string;
+  /** Which resources the primary container actually changes, in table order. */
+  changedResources: ('cpu' | 'memory')[];
   /** Freed capacity across containers, e.g. "10m vCPU & 32 Mi" (reductions only). */
   reclaimText: string;
   /** Compact usage evidence (primary container) for the strip under "why". */
@@ -191,11 +193,14 @@ export function summarizeRightSizing(recData: any): RightSizingSummary | null {
 
   // Only name a resource in the verdict if it actually changes (or is being set).
   const changeParts: string[] = [];
+  const changedResources: ('cpu' | 'memory')[] = [];
   if (cpuRec != null && (cpuCur == null || cpuCur !== cpuRec)) {
     changeParts.push(`CPU ${cpuCur != null ? formatCpuShort(cpuCur) : 'unset'} → ${formatCpuShort(cpuRec)}`);
+    changedResources.push('cpu');
   }
   if (memRec != null && (memCur == null || memCur !== memRec)) {
     changeParts.push(`Mem ${memCur != null ? formatMemShort(memCur) : 'unset'} → ${formatMemShort(memRec)}`);
+    changedResources.push('memory');
   }
 
   const reclaimBits: string[] = [];
@@ -242,6 +247,7 @@ export function summarizeRightSizing(recData: any): RightSizingSummary | null {
     primary: primary.containerName,
     direction,
     changeText: changeParts.join(' · '),
+    changedResources,
     reclaimText: reclaimBits.join(' & '),
     evidence,
     observedWindow,

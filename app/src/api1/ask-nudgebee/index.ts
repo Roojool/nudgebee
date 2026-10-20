@@ -324,11 +324,11 @@ export function createConversationFetcher(): ConversationFetcher {
 }
 
 const api = {
-  async askNudgebeeAiGeneratePrometheusQuery(data: GenerateQueryRequest) {
+  async askNudgebeeAiGenerateMetricsQuery(data: GenerateQueryRequest) {
     if (data.account_id === 'demo') return null;
-    const ASK_AI_GENERATE_PROMETHEUS_QUERY = `
-        mutation AskNudgebeeAiGeneratePrometheusQuery {
-          ai_generate_prometheus_query(request: __REQUEST__) {
+    const ASK_AI_GENERATE_METRICS_QUERY = `
+        mutation AskNudgebeeAiGenerateMetricsQuery {
+          ai_generate_metrics_query(request: __REQUEST__) {
             data {
               agent_step_response
               response
@@ -344,9 +344,12 @@ const api = {
     query.account_id = data.account_id;
     query.query = data.query;
     query.async = true;
+    // Only meaningful when the account's metrics provider is Elasticsearch, where the
+    // generator resolves the query against this index instead of the account default.
+    if (data.index) query.index = data.index;
     const response = await queryGraphQL(
-      ASK_AI_GENERATE_PROMETHEUS_QUERY.replace('__REQUEST__', gqlStringify(query)),
-      'AskNudgebeeAiGeneratePrometheusQuery',
+      ASK_AI_GENERATE_METRICS_QUERY.replace('__REQUEST__', gqlStringify(query)),
+      'AskNudgebeeAiGenerateMetricsQuery',
       {}
     );
     return response;
@@ -563,6 +566,7 @@ const api = {
                 created_at
                 source
                 title
+                account_id
                 user_display_name
                 user_username
                 for_status
@@ -573,7 +577,7 @@ const api = {
         `;
 
     const where: any = {};
-    where.account_id = { _eq: data.account_id };
+    where.account_id = Array.isArray(data.account_id) ? { _in: data.account_id } : { _eq: data.account_id };
     if (data.latestLastRecordedAt) {
       where.updated_at = { _gt: data.latestLastRecordedAt };
     }
@@ -627,6 +631,7 @@ const api = {
           created_at: row.created_at,
           source: row.source,
           title: row.title,
+          account_id: row.account_id,
           user: { display_name: row.user_display_name, username: row.user_username },
           for_status: forStatus ? [forStatus] : [],
           llm_conversation_saveds: row.is_saved ? [{ conversation_id: row.id }] : [],
@@ -1990,6 +1995,7 @@ const api = {
               id
               status
               source_kind
+              watch_target
               predicate_kind
               predicate_expr
               predicate_negate

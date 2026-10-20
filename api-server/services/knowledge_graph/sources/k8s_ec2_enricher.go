@@ -94,7 +94,7 @@ func (e *K8sEC2Enricher) EnrichCrossSources(
 			},
 			tenantID,
 			n.CloudAccountID,
-			"k8s_ec2_enricher",
+			e.GetName(),
 		)
 		newEdges = append(newEdges, edge)
 

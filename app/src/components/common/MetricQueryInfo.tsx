@@ -60,7 +60,7 @@ const MetricQueryInfo = ({ queries, labelMap }: MetricQueryInfoProps) => {
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[3], p: ds.space[1] }}>
       {entries.map(([key, query]) => (
         <Box key={key}>
-          <Typography sx={{ fontSize: ds.text.caption, fontWeight: 600, color: ds.brand[500], mb: ds.space[1] }}>
+          <Typography sx={{ fontSize: ds.text.caption, fontWeight: ds.weight.semibold, color: ds.brand[500], mb: ds.space[1] }}>
             {labelMap?.[key] || humanizeKey(key)}
           </Typography>
           <Box

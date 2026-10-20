@@ -3,11 +3,13 @@
 log-driven scenarios. See docs/code-analysis-eval-spec.md for the full
 contract; README.md for setup and usage.
 
-Three scenario types, dispatched by each scenario.yaml's `type` field
+Four scenario types, dispatched by each scenario.yaml's `type` field
 (default "event" for backward compatibility with the original three):
-  event       — alert injection -> diagnosis -> optional code fix
-  explore     — direct, read-only code_analyzer query, no alert involved
-  pr_followup — harness opens a real PR, drives PRFollowupAgent, tears down
+  event           — alert injection -> diagnosis -> optional code fix
+  explore         — direct, read-only code_analyzer query, no alert involved
+  pr_followup     — harness opens a real PR, drives PRFollowupAgent, tears down
+  multi_turn_repo — one Ask Nudgebee conversation; every turn must stay on the
+                    repository the first turn settled on
 
 Usage:
     export API_SERVER_URL=... ACTION_API_SERVER_TOKEN=... ALERTMANAGER_WEBHOOK_URL=...
@@ -24,9 +26,10 @@ import sys
 import time
 from pathlib import Path
 
+import conversation_repo_verifier
 import event_rca_client
 import pr_followup_verifier
-from code_analyzer_client import CodeAnalyzerClient
+from code_analyzer_client import TERMINAL_OK, CodeAnalyzerClient
 from code_fix_verifier import verify_fix
 from diagnosis_scorer import diagnosis_stage_metrics, score_diagnosis
 from event_rca_client import EventCodeFixClient, IngestionTimeout
@@ -220,6 +223,50 @@ def run_pr_followup_scenario(code_analyzer: CodeAnalyzerClient, scenario: dict) 
         row["seconds"] = round(time.monotonic() - t0, 1)
 
 
+def run_multi_turn_repo_scenario(
+    code_analyzer: CodeAnalyzerClient, scenario: dict
+) -> dict:
+    row = {"name": scenario["name"], "tags": scenario.get("tags", [])}
+    t0 = time.monotonic()
+
+    multi_turn = scenario["multi_turn"]
+    turns = multi_turn["turns"]
+    conversation_id = None
+    conversation = None
+    try:
+        for number, text in enumerate(turns, 1):
+            result = code_analyzer.converse(text, conversation_id, turn_number=number)
+            conversation_id = result.get("_conversation_id") or conversation_id
+            if result["_status"] not in TERMINAL_OK:
+                row["bucket"] = f"error:turn_{number}_{result['_status'].lower()}"
+                return row
+            conversation = result["conversation"]
+
+        scored = conversation_repo_verifier.score_repo_continuity(
+            conversation,
+            len(turns),
+            multi_turn["repo"],
+            multi_turn.get("distractor_repo"),
+        )
+        row["bucket"] = scored["bucket"]
+        row["detail"] = scored["detail"]
+        row["turns"] = scored["turns"]
+        return row
+    finally:
+        # A turn that says "raise a pr" opens a real one. Close whatever the
+        # conversation raised, on whichever repo it landed — a drifted run's PR
+        # is exactly the one most likely to be left behind.
+        if conversation:
+            for i in range(len(turns)):
+                pr_url = conversation_repo_verifier.turn_repo_facts(conversation, i)[
+                    "pr_url"
+                ]
+                repo = conversation_repo_verifier.pr_repo_slug(pr_url or "")
+                if pr_url and repo:
+                    pr_followup_verifier.cleanup_pr(pr_url, repo)
+        row["seconds"] = round(time.monotonic() - t0, 1)
+
+
 def run_one(
     client: EventCodeFixClient,
     code_analyzer: CodeAnalyzerClient,
@@ -233,6 +280,8 @@ def run_one(
         return run_explore_scenario(code_analyzer, scenario)
     if scenario_type == "pr_followup":
         return run_pr_followup_scenario(code_analyzer, scenario)
+    if scenario_type == "multi_turn_repo":
+        return run_multi_turn_repo_scenario(code_analyzer, scenario)
     raise ValueError(f"unknown scenario type: {scenario_type!r}")
 
 

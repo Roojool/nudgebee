@@ -15,7 +15,7 @@ import RecommendationJobDetails from '@components/k8s/common/RecommendationJobDe
 import ClusterNameWithRegion from '@components/k8s/common/ClusterNameWithRegion';
 import { action } from 'src/utils/actionStyles';
 import CustomLink from '@shared/CustomLink';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
 import { ds } from 'src/utils/colors';
 import Text from '@shared/format/Text';
@@ -219,7 +219,7 @@ const KubernetesSSLCertificateRecommendation = (props) => {
         mt={2}
         mb={1}
       >
-        <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+        <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
           <Stat
             size='md'
             label='Total Certificates'
@@ -230,7 +230,7 @@ const KubernetesSSLCertificateRecommendation = (props) => {
                 : kubernetesSSLCertificateUpgradeRecommendationCount ?? '—'
             }
           />
-        </WidgetCard>
+        </Card>
       </Box>
       <ListingLayout id='cluster-upgrade-recommendation'>
         <ListingLayout.Toolbar

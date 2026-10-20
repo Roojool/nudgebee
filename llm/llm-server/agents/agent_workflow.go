@@ -13,10 +13,19 @@ import (
 func init() {
 	core.RegisterNBAgentFactoryAndTool(WorkflowAgentName, func(accountId string) (core.NBAgent, error) {
 		return newWorkflowAgent(accountId), nil
-	}, "Manages automations: list, get, trigger, create, and validate.", "Ask to list, get details, trigger, or create an automation.", "Returns automation info or action result.")
+	}, automationAgentDescription, "Ask to list, inspect, create, fix, or check the executions of an automation.", "Returns automation info or action result.")
 }
 
 const WorkflowAgentName = "automation"
+
+// automationAgentDescription is what search_tools and delegate_agent show an
+// orchestrator. It must not advertise running an automation: search_tools returns
+// this agent next to the per-automation `automation_<name>` tools, and while it said
+// "trigger executions" orchestrators delegated here to run one — this agent then paged
+// every automation by name to find an ID, costing minutes per request.
+const automationAgentDescription = "Manages the automation lifecycle: list, inspect, create, fix, version, and investigate executions (delegating to AutomationBuilder for construction). " +
+	"NOT the way to run an automation: each automation you may run is its own `automation_<name>` tool — call that directly. " +
+	"If no such tool matches, the automation is not available to you."
 
 type WorkflowAgent struct {
 	accountId string
@@ -35,7 +44,7 @@ func (a WorkflowAgent) GetNameAliases() []string {
 }
 
 func (a WorkflowAgent) GetDescription() string {
-	return "Manages automations. Can list, get details, trigger executions, and create new automations (delegating to AutomationBuilder for construction)."
+	return automationAgentDescription
 }
 
 func (a WorkflowAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAgentRequest) core.NBAgentPrompt {
@@ -59,6 +68,10 @@ func (a WorkflowAgent) GetSystemPrompt(ctx *security.RequestContext, query core.
 
 	instructions = append(instructions,
 		"**Safety:** Never modify an automation (via `workflow_update`) without explicit user approval. Always present proposed changes first and wait for the user to confirm before applying.",
+		"",
+		"**Links — never write a URL you were not given:**",
+		"Automation tools return a `url` for each automation and for any run they started. When you link an automation or a run, use that exact `url`, copied character for character.",
+		"If the tool returned no `url`, name the automation without a link — do NOT assemble one from an id, a base address, or a pattern you remember. Invented links have the wrong path and no `accountId`, and take the user to a broken page.",
 		"",
 		"**Capabilities:**",
 		"- List automations: `workflow_list`",
@@ -88,7 +101,9 @@ func (a WorkflowAgent) GetSystemPrompt(ctx *security.RequestContext, query core.
 		"Use `workflow_list`. You can filter by name or limit results.",
 		"",
 		"**Triggering:**",
-		"Use `workflow_trigger` with the ID. When the user named the automation, `workflow_list` finds the ID by name; when they described a PROBLEM instead, use `workflow_search` — it is the only tool that reads published data and tells you which automations you may run.",
+		"Use `workflow_trigger` with an ID returned by `workflow_search` — ALWAYS, whether the user named the automation or described a problem. It only returns automations you may run, matched by name and purpose, so call it once with the name or problem as the query.",
+		"- If `workflow_search` does not return it, the automation is not available to you: say so and stop. Do NOT hunt for it with `workflow_list` (name guesses, paging, large limits) and do NOT trigger an ID you found anywhere else — the server refuses anything not opted in.",
+		"- An automation name or ID recalled from memory or history may be stale. Trust `workflow_search`, not the recollection.",
 		"",
 		"**Validating & Diagnosing with Dry-Run:**",
 		"`workflow_dry_run` executes an automation's tasks against the engine WITHOUT persisting external side effects, returning per-task status and errors. Use it to prove an automation works and to ground failure diagnosis in real task-level errors.",

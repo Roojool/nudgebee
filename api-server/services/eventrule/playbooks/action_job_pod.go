@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"nudgebee/services/relay"
+	"strings"
 )
 
 // job_pod_enricher attaches the failed pod's events + logs to the
@@ -51,6 +52,14 @@ func (a *jobPodAction) Execute(ctx PlaybookActionContext, rawParams map[string]a
 	if err != nil {
 		return nil, fmt.Errorf("job_pod_enricher: list pods: %w", err)
 	}
+	// The agent honours neither `namespace` nor `label_selector` — it answers with
+	// the cluster's pods and leaves the filtering to us, the same way the events
+	// fallback below has to filter on involvedObject. Handing that list straight to
+	// pickFailedPodName made it pick the first failing pod *anywhere*: measured on
+	// 2026-09-23, 287 of 292 job_failure findings on dev and 2959 of 2972 on prod
+	// carried another workload's logs (a Job in `nudgebee` captioned with a
+	// `demo`-namespace pod's output). Filter to the Job's own pods first.
+	podData = podsOwnedByJob(podData, jobName, namespace)
 	podName := pickFailedPodName(podData)
 	if podName == "" {
 		return nil, errors.New("job_pod_enricher: no failed pod found for job")
@@ -127,6 +136,62 @@ func (a *jobPodAction) Execute(ctx PlaybookActionContext, rawParams map[string]a
 		},
 		Insight: []PlaybookActionResponseInsight{},
 	}, nil
+}
+
+// podsOwnedByJob keeps only the pods that belong to jobName in namespace.
+//
+// Ownership is read from the three places the API server populates it, in
+// descending order of reliability: the `job-name` label the Job controller sets,
+// an ownerReference of kind Job, and finally the `<job>-<suffix>` name the
+// controller generates. The name check is the fallback for agent payloads that
+// ship a trimmed metadata, and it is anchored with the hyphen so
+// `nightly-report-29836288` does not swallow `nightly-report-298362880`.
+func podsOwnedByJob(data any, jobName, namespace string) []any {
+	list, ok := data.([]any)
+	if !ok {
+		return nil
+	}
+	owned := make([]any, 0, len(list))
+	for _, item := range list {
+		pod, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		md := getMapField(pod, "metadata")
+		if md == nil {
+			continue
+		}
+		if ns, _ := md["namespace"].(string); namespace != "" && ns != namespace {
+			continue
+		}
+		if !podBelongsToJob(md, jobName) {
+			continue
+		}
+		owned = append(owned, item)
+	}
+	return owned
+}
+
+func podBelongsToJob(md map[string]any, jobName string) bool {
+	if labels := getMapField(md, "labels"); labels != nil {
+		if v, _ := labels["job-name"].(string); v != "" {
+			return v == jobName
+		}
+	}
+	for _, ref := range getArrayField(md, "owner_references", "ownerReferences") {
+		refMap, ok := ref.(map[string]any)
+		if !ok {
+			continue
+		}
+		if kind, _ := refMap["kind"].(string); kind != "Job" {
+			continue
+		}
+		if name, _ := refMap["name"].(string); name == jobName {
+			return true
+		}
+	}
+	name, _ := md["name"].(string)
+	return name == jobName || strings.HasPrefix(name, jobName+"-")
 }
 
 // pickFailedPodName scans the relay's pod list for the first pod whose

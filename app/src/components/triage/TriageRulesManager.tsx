@@ -18,7 +18,7 @@ import Datetime from '@shared/format/Datetime';
 import EmptyData from '@shared/EmptyData';
 import { DataNotAvailable } from '@assets';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
-import NDialog from '@shared/modal/NDialog';
+import { Modal } from '@ui/Modal';
 import Text from '@shared/format/Text';
 import { toast as snackbar } from '@ui/Toast';
 import { hasWriteAccess } from '@lib/auth';
@@ -519,15 +519,17 @@ const TriageRulesManager: React.FC<TriageRulesManagerProps> = ({ accountId }) =>
 
   return (
     <div>
-      <NDialog
-        buttonText='Delete'
+      <Modal
+        confirmText='Delete'
+        confirmTone='danger'
         handleClose={handleCloseDeleteDialog}
-        dialogTitle={`Delete rule "${ruleToDelete?.name || 'Unnamed'}"`}
-        handleSubmit={handleDeleteRule}
+        title={`Delete rule "${ruleToDelete?.name || 'Unnamed'}"`}
+        onConfirm={handleDeleteRule}
         open={deleteDialogOpen}
-        dialogContent='This action cannot be undone. The rule will be permanently deleted.'
-        additionalComponent={undefined}
-      />
+        width='md'
+      >
+        This action cannot be undone. The rule will be permanently deleted.
+      </Modal>
 
       <TriageRuleModal
         open={isRuleModalOpen}

@@ -4,7 +4,8 @@ import { Box } from '@mui/material';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
-import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { EditIcon } from '@assets';
 import SearchIcon from '@mui/icons-material/Search';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
@@ -705,7 +706,7 @@ const FollowupSheet = ({ followup, accountId, conversationId, selectedModel, pop
         borderTop: `1px dashed ${'var(--ds-gray-200)'}`,
       }}
     >
-      <EditOutlinedIcon sx={{ fontSize: 'var(--ds-text-body-lg)', color: 'var(--ds-gray-500)', flexShrink: 0 }} />
+      <SafeIcon src={EditIcon} alt='' width={14} height={14} style={{ flexShrink: 0 }} />
       <Box
         component='input'
         type='text'

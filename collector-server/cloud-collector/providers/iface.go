@@ -57,6 +57,48 @@ type QueryMetricsRequest struct {
 	Dimensions      []map[string]string `json:"dimensions,omitempty"` // Added field for metric dimensions
 	Statistics      []string            `json:"statistics"`
 	Query           string              `json:"query,omitempty"`
+	// MetricQueries carries a full CloudWatch metric-math query set (raw
+	// sub-metrics plus an expression referencing them by id), for alarms where
+	// MetricNamespace/MetricNames (a single metric) can't represent what the
+	// alarm actually evaluates. Populated only for that case; the single-metric
+	// fields above are ignored by providers when this is set.
+	MetricQueries []CloudWatchMetricEntry `json:"metric_queries,omitempty"`
+}
+
+// CloudWatchMetricEntry mirrors one entry of a CloudWatch alarm's
+// configuration.metrics array exactly as AWS emits it (camelCase field names)
+// — either a raw metric (MetricStat set) or a math expression referencing
+// other entries by Id (Expression set), never both. Kept provider-agnostic
+// (no AWS SDK types) so it can live on QueryMetricsRequest; the AWS provider
+// converts it to the SDK's own MetricDataQuery shape when calling GetMetricData.
+type CloudWatchMetricEntry struct {
+	Id         string                     `json:"id"`
+	ReturnData bool                       `json:"returnData"`
+	Label      string                     `json:"label,omitempty"`
+	Expression string                     `json:"expression,omitempty"`
+	MetricStat *CloudWatchMetricEntryStat `json:"metricStat,omitempty"`
+	// Period is set at this top level only for an Expression entry with no
+	// MetricStat — a Metrics Insights (SELECT ...) query has no sub-metric to
+	// inherit a period from, so CloudWatch requires it here instead. A metric
+	// math expression referencing other entries (e.g. "m1 - m2 - m3") doesn't
+	// need this; it derives timing from the MetricStat entries it references.
+	Period int `json:"period,omitempty"`
+}
+
+// CloudWatchMetricEntryStat is CloudWatchMetricEntry.MetricStat's shape,
+// named (rather than inline) so callers building one — construction call
+// sites, tests — don't have to repeat an anonymous struct literal type.
+type CloudWatchMetricEntryStat struct {
+	Stat   string                   `json:"stat"`
+	Period int                      `json:"period"`
+	Metric CloudWatchMetricEntryRef `json:"metric"`
+}
+
+// CloudWatchMetricEntryRef identifies one raw CloudWatch metric.
+type CloudWatchMetricEntryRef struct {
+	Namespace  string            `json:"namespace"`
+	Name       string            `json:"name"`
+	Dimensions map[string]string `json:"dimensions"`
 }
 
 type Account struct {
@@ -80,6 +122,18 @@ type Account struct {
 type GetUsageReportResponse struct {
 	Items []UsageReportItem `json:"items"`
 	Dates []time.Time       `json:"dates"`
+}
+
+// UsageReportBatchSize is how many line items a streaming provider hands over
+// per call to the emit callback.
+const UsageReportBatchSize = 5000
+
+// UsageReportStreamer is implemented by providers that can hand over a month's
+// cost report in batches instead of returning it whole, so a large bill never
+// sits in memory at once. emit is called with batches in report order and must
+// not retain the slice; an error from emit stops the stream and is returned.
+type UsageReportStreamer interface {
+	StreamUsageReport(ctx CloudProviderContext, account Account, month time.Month, year int, emit func([]UsageReportItem) error) error
 }
 
 type UsageReportCostCategory string
@@ -388,6 +442,12 @@ type EventRule struct {
 	Duration    time.Duration           `json:"duration"`
 	Labels      map[string]string       `json:"labels"`
 	Severity    EventDefinitionSeverity `json:"severity" validate:"required"`
+	// ExternalID is the provider's own id for the rule (AWS alarm ARN, GCP
+	// policy resource name, Azure ARM id); api-server writes back through it.
+	ExternalID string `json:"external_id,omitempty"`
+	// Disabled is true when the rule exists upstream but does not evaluate.
+	// The zero value keeps providers that cannot tell reporting "enabled".
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 type EventSummary struct {
@@ -732,6 +792,24 @@ type CloudProvider interface {
 	QueryDatabasePerformance(ctx CloudProviderContext, account Account, request DatabasePerformanceRequest) (DatabasePerformanceResponse, error)
 }
 
+// CliExecutionResult is the process-level result returned by the v2 cloud
+// CLI invocation. A non-zero exit is a completed execution, not a transport
+// error, so callers can preserve ordinary shell semantics.
+type CliExecutionResult struct {
+	Stdout          string `json:"stdout"`
+	Stderr          string `json:"stderr"`
+	ExitCode        int    `json:"exit_code"`
+	TimedOut        bool   `json:"timed_out"`
+	OutputTruncated bool   `json:"output_truncated"`
+}
+
+// CliV2Executor is an optional provider capability for workspace shims.
+// Implementations execute exactly one provider CLI process: shell pipelines,
+// redirects, loops, and local processing remain inside the workspace.
+type CliV2Executor interface {
+	ExecuteCliCommandV2(ctx CloudProviderContext, account Account, command string) (CliExecutionResult, error)
+}
+
 // CliCredentialsRequest asks for credentials that authenticate a process as the
 // account. Duration is what the caller needs them for; a provider clamps it to
 // what its credential type allows.
@@ -806,3 +884,56 @@ type ProcessedEventHandler interface {
 	// This provides tenant-safe account resolution for events with token-based routing (GCP, Azure)
 	GetAccountFromExternalId(pCtx CloudProviderContext, externalId string, accountNumber string) (Account, error)
 }
+
+// AlertRuleChange is one write to an existing provider alert rule. Nil / zero
+// fields are left as they are upstream.
+type AlertRuleChange struct {
+	Threshold *float64
+	// DurationMinutes is a requested evaluation window; providers map it onto
+	// what they support (AWS evaluation periods, Azure window sizes).
+	DurationMinutes int
+	// Enabled switches the rule on or off where the provider has such a switch.
+	Enabled *bool
+	// Restore carries the exact provider values a previous write returned, so a
+	// revert puts back what was there rather than an approximation of it.
+	Restore map[string]any
+}
+
+// IsEmpty reports whether the change would write nothing.
+func (c AlertRuleChange) IsEmpty() bool {
+	return c.Threshold == nil && c.DurationMinutes <= 0 && c.Enabled == nil && len(c.Restore) == 0
+}
+
+// Validate rejects a change that mixes a restore with explicit values: which one
+// should win is ambiguous, and applying either silently would hide the other.
+func (c AlertRuleChange) Validate() error {
+	if c.IsEmpty() {
+		return fmt.Errorf("%w: nothing to change (no threshold, duration, enabled switch or restore)", ErrAlertRuleChangeUnsupported)
+	}
+	if len(c.Restore) > 0 && (c.Threshold != nil || c.DurationMinutes > 0 || c.Enabled != nil) {
+		return fmt.Errorf("%w: restore cannot be combined with other changes", ErrAlertRuleChangeUnsupported)
+	}
+	return nil
+}
+
+// RestoreNumber reads a numeric value from a Restore map. Values normally arrive
+// through JSON as float64, but a caller building the map in Go may use ints.
+func RestoreNumber(m map[string]any, key string) (float64, bool) {
+	switch v := m[key].(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	}
+	return 0, false
+}
+
+// ErrAlertRuleChangeUnsupported marks a change the provider rule cannot take;
+// it is a request problem, not a transient failure.
+var ErrAlertRuleChangeUnsupported = errors.New("alert rule change not supported")

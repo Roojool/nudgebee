@@ -1,6 +1,7 @@
 package flow_sources
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"nudgebee/services/cloud"
+	"nudgebee/services/internal/database"
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/security"
 )
@@ -38,11 +40,17 @@ import (
 //   - Canonicalizes direction: the endpoint with the well-known / low port is
 //     the server; ephemeral high ports (32768-65535) are the client, so return
 //     flows don't create duplicate edges.
-//   - Resolves each private IP to an existing graph node via an in-memory index
-//     over the nodes the AWS static source already built (no extra AWS calls for
-//     the common case). Unresolved-internal IPs are materialized as
-//     ExternalService "sync-gap" nodes rather than dropped, so the map stays
-//     complete and the central enricher gets a chance to resolve them later.
+//   - Resolves each private IP to an existing graph node, in order: an in-memory
+//     index over the nodes the AWS static source already built (ENIs and the
+//     resources behind them, no AWS calls); then, for the K8s accounts mapped
+//     to the AWS account, the K8s Node or Workload that held the IP during the
+//     flow window, from kube_node_info / kube_pod_info (see
+//     vpc_flowlogs_k8s_resolution.go). Under the VPC CNI most IPs are pods, and
+//     EKS rotates nodes and ENIs faster than the ENI index can keep up.
+//   - IPs still unresolved are not given a node each: they collapse into one
+//     "Unidentified addresses (<vpc>)" ExternalService per VPC, with the IPs on
+//     the edge, and each IP is recorded in knowledge_graph_classification_review
+//     (node_match) with the reason it stayed unresolved.
 //   - Because the edge table is unique on (src, dst, relationship_type, ...), a
 //     distinct edge per port is impossible; instead ACCEPT/REJECT are kept as
 //     separate relationship types and the per-port breakdown is carried in edge
@@ -155,6 +163,7 @@ func (s *VPCFlowLogsFlowSource) BuildFlowRelationships(
 	// accounts running in it. Resolving within this set (rather than globally)
 	// stops a different account's colliding RFC1918 IP from winning.
 	awsToK8s := invertK8sCloudAccountMapping(reqCtx, req.TenantID)
+	nodeIPResolver := NewK8sNodeIPResolver(req.ExistingNodes)
 
 	edges := make([]*core.DbEdge, 0)
 	nodes := make([]*core.DbNode, 0)
@@ -180,7 +189,12 @@ func (s *VPCFlowLogsFlowSource) BuildFlowRelationships(
 		}
 		ipIndex := buildPrivateIPIndex(req.ExistingNodes, memberAccounts)
 
-		accEdges, accNodes, err := s.processAccount(reqCtx, req, accountID, regions, ipIndex)
+		k8sRes := k8sFlowResolution{
+			accounts:     awsToK8s[accountID],
+			nodeResolver: nodeIPResolver,
+			fetch:        fetchK8sIPInfo(reqCtx),
+		}
+		accEdges, accNodes, err := s.processAccount(reqCtx, req, accountID, regions, ipIndex, k8sRes)
 		if err != nil {
 			s.logger.Error("failed to process account for VPC flow logs",
 				"cloud_account_id", accountID, "error", err)
@@ -205,6 +219,16 @@ type flowLogConfig struct {
 	LogGroup string
 	Format   string
 	Region   string
+	// ResourceID is what the flow log is attached to: a VPC, subnet or ENI id.
+	ResourceID string
+}
+
+// k8sFlowResolution carries what processAccount needs to resolve IPs through
+// the K8s accounts mapped to an AWS account.
+type k8sFlowResolution struct {
+	accounts     []string
+	nodeResolver *K8sNodeIPResolver
+	fetch        k8sIPInfoFetcher
 }
 
 // processAccount discovers this account's flow logs, queries each, and turns the
@@ -215,6 +239,7 @@ func (s *VPCFlowLogsFlowSource) processAccount(
 	accountID string,
 	regions []string,
 	ipIndex map[string]*core.DbNode,
+	k8sRes k8sFlowResolution,
 ) ([]*core.DbEdge, []*core.DbNode, error) {
 	configs := s.discoverFlowLogConfigs(reqCtx, accountID, regions)
 	if len(configs) == 0 {
@@ -250,10 +275,74 @@ func (s *VPCFlowLogsFlowSource) processAccount(
 			s.IncrementErrorCount()
 			continue
 		}
-		conns = append(conns, parseFlowConns(resp.Results, srcField, dstField)...)
+		scope := vpcForFlowLog(cfg.ResourceID, req.ExistingNodes, accountID)
+		if scope == "" {
+			scope = cfg.Region
+		}
+		for _, c := range parseFlowConns(resp.Results, srcField, dstField) {
+			c.Scope = scope
+			conns = append(conns, c)
+		}
 	}
 
-	return s.buildEdgesFromConns(conns, ipIndex, req.TenantID, accountID, start, end)
+	resolved, errs := resolveFlowIPsViaK8s(
+		ipsMissingFromIndex(conns, ipIndex), k8sRes.accounts, req.ExistingNodes, k8sRes.nodeResolver, k8sRes.fetch, start, end)
+	for _, err := range errs {
+		if isAgentNotConnected(err) {
+			s.logger.Debug("K8s IP resolution skipped for VPC flow logs", "cloud_account_id", accountID, "error", err)
+		} else {
+			s.logger.Warn("K8s IP resolution failed for VPC flow logs", "cloud_account_id", accountID, "error", err)
+		}
+	}
+
+	edges, nodes, unresolved, err := s.buildEdgesFromConns(conns, ipIndex, resolved, req.TenantID, accountID, start, end)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.recordUnresolvedIPs(req.TenantID, accountID, unresolved, resolved, len(k8sRes.accounts) > 0, start, end)
+	return edges, nodes, nil
+}
+
+// ipsMissingFromIndex returns the distinct flow-log IPs the ENI index can't
+// resolve — the only ones worth a metrics lookup.
+func ipsMissingFromIndex(conns []flowConn, ipIndex map[string]*core.DbNode) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0)
+	for _, c := range conns {
+		for _, ip := range []string{c.SrcIP, c.DstIP} {
+			if _, ok := ipIndex[ip]; ok || seen[ip] {
+				continue
+			}
+			seen[ip] = true
+			out = append(out, ip)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// vpcForFlowLog returns the VPC a flow log covers. Flow logs attach to a VPC,
+// a subnet or an ENI; for the latter two the VPC is read off the matching
+// Subnet / NetworkInterface node. Empty when it can't be determined.
+func vpcForFlowLog(resourceID string, nodes []*core.DbNode, accountID string) string {
+	if strings.HasPrefix(resourceID, "vpc-") {
+		return resourceID
+	}
+	if resourceID == "" {
+		return ""
+	}
+	for _, n := range nodes {
+		if n == nil || n.CloudAccountID != accountID {
+			continue
+		}
+		if stringProp(n, "subnet_id") != resourceID && stringProp(n, "resource_id") != resourceID {
+			continue
+		}
+		if vpc := stringProp(n, "vpc_id"); vpc != "" {
+			return vpc
+		}
+	}
+	return ""
 }
 
 // discoverEnabledRegions asks AWS directly which regions this account has
@@ -344,7 +433,8 @@ func (s *VPCFlowLogsFlowSource) discoverFlowLogConfigs(
 			}
 			seen[logGroup] = true
 			format, _ := fl["LogFormat"].(string) // empty → default format handled by the parse-pattern builder
-			out = append(out, flowLogConfig{LogGroup: logGroup, Format: format, Region: region})
+			resourceID, _ := fl["ResourceId"].(string)
+			out = append(out, flowLogConfig{LogGroup: logGroup, Format: format, Region: region, ResourceID: resourceID})
 		}
 	}
 
@@ -363,6 +453,9 @@ type flowConn struct {
 	Bytes       int64
 	Packets     int64
 	Connections int64
+	// Scope groups addresses nothing resolves: the VPC the flow log covers,
+	// or its region when the VPC can't be determined.
+	Scope string
 }
 
 // canonicalAddrFields picks the effective src/dst capture-group names. When the
@@ -469,12 +562,29 @@ type edgeAggMeta struct {
 	dstNode *core.DbNode
 	srcRes  string
 	dstRes  string
+	// IPs behind an "Unidentified addresses" endpoint, per side.
+	srcUnresolved map[string]bool
+	dstUnresolved map[string]bool
+}
+
+// unresolvedFlowIP is one address no lookup could place, with what the flow
+// log says about it — the evidence for its review-table row.
+type unresolvedFlowIP struct {
+	IP          string
+	Scope       string
+	Peers       map[string]bool
+	Ports       map[int]bool
+	Bytes       int64
+	Connections int64
 }
 
 // buildEdgesFromConns resolves endpoints, canonicalizes direction, aggregates
 // per (src, dst, action) with a per-port breakdown, and emits CALLS (ACCEPT) /
-// CONNECTION_REJECTED (REJECT) edges. Unresolved-internal endpoints become
-// ExternalService sync-gap nodes so nothing is silently dropped.
+// CONNECTION_REJECTED (REJECT) edges. Endpoints resolve through the ENI index,
+// then through k8sResolved (K8s nodes/workloads, see
+// vpc_flowlogs_k8s_resolution.go). The rest collapse into one "Unidentified
+// addresses" node per scope and are returned for the review table, so nothing
+// is silently dropped.
 //
 // windowStart/windowEnd are the queried log window, stamped onto every edge as
 // a freshness signal: endpoints are resolved against the *current* graph, not
@@ -485,19 +595,37 @@ type edgeAggMeta struct {
 func (s *VPCFlowLogsFlowSource) buildEdgesFromConns(
 	conns []flowConn,
 	ipIndex map[string]*core.DbNode,
+	k8sResolved map[string]flowIPResolution,
 	tenantID string,
 	cloudAccountID string,
 	windowStart, windowEnd time.Time,
-) ([]*core.DbEdge, []*core.DbNode, error) {
+) ([]*core.DbEdge, []*core.DbNode, []unresolvedFlowIP, error) {
 	ports := make(map[edgeAggKey]map[int]*portStat)
 	meta := make(map[edgeAggKey]*edgeAggMeta)
-	externalNodes := make(map[string]*core.DbNode)
+	groupNodes := make(map[string]*core.DbNode)
+	unresolved := make(map[string]*unresolvedFlowIP)
 
 	resolve := func(ip string) (*core.DbNode, string) {
 		if n, ok := ipIndex[ip]; ok {
 			return n, "ip-index"
 		}
+		if r, ok := k8sResolved[ip]; ok && r.node != nil {
+			return r.node, r.tag
+		}
 		return nil, ""
+	}
+	noteUnresolved := func(ip, scope, peer string, c flowConn) {
+		u := unresolved[ip]
+		if u == nil {
+			u = &unresolvedFlowIP{IP: ip, Scope: scope, Peers: map[string]bool{}, Ports: map[int]bool{}}
+			unresolved[ip] = u
+		}
+		if peer != "" {
+			u.Peers[peer] = true
+		}
+		u.Ports[c.DstPort] = true
+		u.Bytes += c.Bytes
+		u.Connections += c.Connections
 	}
 
 	for _, c := range conns {
@@ -516,13 +644,16 @@ func (s *VPCFlowLogsFlowSource) buildEdgesFromConns(
 		if srcNode == nil && dstNode == nil {
 			continue
 		}
-		if srcNode == nil {
-			srcNode = getOrCreateSyncGapNode(externalNodes, c.SrcIP, tenantID, cloudAccountID)
+		srcUnresolved, dstUnresolved := srcNode == nil, dstNode == nil
+		if srcUnresolved {
+			srcNode = getOrCreateUnresolvedGroupNode(groupNodes, c.Scope, tenantID, cloudAccountID)
 			srcRes = "unresolved"
+			noteUnresolved(c.SrcIP, c.Scope, stringProp(dstNode, "name"), c)
 		}
-		if dstNode == nil {
-			dstNode = getOrCreateSyncGapNode(externalNodes, c.DstIP, tenantID, cloudAccountID)
+		if dstUnresolved {
+			dstNode = getOrCreateUnresolvedGroupNode(groupNodes, c.Scope, tenantID, cloudAccountID)
 			dstRes = "unresolved"
+			noteUnresolved(c.DstIP, c.Scope, stringProp(srcNode, "name"), c)
 		}
 		if srcNode.ID == dstNode.ID {
 			continue // self-loop (e.g. two IPs of the same ENI/host)
@@ -531,7 +662,16 @@ func (s *VPCFlowLogsFlowSource) buildEdgesFromConns(
 		key := edgeAggKey{srcID: srcNode.ID, dstID: dstNode.ID, action: c.Action}
 		if ports[key] == nil {
 			ports[key] = make(map[int]*portStat)
-			meta[key] = &edgeAggMeta{srcNode: srcNode, dstNode: dstNode, srcRes: srcRes, dstRes: dstRes}
+			meta[key] = &edgeAggMeta{
+				srcNode: srcNode, dstNode: dstNode, srcRes: srcRes, dstRes: dstRes,
+				srcUnresolved: map[string]bool{}, dstUnresolved: map[string]bool{},
+			}
+		}
+		if srcUnresolved {
+			meta[key].srcUnresolved[c.SrcIP] = true
+		}
+		if dstUnresolved {
+			meta[key].dstUnresolved[c.DstIP] = true
 		}
 		ps := ports[key][c.DstPort]
 		if ps == nil {
@@ -585,6 +725,12 @@ func (s *VPCFlowLogsFlowSource) buildEdgesFromConns(
 			"flow_window_start":     windowStart,
 			"flow_window_end":       windowEnd,
 		}
+		if len(m.srcUnresolved) > 0 {
+			props["unresolved_src_ips"] = sortedKeys(m.srcUnresolved)
+		}
+		if len(m.dstUnresolved) > 0 {
+			props["unresolved_dst_ips"] = sortedKeys(m.dstUnresolved)
+		}
 
 		edge := s.CreateEdge(m.srcNode, m.dstNode, relType, props, tenantID, cloudAccountID)
 		if edge != nil {
@@ -592,11 +738,16 @@ func (s *VPCFlowLogsFlowSource) buildEdgesFromConns(
 		}
 	}
 
-	nodes := make([]*core.DbNode, 0, len(externalNodes))
-	for _, n := range externalNodes {
+	nodes := make([]*core.DbNode, 0, len(groupNodes))
+	for _, n := range groupNodes {
 		nodes = append(nodes, n)
 	}
-	return edges, nodes, nil
+	unresolvedList := make([]unresolvedFlowIP, 0, len(unresolved))
+	for _, u := range unresolved {
+		unresolvedList = append(unresolvedList, *u)
+	}
+	sort.Slice(unresolvedList, func(i, j int) bool { return unresolvedList[i].IP < unresolvedList[j].IP })
+	return edges, nodes, unresolvedList, nil
 }
 
 // buildPrivateIPIndex indexes existing graph nodes by their private IP(s) so a
@@ -666,34 +817,112 @@ func ipNodeRank(nt core.NodeType) int {
 	}
 }
 
-// getOrCreateSyncGapNode materializes an unresolved *internal* IP as an
-// ExternalService node flagged as a sync-gap signal (spec step 4). It is not a
-// real external endpoint — it is a resolvable-but-not-yet-resolved private IP
-// (Cartography-style inventory lag / untracked infra) that the central enricher
-// gets another chance at.
-func getOrCreateSyncGapNode(cache map[string]*core.DbNode, ip, tenantID, cloudAccountID string) *core.DbNode {
-	if n, ok := cache[ip]; ok {
+// getOrCreateUnresolvedGroupNode returns the one node standing in for every
+// private address in scope (a VPC id, or a region when the VPC is unknown) that
+// no lookup could place. One node per IP used to be minted instead; on a
+// cluster that rotates nodes daily that was ~20 bare-IP "external services" a
+// day, each claiming to be external when it is inside the VPC. The individual
+// IPs travel on the edge (unresolved_src_ips / unresolved_dst_ips) and in the
+// review table. The subtype is what core/impact.go keys on to keep these out of
+// "possible cause" lists.
+func getOrCreateUnresolvedGroupNode(cache map[string]*core.DbNode, scope, tenantID, cloudAccountID string) *core.DbNode {
+	if scope == "" {
+		scope = "unknown"
+	}
+	if n, ok := cache[scope]; ok {
 		return n
 	}
+	name := fmt.Sprintf("Unidentified addresses (%s)", scope)
 	uniqueKey := core.BuildUniqueKey(
 		core.DeriveCloudProvider(awsVPCFlowSourceName, core.NodeTypeExternalService),
 		cloudAccountID,
 		"",
 		core.NodeTypeExternalService,
 		"",
-		ip,
+		name,
 	)
 	props := map[string]any{
-		"name":            ip,
-		"ip":              ip,
+		"name":            name,
 		"kind":            "ExternalService",
 		"subtype":         "vpc-unresolved-ip",
 		"is_sync_gap":     true,
 		"discovered_from": "vpc_flow_logs",
+		"scope":           scope,
+	}
+	if strings.HasPrefix(scope, "vpc-") {
+		props["vpc_id"] = scope
+	} else {
+		props["region"] = scope
 	}
 	n := core.NewNode(core.NodeTypeExternalService, uniqueKey, props, tenantID, cloudAccountID, awsVPCFlowSourceName)
-	cache[ip] = n
+	cache[scope] = n
 	return n
+}
+
+// recordUnresolvedIPs writes one knowledge_graph_classification_review row per
+// address that stayed unresolved, so the misses can be reviewed without
+// re-running ingestion. Fire-and-forget: a failure here never affects the build.
+func (s *VPCFlowLogsFlowSource) recordUnresolvedIPs(
+	tenantID, accountID string,
+	unresolved []unresolvedFlowIP,
+	k8sResolved map[string]flowIPResolution,
+	k8sTried bool,
+	windowStart, windowEnd time.Time,
+) {
+	if len(unresolved) == 0 {
+		return
+	}
+	dbManager, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		s.logger.Warn("skipping unresolved VPC IP review records: no db manager", "error", err)
+		return
+	}
+	lookups := []string{"ip-index"}
+	if k8sTried {
+		lookups = append(lookups, resolutionK8sNodeIP, resolutionK8sPodIP)
+	}
+	const maxPeers = 20
+	for _, u := range unresolved {
+		reason := reasonVPCIPUnresolved
+		evidence := map[string]any{}
+		if r, ok := k8sResolved[u.IP]; ok && r.reason != "" {
+			reason = r.reason
+			for k, v := range r.detail {
+				evidence[k] = v
+			}
+		}
+		peers := sortedKeys(u.Peers)
+		if len(peers) > maxPeers {
+			peers = peers[:maxPeers]
+		}
+		ports := make([]int, 0, len(u.Ports))
+		for p := range u.Ports {
+			ports = append(ports, p)
+		}
+		sort.Ints(ports)
+		evidence["peers"] = peers
+		evidence["dst_ports"] = ports
+		evidence["bytes"] = u.Bytes
+		evidence["connections"] = u.Connections
+		evidence["lookups_tried"] = lookups
+		evidence["flow_window_start"] = windowStart
+		evidence["flow_window_end"] = windowEnd
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		core.RecordUncertainClassification(ctx, dbManager, core.UncertainClassificationCandidate{
+			TenantID:           tenantID,
+			Source:             awsVPCFlowSourceName,
+			ClassificationKind: "node_match",
+			CandidateType:      "private_ip",
+			CandidateName:      u.IP,
+			CandidateNamespace: u.Scope,
+			CandidateCluster:   accountID,
+			ReasonCode:         reason,
+			ReasonDescription:  "VPC flow-log address matched no ENI, K8s node or K8s workload in the graph",
+			Evidence:           evidence,
+		})
+		cancel()
+	}
 }
 
 // regionsForAccount collects the distinct AWS regions this account has nodes in,

@@ -7,35 +7,37 @@ import (
 )
 
 // genericProviderAliases maps an explicit provider prefix ("provider/model") to a
-// Bifrost provider. "google" is accepted as an alias for Gemini's public API. The
-// second group are OpenAI-compatible api-key providers (bearer token, default
-// endpoint) — drop-in on the generic endpoint; operator/tenant credentials flow
+// Bifrost provider. "google" and "googleai" are accepted as aliases for Gemini's
+// public API. The second group are OpenAI-compatible api-key providers (bearer token,
+// default endpoint) — drop-in on the generic endpoint; operator/tenant credentials flow
 // through the existing api-key plumbing, so the alias is all that's needed to route.
 var genericProviderAliases = map[string]schemas.ModelProvider{
-	"anthropic":   schemas.Anthropic,
-	"openai":      schemas.OpenAI,
-	"gemini":      schemas.Gemini,
-	"google":      schemas.Gemini,
-	"huggingface": schemas.HuggingFace,
-	"hf":          schemas.HuggingFace,
-	"bedrock":     schemas.Bedrock,
-	"groq":        schemas.Groq,
-	"mistral":     schemas.Mistral,
-	"cohere":      schemas.Cohere,
-	"deepseek":    schemas.DeepSeek,
-	"xai":         schemas.XAI,
-	"perplexity":  schemas.Perplexity,
-	"openrouter":  schemas.OpenRouter,
-	"fireworks":   schemas.Fireworks,
-	"cerebras":    schemas.Cerebras,
-	"nebius":      schemas.Nebius,
-	"parasail":    schemas.Parasail,
-	"ollama":      schemas.Ollama,
-	"vllm":        schemas.VLLM,
-	"sgl":         schemas.SGL,
-	"azure":       schemas.Azure,
-	"vertex":      schemas.Vertex,
-	"vertexai":    schemas.Vertex,
+	"anthropic":         schemas.Anthropic,
+	"openai":            schemas.OpenAI,
+	"gemini":            schemas.Gemini,
+	"google":            schemas.Gemini,
+	"googleai":          schemas.Gemini,
+	"huggingface":       schemas.HuggingFace,
+	"hf":                schemas.HuggingFace,
+	"bedrock":           schemas.Bedrock,
+	"groq":              schemas.Groq,
+	"mistral":           schemas.Mistral,
+	"cohere":            schemas.Cohere,
+	"deepseek":          schemas.DeepSeek,
+	"xai":               schemas.XAI,
+	"perplexity":        schemas.Perplexity,
+	"openrouter":        schemas.OpenRouter,
+	"fireworks":         schemas.Fireworks,
+	"cerebras":          schemas.Cerebras,
+	"nebius":            schemas.Nebius,
+	"parasail":          schemas.Parasail,
+	"ollama":            schemas.Ollama,
+	"vllm":              schemas.VLLM,
+	"sgl":               schemas.SGL,
+	"azure":             schemas.Azure,
+	"vertex":            schemas.Vertex,
+	"vertexai":          schemas.Vertex,
+	"vertexai_endpoint": schemas.Vertex,
 }
 
 // resolveModelProvider maps a model name from the generic /v1 endpoint to the

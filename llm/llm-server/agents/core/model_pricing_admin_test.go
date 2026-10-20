@@ -98,6 +98,48 @@ func TestUpsertModelPricing_RefusesEmptyTenant(t *testing.T) {
 	assert.Contains(t, err.Error(), "database manager unavailable")
 }
 
+// The verdict rides the same upsert as the rates. It is bound last ($14) and
+// merged with COALESCE so a price edit that omits it cannot erase a recorded
+// verdict, while an explicit true/false still lands.
+func TestUpsertModelPricing_WritesSupportsImageInput(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	yes := true
+	mock.ExpectBegin()
+	mock.ExpectExec(`supports_image_input\s+= COALESCE\(EXCLUDED.supports_image_input, llm_model_pricing.supports_image_input\)`).
+		WithArgs("my-vision-model", "custom", "tenant-1",
+			0.0, 0.0, nil, nil, nil, nil, nil, nil, nil,
+			"user-1", true).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err = UpsertModelPricing(&common.DatabaseManager{Db: sqlx.NewDb(db, "postgres")}, "tenant-1", "user-1",
+		[]ModelPriceInput{{ModelName: "my-vision-model", ProviderName: "custom", SupportsImageInput: &yes}})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUpsertModelPricing_OmittedSupportsImageInputBindsNull(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO llm_model_pricing`).
+		WithArgs("gpt-4o", "openai", "tenant-1",
+			1.8, 7.2, nil, nil, nil, nil, nil, nil, nil,
+			"user-1", nil).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err = UpsertModelPricing(&common.DatabaseManager{Db: sqlx.NewDb(db, "postgres")}, "tenant-1", "user-1",
+		[]ModelPriceInput{{ModelName: "gpt-4o", ProviderName: "openai", InputPerM: 1.8, OutputPerM: 7.2}})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // A tenant override REPLACES the built-in rate — it does not sit beside it.
 // Without the DISTINCT ON, `(tenant_id IS NULL OR tenant_id = $1)` returns both
 // rows for an overridden model, so the tab lists the model twice: once at the
@@ -113,7 +155,7 @@ func TestListModelPricing_CollapsesOverrideOntoBuiltIn(t *testing.T) {
 		"cost_per_million_cached_input_tokens", "cost_per_million_cache_creation_tokens",
 		"context_threshold_tokens",
 		"cost_per_million_input_tokens_long_ctx", "cost_per_million_output_tokens_long_ctx",
-		"max_output_tokens", "max_context_tokens",
+		"max_output_tokens", "max_context_tokens", "supports_image_input",
 		"is_built_in", "pricing_updated_at", "has_built_in",
 	}
 	// The dedup happens in SQL, so pin the two clauses that produce it: without
@@ -121,7 +163,7 @@ func TestListModelPricing_CollapsesOverrideOntoBuiltIn(t *testing.T) {
 	mock.ExpectQuery(`DISTINCT ON \(provider_name, model_name\)`).
 		WithArgs("tenant-1").
 		WillReturnRows(sqlmock.NewRows(cols).
-			AddRow("gpt-4o", "openai", 1.8, 7.2, nil, nil, nil, nil, nil, nil, nil, false, nil, true))
+			AddRow("gpt-4o", "openai", 1.8, 7.2, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, true))
 
 	got, err := ListModelPricing(&common.DatabaseManager{Db: sqlx.NewDb(db, "postgres")}, "tenant-1")
 	require.NoError(t, err)
@@ -147,9 +189,9 @@ func TestListModelPricing_PrefersTenantRowOverBuiltIn(t *testing.T) {
 			"cost_per_million_cached_input_tokens", "cost_per_million_cache_creation_tokens",
 			"context_threshold_tokens",
 			"cost_per_million_input_tokens_long_ctx", "cost_per_million_output_tokens_long_ctx",
-			"max_output_tokens", "max_context_tokens",
+			"max_output_tokens", "max_context_tokens", "supports_image_input",
 			"is_built_in", "pricing_updated_at", "has_built_in",
-		}).AddRow("gpt-4o", "openai", 1.8, 7.2, nil, nil, nil, nil, nil, 16384, nil, false, nil, true))
+		}).AddRow("gpt-4o", "openai", 1.8, 7.2, nil, nil, nil, nil, nil, 16384, nil, true, false, nil, true))
 
 	got, err := ListModelPricing(&common.DatabaseManager{Db: sqlx.NewDb(db, "postgres")}, "tenant-1")
 	require.NoError(t, err)
@@ -157,6 +199,8 @@ func TestListModelPricing_PrefersTenantRowOverBuiltIn(t *testing.T) {
 	assert.False(t, got[0].IsBuiltIn, "the surviving row must be the tenant's")
 	require.NotNil(t, got[0].MaxOutputTokens)
 	assert.Equal(t, int64(16384), *got[0].MaxOutputTokens)
+	require.NotNil(t, got[0].SupportsImageInput, "a recorded verdict must reach the UI")
+	assert.True(t, *got[0].SupportsImageInput)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -175,9 +219,9 @@ func TestListModelPricing_NoTenantSeesBuiltInsOnly(t *testing.T) {
 			"cost_per_million_cached_input_tokens", "cost_per_million_cache_creation_tokens",
 			"context_threshold_tokens",
 			"cost_per_million_input_tokens_long_ctx", "cost_per_million_output_tokens_long_ctx",
-			"max_output_tokens", "max_context_tokens",
+			"max_output_tokens", "max_context_tokens", "supports_image_input",
 			"is_built_in", "pricing_updated_at", "has_built_in",
-		}).AddRow("gpt-4o", "openai", 2.5, 10.0, nil, nil, nil, nil, nil, 16384, nil, true, nil, true))
+		}).AddRow("gpt-4o", "openai", 2.5, 10.0, nil, nil, nil, nil, nil, 16384, nil, nil, true, nil, true))
 
 	got, err := ListModelPricing(&common.DatabaseManager{Db: sqlx.NewDb(db, "postgres")}, "")
 	require.NoError(t, err)

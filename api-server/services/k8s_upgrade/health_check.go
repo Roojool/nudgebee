@@ -851,7 +851,7 @@ func getNodeGroupDetails(ctx *security.RequestContext, accountID, cloudAccountID
 
 	switch accountDetails.K8sProvider {
 	case "EKS":
-		return getAWSNodeGroupDetails(ctx, accountID, cloudAccountID, clusterName)
+		return getAWSNodeGroupDetails(ctx, accountID, cloudAccountID, clusterName, attributes["k8s_provider_region"])
 	case "GKE":
 		return getGCPNodePoolDetails(ctx, accountID, cloudAccountID, clusterName, attributes)
 	case "AKS":
@@ -861,14 +861,14 @@ func getNodeGroupDetails(ctx *security.RequestContext, accountID, cloudAccountID
 	}
 }
 
-func getAWSNodeGroupDetails(ctx *security.RequestContext, accountID, cloudAccountID, clusterName string) ([]NodeGroups, error) {
+func getAWSNodeGroupDetails(ctx *security.RequestContext, accountID, cloudAccountID, clusterName, region string) ([]NodeGroups, error) {
 	if clusterName == "" {
 		return nil, fmt.Errorf("cluster name is required for AWS node group query")
 	}
 
 	// list nodegroups
 	var listResp AWSListNodeGroupsResponse
-	listCmd := fmt.Sprintf("aws eks list-nodegroups --cluster-name %s --output json", clusterName)
+	listCmd := fmt.Sprintf("aws eks list-nodegroups --cluster-name %s%s --output json", clusterName, awsRegionFlag(region))
 	if err := runAWSCommand(ctx, cloudAccountID, listCmd, &listResp); err != nil {
 		return nil, fmt.Errorf("failed to list node groups: %w", err)
 	}
@@ -881,7 +881,7 @@ func getAWSNodeGroupDetails(ctx *security.RequestContext, accountID, cloudAccoun
 
 	var nodeGroups []NodeGroups
 	for _, ngName := range listResp.NodeGroups {
-		ng, err := describeAWSNodeGroup(ctx, cloudAccountID, clusterName, ngName)
+		ng, err := describeAWSNodeGroup(ctx, cloudAccountID, clusterName, ngName, region)
 		if err != nil {
 			ctx.GetLogger().Warn("Failed to describe node group", "nodegroup", ngName, "error", err)
 			nodeGroups = append(nodeGroups, NodeGroups{Name: ngName, CheckError: err.Error()})
@@ -893,13 +893,26 @@ func getAWSNodeGroupDetails(ctx *security.RequestContext, accountID, cloudAccoun
 	return nodeGroups, nil
 }
 
-func describeAWSNodeGroup(ctx *security.RequestContext, cloudAccountID, clusterName, ngName string) (*AWSDescribeNodeGroupResponse, error) {
+func describeAWSNodeGroup(ctx *security.RequestContext, cloudAccountID, clusterName, ngName, region string) (*AWSDescribeNodeGroupResponse, error) {
 	var resp AWSDescribeNodeGroupResponse
-	cmd := fmt.Sprintf("aws eks describe-nodegroup --cluster-name %s --nodegroup-name %s --output json", clusterName, ngName)
+	cmd := fmt.Sprintf("aws eks describe-nodegroup --cluster-name %s --nodegroup-name %s%s --output json", clusterName, ngName, awsRegionFlag(region))
 	if err := runAWSCommand(ctx, cloudAccountID, cmd, &resp); err != nil {
 		return nil, fmt.Errorf("failed to describe node group: %w", err)
 	}
 	return &resp, nil
+}
+
+var awsRegionPattern = regexp.MustCompile(`^[a-z]{2}-[-a-z]+-[0-9]+$`)
+
+// awsRegionFlag returns " --region <region>", or "" when the cluster's region is unknown
+// or not a valid region name (it comes from agent telemetry and ends up in a CLI command).
+// EKS is regional: without the flag the collector falls back to the cloud account's
+// default region and reports clusters elsewhere as not found.
+func awsRegionFlag(region string) string {
+	if !awsRegionPattern.MatchString(region) {
+		return ""
+	}
+	return " --region " + region
 }
 
 func mapAWSNodeGroup(resp *AWSDescribeNodeGroupResponse, nodes []NodeInfo) NodeGroups {

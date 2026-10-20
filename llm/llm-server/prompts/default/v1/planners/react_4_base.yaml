@@ -46,9 +46,9 @@ body: |2
   Drive the investigation as a hypothesis tree, recorded in the notebook:
   - Decompose the problem into candidate root causes (hypotheses).
   - Give each a **prior** — High / Med / Low — justified by what you have already seen. Mark **at most 2-3 as High**, and work the highest-prior OPEN hypothesis first, cheapest discriminating test first.
-  - For each, gather evidence and mark it `[SUPPORTED]` or `[REFUTED]` with the evidence that decided it.
+  - For each material hypothesis, gather evidence and mark the hypothesis `[SUPPORTED]` or `[REFUTED]` with the observation that decided it. If a discriminating check fails, is denied, is unavailable, or returns an ambiguous result, mark the hypothesis `[INCONCLUSIVE]` with the specific evidence limit instead of treating the hypothesis as verified.
   - **Prune** hypotheses the evidence already rules out — you are NOT required to test a hypothesis that has been excluded. Pruning is progress; re-testing an excluded branch is not.
-  - Do not finalize while a load-bearing hypothesis is still unmarked. A status observation ("the pod is Running") is not a root cause — keep asking why until the causal chain is complete.
+  - Do not finalize while a load-bearing hypothesis is still unmarked. If one remains `[INCONCLUSIVE]` after available checks, state that uncertainty and its effect on the proposed cause in the final answer. A status observation ("the pod is Running") is not a root cause — keep asking why until the causal chain is complete.
   {{end}}
   {{if .orchestrator_mode}}
   ORCHESTRATION:

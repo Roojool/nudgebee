@@ -757,6 +757,8 @@ func (e *TraceToKnowledgeGraphExtractor) extractKubernetesInfrastructure(service
 // ~12.7µs / 14KB / 120 allocs per call before, which collapses to ~1µs /
 // 25B / 0 allocs per call after this change (~12× faster, alloc-free).
 var (
+	// awsRegionPattern guards region values interpolated into AWS CLI commands.
+	awsRegionPattern = regexp.MustCompile(`^[a-z]{2}-[-a-z]+-[0-9]+$`)
 	// StatefulSet pattern: name-0, name-1, etc.
 	podStatefulSetRegex = regexp.MustCompile(`^(.+)-\d+$`)
 	// Deployment/ReplicaSet pattern: name-rshash-podhash. The ReplicaSet hash
@@ -1698,7 +1700,7 @@ func EnrichLoadBalancerWithTargets(
 	arn, arnOk := lbNode.Properties["arn"].(string)
 	region, regionOk := lbNode.Properties["region"].(string)
 
-	if !arnOk || !regionOk || arn == "" || region == "" {
+	if !arnOk || !regionOk || arn == "" || !awsRegionPattern.MatchString(region) {
 		slog.Debug("Skipping LoadBalancer enrichment: missing ARN or region",
 			"lb_name", lbNode.Properties["name"])
 		return podNodes, edges, nil
@@ -1742,8 +1744,8 @@ func EnrichLoadBalancerWithTargets(
 
 	// Step 1.5: Query LoadBalancer tags to check for Kubernetes service mapping
 	tagsCommand := fmt.Sprintf(
-		"aws elbv2 describe-tags --resource-arns %s --output json",
-		arn,
+		"aws elbv2 describe-tags --region %s --resource-arns %s --output json",
+		region, arn,
 	)
 
 	tagsResp, err := cloud.ExecuteCli(requestContext, cloud.CloudExecuteCliCommandRequest{

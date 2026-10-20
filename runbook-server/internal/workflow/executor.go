@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"nudgebee/runbook/config"
+	"nudgebee/runbook/internal/logsafe"
 	"nudgebee/runbook/internal/model"
 	"nudgebee/runbook/internal/tasks"
 	"nudgebee/runbook/internal/tasks/types"
@@ -347,7 +348,10 @@ func handleTaskCompletion(ctx workflow.Context, workflowID string, taskID string
 	}
 
 	if err != nil {
-		logger.Error("Activity failed", "taskID", taskID, "error", err, "params", globalContext.Tasks[taskID])
+		// Libraries put the failing request in the message — a URL carrying an
+		// api_key, say — so credential values are scrubbed before it goes anywhere.
+		errText := ScrubSecretValues(err.Error(), SecretValues(globalContext.Secrets))
+		logger.Error("Activity failed", "taskID", taskID, "error", errText, "params", globalContext.Tasks[taskID])
 		// find task to run on_failure
 		if currentTask.Hooks != nil && len(currentTask.Hooks.Failure) > 0 {
 			onFailureCtx := createActivityCtxForAction(ctx)
@@ -360,11 +364,11 @@ func handleTaskCompletion(ctx workflow.Context, workflowID string, taskID string
 
 		// Check failure policy action
 		if currentTask.FailurePolicy != nil && currentTask.FailurePolicy.Action == "continue" {
-			logger.Warn("Task failed but continue_on_error is set", "taskID", taskID, "error", err)
+			logger.Warn("Task failed but continue_on_error is set", "taskID", taskID, "error", errText)
 			// Update context with FAILED status but continue workflow
 			globalContext.Tasks[taskID] = map[string]any{
 				"status": model.TaskStatusFailed,
-				"error":  err.Error(),
+				"error":  errText,
 			}
 			return nil
 		}
@@ -372,7 +376,7 @@ func handleTaskCompletion(ctx workflow.Context, workflowID string, taskID string
 		return err
 	}
 
-	logger.Info("Task completed", "taskID", taskID, "result", result) // ENABLED LOGGING
+	logger.Info("Task completed", "taskID", taskID, "result", logsafe.Shape(result))
 	globalContext.Tasks[taskID] = map[string]any{
 		"status": string(model.TaskStatusCompleted),
 		"output": result,
@@ -557,6 +561,8 @@ func (e *WorkflowExecutor) ExecuteWorkflowInternal(ctx workflow.Context, wf *mod
 	}
 	pendingApprovalTokens := make(map[string]string)
 	approvalTokenSignalChan := workflow.GetSignalChannel(ctx, "approval-token")
+	// Credential values, for scrubbing error text; filled once secrets are fetched.
+	var secretValues []string
 
 	// Panic recovery for the workflow function
 	defer func() {
@@ -567,7 +573,7 @@ func (e *WorkflowExecutor) ExecuteWorkflowInternal(ctx workflow.Context, wf *mod
 			// the failure path below: a called run records status, not the callee's hooks.
 			panicErr := temporal.NewApplicationError("workflow panic", "panic", panicMessage)
 			if !isChildWorkflow {
-				updateFinalWorkflowStatusAndExecuteHooks(ctx, wf, lastExecTarget, inputs, logger, panicErr)
+				updateFinalWorkflowStatusAndExecuteHooks(ctx, wf, lastExecTarget, inputs, logger, panicErr, secretValues)
 			} else if !wf.DryRun {
 				setLastExecutionStatus(ctx, wf, lastExecTarget, model.WorkflowExecutionStatusFailed, panicErr.Error(), logger)
 			}
@@ -739,6 +745,7 @@ func (e *WorkflowExecutor) ExecuteWorkflowInternal(ctx workflow.Context, wf *mod
 	for k, v := range configsResponse.Secrets {
 		templateContext.Secrets[k] = v
 	}
+	secretValues = SecretValues(templateContext.Secrets)
 
 	// Run Tasks using the recursive loop function
 	taskRegistry := tasks.NewInitializedTaskRegistry()
@@ -754,12 +761,13 @@ func (e *WorkflowExecutor) ExecuteWorkflowInternal(ctx workflow.Context, wf *mod
 	_, executionTrace, workflowError := processTaskLoop(ctx, wf.Definition.Tasks, templateContext, logger, pendingApprovalTokens, approvalTokenSignalChan, workflow.GetSignalChannel(ctx, "update-workflow-inputs"), wf, info.WorkflowExecution.ID, taskRegistry, e.GetClient(), e.GetConverter(), e.GetStore(), e.ExecuteWorkflowInternal)
 
 	if workflowError != nil {
-		logger.Info("Workflow execution failed because of error", "workflowId", wf.ID, "error", workflowError)
+		logger.Info("Workflow execution failed because of error", "workflowId", wf.ID, "error", ScrubSecretValues(workflowError.Error(), secretValues))
 		if !isChildWorkflow {
-			updateFinalWorkflowStatusAndExecuteHooks(ctx, wf, lastExecTarget, inputs, logger, workflowError)
+			updateFinalWorkflowStatusAndExecuteHooks(ctx, wf, lastExecTarget, inputs, logger, workflowError, secretValues)
 		} else if !wf.DryRun {
 			// A called run records status on the callee's row, but not its hooks or tags.
-			setLastExecutionStatus(ctx, wf, lastExecTarget, model.WorkflowExecutionStatusFailed, workflowError.Error(), logger)
+			childStatus, childMessage := terminalStatusFor(workflowError)
+			setLastExecutionStatus(ctx, wf, lastExecTarget, childStatus, childMessage, logger)
 		}
 		return "", workflowError
 	}
@@ -874,18 +882,44 @@ func (e *WorkflowExecutor) ExecuteWorkflowInternal(ctx workflow.Context, wf *mod
 				}
 			}
 		}
-		updateFinalWorkflowStatusAndExecuteHooks(ctx, wf, lastExecTarget, inputs, logger, nil)
+		updateFinalWorkflowStatusAndExecuteHooks(ctx, wf, lastExecTarget, inputs, logger, nil, secretValues)
 	} else if !wf.DryRun {
 		// As on the failure path: status on the callee's row, no hooks or tags.
 		setLastExecutionStatus(ctx, wf, lastExecTarget, model.WorkflowExecutionStatusCompleted, "", logger)
 	}
 
-	logger.Info("Workflow execution completed", "workflowId", wf.ID, "result", workflowResult)
+	logger.Info("Workflow execution completed", "workflowId", wf.ID, "result", logsafe.Shape(workflowResult))
 	resultBytes, err := json.Marshal(workflowResult)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal workflow result: %w", err)
 	}
 	return string(resultBytes), nil
+}
+
+// cleanupContext returns the context end-of-run bookkeeping must run on.
+// Temporal fails every activity scheduled on a canceled workflow.Context
+// immediately, so a canceled run used to write no terminal status at all and
+// its automation kept showing "Running" for good (#37544). A disconnected
+// context still executes, which is what the cleanup needs.
+func cleanupContext(ctx workflow.Context) workflow.Context {
+	if ctx.Err() == nil {
+		return ctx
+	}
+	disconnected, _ := workflow.NewDisconnectedContext(ctx)
+	return disconnected
+}
+
+// terminalStatusFor maps a run's outcome to the status its workflow row records.
+// A user cancel is not a failure: it gets CANCELED, matching what the
+// executions list reads back from Temporal for the same run.
+func terminalStatusFor(workflowError error) (model.WorkflowExecutionStatus, string) {
+	if workflowError == nil {
+		return model.WorkflowExecutionStatusCompleted, ""
+	}
+	if temporal.IsCanceledError(workflowError) {
+		return model.WorkflowExecutionStatusCanceled, "Execution canceled"
+	}
+	return model.WorkflowExecutionStatusFailed, workflowError.Error()
 }
 
 // setLastExecutionStatus records status on targetWorkflowID's row, which is not always
@@ -894,6 +928,7 @@ func setLastExecutionStatus(ctx workflow.Context, wf *model.Workflow, targetWork
 	if targetWorkflowID == "" {
 		return
 	}
+	ctx = cleanupContext(ctx)
 	activityOptions := workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Second, // Short timeout for status update
 		RetryPolicy: &temporal.RetryPolicy{
@@ -1563,7 +1598,7 @@ func processTaskLoop(
 										// We don't fail the workflow here, but the output will be nil/missing
 									} else {
 										output = rendered
-										logger.Info("Child workflow output rendered successfully", "taskID", task.ID, "output", output)
+										logger.Info("Child workflow output rendered successfully", "taskID", task.ID, "output", logsafe.Shape(output))
 									}
 								} else {
 									logger.Info("Child workflow output processing skipped", "taskID", task.ID, "runErr", runErr, "hasDef", childWfDef != nil, "outputLen", len(childWfDef.Output))
@@ -1861,12 +1896,16 @@ func processTaskLoop(
 	return completedTasks, executionTrace, nil
 }
 
-func updateFinalWorkflowStatusAndExecuteHooks(ctx workflow.Context, wf *model.Workflow, targetWorkflowID string, inputs map[string]any, logger temporalLog.Logger, workflowError error) {
+func updateFinalWorkflowStatusAndExecuteHooks(ctx workflow.Context, wf *model.Workflow, targetWorkflowID string, inputs map[string]any, logger temporalLog.Logger, workflowError error, secretValues []string) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("Panic recovered in workflow deferred cleanup hooks", "panic", r)
 		}
 	}()
+
+	// Everything below is end-of-run bookkeeping the user is owed even when the
+	// run was canceled, so it runs on a context the cancel cannot short-circuit.
+	ctx = cleanupContext(ctx)
 
 	activityOptions := workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Second,
@@ -1879,12 +1918,8 @@ func updateFinalWorkflowStatusAndExecuteHooks(ctx workflow.Context, wf *model.Wo
 	}
 	statusUpdateCtx := workflow.WithActivityOptions(ctx, activityOptions)
 
-	finalStatus := model.WorkflowExecutionStatusCompleted
-	var statusMessage string
-	if workflowError != nil {
-		finalStatus = model.WorkflowExecutionStatusFailed
-		statusMessage = workflowError.Error()
-	}
+	finalStatus, statusMessage := terminalStatusFor(workflowError)
+	canceled := finalStatus == model.WorkflowExecutionStatusCanceled
 
 	if !wf.DryRun {
 		logger.Info("updating final workflow status", "id", targetWorkflowID, "tenant", wf.TenantID, "account", wf.AccountID)
@@ -1899,8 +1934,12 @@ func updateFinalWorkflowStatusAndExecuteHooks(ctx workflow.Context, wf *model.Wo
 		}
 	}
 
-	if workflowError != nil {
-		logger.Error("Workflow failed", "error", workflowError)
+	if canceled {
+		// On.Failure is for a run that broke, not for one the user stopped; only
+		// On.Always (below) is owed to a cancel.
+		logger.Info("Workflow canceled")
+	} else if workflowError != nil {
+		logger.Error("Workflow failed", "error", ScrubSecretValues(workflowError.Error(), secretValues))
 		if wf != nil && wf.Definition.Hooks != nil && len(wf.Definition.Hooks.Failure) > 0 {
 			onFailureCtx := createActivityCtxForAction(ctx)
 			if err := executeSimpleActions(onFailureCtx, wf.Definition.Hooks.Failure, NewTemplateContext(wf.Definition.Inputs, inputs)); err != nil {

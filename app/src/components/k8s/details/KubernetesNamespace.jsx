@@ -90,6 +90,7 @@ const KubernetesNamespaceTable = ({ accountId }) => {
         namespaceName: namespaces,
         startDate: new Date(selectedDateRange.startDate),
         endDate: new Date(selectedDateRange.endDate),
+        columns: ['cost', 'avg_cpu_used', 'avg_memory_used', 'avg_cpu_request', 'avg_memory_request'],
       })
       .then((res) => {
         if (cancelled) {

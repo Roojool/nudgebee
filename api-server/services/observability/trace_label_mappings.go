@@ -181,7 +181,7 @@ func GetTraceLabelMapping(ctx *security.RequestContext, request GetLabelMappingR
 	// OTel-native reader based on the effective trace index, and those two sources
 	// publish different static mappings. Reading the wrong one would make the
 	// provider-default tier disagree with what queries actually resolve.
-	source, err := resolveTraceSource(ctx, request.AccountId, provider, integrationSource, "")
+	source, err := resolveTraceSource(ctx, request.AccountId, provider, integrationSource)
 	if err != nil {
 		return LabelMappingResponse{}, fmt.Errorf("provider %q (%s) is not a trace provider: %w", provider, integrationSource, err)
 	}

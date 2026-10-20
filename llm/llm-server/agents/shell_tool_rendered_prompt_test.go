@@ -32,7 +32,7 @@ import (
 // The contract checks here are intentionally narrower than the
 // description-content test: we only assert the load-bearing snippets
 // the LLM most needs (per-conversation cwd, /tmp scope, no_matches
-// semantic, credential auto-injection). Full-coverage of every
+// semantic, automatic credential handling). Full-coverage of every
 // description line lives in the dedicated tool_shell_test.go test
 // where regressions are easier to localize.
 func TestShellTool_DescriptionReachesRenderedPrompt(t *testing.T) {
@@ -57,8 +57,8 @@ func TestShellTool_DescriptionReachesRenderedPrompt(t *testing.T) {
 	contractRequired := map[string]string{
 		"per-conversation directory":                          "the cwd-scope fact must reach the LLM via the rendered tool list",
 		"shared with other conversations on the same account": "the /tmp leak warning must reach the LLM via the rendered tool list",
-		"no_matches":    "the grep/find/jq exit-1 success semantic must reach the LLM via the rendered tool list",
-		"auto-injected": "the cloud + GITHUB_TOKEN credential injection rule must reach the LLM via the rendered tool list",
+		"no_matches":                        "the grep/find/jq exit-1 success semantic must reach the LLM via the rendered tool list",
+		"Credentials handled automatically": "the CLI credential-boundary rule must reach the LLM via the rendered tool list",
 		"environment setup and the command that consumes it in the same call": "stateless environment guidance must reach the LLM via the rendered tool list",
 	}
 	assert.NotContains(t, rendered, ".nb_profile", "rendered guidance must not advertise a writable auto-sourced profile")

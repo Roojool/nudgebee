@@ -45,6 +45,16 @@ type ValidationResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// connectionSuccessMessage renders a passing connection test, with any advisory
+// notes appended. The test still succeeded — the notes describe a part of the
+// integration that is not usable, not a connection that failed.
+func connectionSuccessMessage(notes []string) string {
+	if len(notes) == 0 {
+		return "Connection successful"
+	}
+	return "Connection successful. " + strings.Join(notes, " ")
+}
+
 type IntegrationDiagnosisResponse struct {
 	Success           bool      `json:"success"`
 	TestStatus        string    `json:"test_status"`
@@ -120,6 +130,30 @@ func notifyMessagingCacheInvalidate(tenantId string) {
 	defer func() { _ = resp.Body.Close() }()
 }
 
+// notifyRulesCacheInvalidate drops notifications-server's cached notification
+// rules for a tenant, so a deleted rule stops applying without waiting out the
+// cache TTL. Best-effort; a miss only delays the change.
+func notifyRulesCacheInvalidate(tenantId string) {
+	if tenantId == "" || config.Config.NotificationServiceUrl == "" {
+		return
+	}
+	headers := map[string]string{"Content-Type": "application/json"}
+	if config.Config.NotificationServiceToken != "" {
+		headers["X-ACTION-TOKEN"] = config.Config.NotificationServiceToken
+	}
+	resp, err := common.HttpPost(
+		fmt.Sprintf("%s/api/rules/invalidate-cache", config.Config.NotificationServiceUrl),
+		common.HttpWithTimeout(10*time.Second),
+		common.HttpWithHeaders(headers),
+		common.HttpWithJsonBody(map[string]any{"tenant_id": tenantId}),
+	)
+	if err != nil {
+		slog.Warn("notification rules: cache invalidate failed (best-effort)", "error", err, "tenant_id", tenantId)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+}
+
 func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, tracer *trace.Tracer, meter *metric.Meter, logger *slog.Logger) {
 	ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
 	if err != nil {
@@ -184,7 +218,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		if request.IntegrationName == integrations.IntegrationGoogleChatSpace && request.IntegrationId == "" {
 			notifyGoogleChatBinding(ctx.GetSecurityContext().GetTenantId(), request.IntegrationConfigName, "bound")
 		}
-		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+		if integrations.IsWebhookMessagingIntegration(request.IntegrationName) {
 			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		}
 		return
@@ -241,7 +275,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		if request.IntegrationName == integrations.IntegrationGoogleChatSpace {
 			notifyGoogleChatBinding(ctx.GetSecurityContext().GetTenantId(), request.IntegrationConfigName, "unbound")
 		}
-		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+		if integrations.IsWebhookMessagingIntegration(request.IntegrationName) {
 			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		}
 		return
@@ -346,7 +380,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		}
 
 		c.JSON(200, map[string]string{"status": "success"})
-		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+		if integrations.IsWebhookMessagingIntegration(request.IntegrationName) {
 			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		}
 		// Audit is persisted by core.UpdateIntegrationConfigStatus (CreateAudit,
@@ -461,7 +495,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 				core.IntegrationConfigValue{Name: core.IntegrationConfigName, Value: request.IntegrationConfigName})
 		}
 
-		testErr := core.TestIntegrationConnectionByConfig(
+		notes, testErr := core.TestIntegrationConnectionByConfig(
 			ctx,
 			request.IntegrationName,
 			request.IntegrationConfigValues,
@@ -478,9 +512,13 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 			return
 		}
 
+		// Notes ride in Message, which the client already selects. A new response
+		// field would be dropped silently by the gateway unless the GraphQL type and
+		// every selection set were updated too, and the note is a sentence, not a
+		// structure.
 		c.JSON(200, ValidationResponse{
 			Success: true,
-			Message: "Connection successful",
+			Message: connectionSuccessMessage(notes),
 		})
 		return
 
@@ -729,6 +767,12 @@ func diagnoseIntegrationConnection(ctx *security.RequestContext, integrationID s
 func classifyIntegrationDiagnosisError(err error) (stage, reasonCode, summary, recommendedAction string) {
 	message := strings.ToLower(err.Error())
 	switch {
+	// A probe that names the misconfigured field says so with a "configuration:" prefix.
+	// Checked first because such a message quotes a customer-chosen value (an index
+	// called dns_logs or tls_events) that the substring branches below would otherwise
+	// route to the wrong stage.
+	case strings.HasPrefix(message, "configuration:"):
+		return "configuration", "CONFIGURATION_INVALID", "The integration configuration is incomplete or invalid.", "Review the integration settings and linked accounts, then retry the connection test."
 	case strings.Contains(message, "no such host"), strings.Contains(message, "dns"):
 		return "dns", "DNS_RESOLUTION_FAILED", "The integration host could not be resolved.", "Verify the configured hostname and DNS resolution from the Nudgebee connection path."
 	case strings.Contains(message, "x509"), strings.Contains(message, "certificate"), strings.Contains(message, "tls"):

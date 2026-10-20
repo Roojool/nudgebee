@@ -783,6 +783,7 @@ func handleTenantAction(actionPayload *ActionRequest, c *gin.Context, tracer *tr
 			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
 			return
 		}
+		notifyRulesCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		c.JSON(200, resp)
 		return
 	case "notification_channel_mapping_create":
@@ -1192,6 +1193,16 @@ func handleTenantAction(actionPayload *ActionRequest, c *gin.Context, tracer *tr
 		if err != nil {
 			c.JSON(400, common.ErrorActionBadRequest("Failed to fetch accounts for tenant: "+err.Error()))
 			return
+		}
+
+		// Refuse before deleting anything: an account that still owns automations
+		// or knowledge bases would otherwise stop the loop below after the
+		// accounts ahead of it were already gone.
+		for _, accountId := range accountIds {
+			if err := account.CheckAccountDeletable(accountId); err != nil {
+				c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+				return
+			}
 		}
 
 		var deletedAccountIds []string

@@ -153,9 +153,9 @@ export async function waitForListingSettled(rows: Locator, emptyState: Locator):
 
 // Reads a provider name out of the listing's first row so the search cases run
 // against real tenant data instead of a hardcoded fixture name. The Name cell
-// appends a "Default" / "Default (n of m)" chip for a provider that is some
-// account's default, and that chip text is not part of the stored name, so it
-// has to come off before the value is used as a filter.
+// appends a "Default" chip for the tenant's default provider (older builds
+// showed "Default (n of m)"), and that chip text is not part of the stored
+// name, so it has to come off before the value is used as a filter.
 export async function firstProviderName(locators: LLMConfigurationsLocators): Promise<string> {
   const firstCell = locators.llmRows().first().locator("td").first();
   // The wait is on real text, not on visibility: a cell can be visible while

@@ -1017,6 +1017,10 @@ func (a *awsProvider) GetUsageReport(ctx providers.CloudProviderContext, account
 	return getAwsUsageReport(ctx, account, month, year)
 }
 
+func (a *awsProvider) StreamUsageReport(ctx providers.CloudProviderContext, account providers.Account, month time.Month, year int, emit func([]providers.UsageReportItem) error) error {
+	return streamAwsUsageReport(ctx, account, month, year, emit)
+}
+
 // GetAvailableUsageReportPeriods implements providers.UsageReportPeriodDiscoverer
 // by enumerating the CUR billing-period folders present in the account's S3 bucket.
 func (a *awsProvider) GetAvailableUsageReportPeriods(ctx providers.CloudProviderContext, account providers.Account, maxMonths int) ([]providers.UsageReportPeriod, error) {
@@ -1270,6 +1274,192 @@ var awsBlockedCommands = []string{
 	"sts",
 }
 
+var awsV2BlockedStsOperations = map[string]bool{
+	"assume-role":                   true,
+	"assume-role-with-saml":         true,
+	"assume-role-with-web-identity": true,
+	"get-federation-token":          true,
+	"get-session-token":             true,
+}
+
+var awsGlobalOptionsWithValue = map[string]bool{
+	"--ca-bundle":           true,
+	"--cli-binary-format":   true,
+	"--cli-connect-timeout": true,
+	"--cli-read-timeout":    true,
+	"--color":               true,
+	"--endpoint-url":        true,
+	"--output":              true,
+	"--profile":             true,
+	"--query":               true,
+	"--region":              true,
+}
+
+func awsCommandPositionals(args []string) ([]string, error) {
+	positionals := make([]string, 0, 2)
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			positionals = append(positionals, arg)
+			if len(positionals) == 2 {
+				return positionals, nil
+			}
+			continue
+		}
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		if awsGlobalOptionsWithValue[arg] {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("AWS CLI option %s requires a value", arg)
+			}
+			i++
+		}
+	}
+	return positionals, nil
+}
+
+func validateAwsV2Command(command string) error {
+	args, err := shlex.Split(command)
+	if err != nil {
+		return fmt.Errorf("failed to parse AWS CLI command: %w", err)
+	}
+	if len(args) < 2 || args[0] != "aws" {
+		return fmt.Errorf("AWS CLI command must start with aws")
+	}
+	if err := validateAwsV2Arguments(args[1:]); err != nil {
+		return err
+	}
+	positionals, err := awsCommandPositionals(args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) == 0 {
+		return fmt.Errorf("AWS CLI command must name a service")
+	}
+	service := positionals[0]
+	if service == "configure" || service == "sso" {
+		return fmt.Errorf("command %q is not allowed", service)
+	}
+	if service == "sts" && len(positionals) > 1 && awsV2BlockedStsOperations[positionals[1]] {
+		return fmt.Errorf("command %q is not allowed", "sts "+positionals[1])
+	}
+	if len(positionals) > 1 && awsV2BlockedOperations[service][positionals[1]] {
+		return fmt.Errorf("AWS workspace CLI operation %s %s is not allowed", service, positionals[1])
+	}
+	return nil
+}
+
+func validateAwsV2Arguments(args []string) error {
+	for _, arg := range args {
+		lower := strings.ToLower(arg)
+		switch {
+		case matchesAwsV2BlockedOption(lower, "--profile"):
+			return fmt.Errorf("AWS profiles must be resolved by the workspace proxy")
+		case matchesAwsV2BlockedOption(lower, "--endpoint-url"):
+			return fmt.Errorf("custom AWS endpoints are not allowed")
+		case matchesAwsV2BlockedOption(lower, "--ca-bundle") || matchesAwsV2BlockedOption(lower, "--no-verify-ssl"):
+			return fmt.Errorf("custom AWS TLS settings are not allowed")
+		case matchesAwsV2BlockedOption(lower, "--with-decryption"):
+			return fmt.Errorf("decrypting AWS parameter values in the workspace CLI is not allowed")
+		case strings.Contains(lower, "file://") || strings.Contains(lower, "fileb://"):
+			return fmt.Errorf("AWS workspace CLI cannot read files from cloud-collector")
+		}
+	}
+	return nil
+}
+
+// matchesAwsV2BlockedOption also matches long-option abbreviations accepted by
+// AWS CLI. Ambiguous prefixes fail closed. The comparison remains scoped to
+// the explicit transport-boundary denylist above; unrelated AWS flags pass.
+func matchesAwsV2BlockedOption(arg, blockedOption string) bool {
+	option, _, _ := strings.Cut(arg, "=")
+	return strings.HasPrefix(option, "--") && len(option) > len("--") && strings.HasPrefix(blockedOption, option)
+}
+
+// awsV2BlockedOperations are unsafe at the cloud-collector transport boundary
+// regardless of whether the outer tool call was approved. They expose fresh
+// credentials or require collector-local file access; ordinary AWS mutations
+// are authorized and approval-gated by llm-server before reaching this API.
+var awsV2BlockedOperations = map[string]map[string]bool{
+	"codeartifact": {
+		"get-authorization-token": true,
+	},
+	"ecr": {
+		"get-authorization-token": true,
+		"get-login-password":      true,
+	},
+	"eks": {
+		"get-token": true,
+	},
+	"cognito-identity": {
+		"get-credentials-for-identity": true,
+		"get-open-id-token":            true,
+	},
+	"lightsail": {
+		"get-instance-access-details":                  true,
+		"get-relational-database-master-user-password": true,
+	},
+	"rds": {
+		"generate-db-auth-token": true,
+	},
+	"redshift": {
+		"get-cluster-credentials":          true,
+		"get-cluster-credentials-with-iam": true,
+	},
+	"redshift-serverless": {
+		"get-credentials": true,
+	},
+	"s3": {
+		"cp":      true,
+		"mv":      true,
+		"presign": true,
+		"sync":    true,
+	},
+	"s3api": {
+		"get-object":            true,
+		"get-object-torrent":    true,
+		"put-object":            true,
+		"select-object-content": true,
+		"upload-part":           true,
+	},
+	"secretsmanager": {
+		"batch-get-secret-value": true,
+		"get-secret-value":       true,
+	},
+}
+
+func awsCliEnv(ctx context.Context, account providers.Account, command string) ([]string, error) {
+	var cmdEnv []string
+	region := "us-east-1"
+	if account.Region != nil {
+		region = *account.Region
+	}
+	if !strings.Contains(command, "--region") {
+		cmdEnv = append(cmdEnv, "AWS_REGION="+region)
+	}
+
+	cfg, err := getAwsConfigFromAccount(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	awsCreds, err := cfg.Credentials.Retrieve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cmdEnv = append(cmdEnv,
+		"AWS_ACCESS_KEY_ID="+awsCreds.AccessKeyID,
+		"AWS_SECRET_ACCESS_KEY="+awsCreds.SecretAccessKey,
+	)
+	if awsCreds.SessionToken != "" {
+		cmdEnv = append(cmdEnv, "AWS_SESSION_TOKEN="+awsCreds.SessionToken)
+	}
+	if os.Getenv("AWS_PROFILE") != "" {
+		cmdEnv = append(cmdEnv, "AWS_PROFILE="+os.Getenv("AWS_PROFILE"))
+	}
+	return cmdEnv, nil
+}
+
 func (a *awsProvider) ExecuteCliCommand(ctx providers.CloudProviderContext, account providers.Account, command string) (string, error) {
 	command = strings.TrimSpace(command)
 	if !strings.HasPrefix(command, "aws ") {
@@ -1280,32 +1470,9 @@ func (a *awsProvider) ExecuteCliCommand(ctx providers.CloudProviderContext, acco
 		return "", err
 	}
 
-	// Set AWS credentials and region for the CLI command
-	var cmdEnv []string
-	region := "us-east-1"
-	if account.Region != nil {
-		region = *account.Region
-	}
-	// Only add AWS_REGION if the command itself doesn't specify --region
-	if !strings.Contains(command, "--region") {
-		cmdEnv = append(cmdEnv, "AWS_REGION="+region)
-	}
-
-	cfg, err := getAwsConfigFromAccount(ctx.GetContext(), account)
+	cmdEnv, err := awsCliEnv(ctx.GetContext(), account, command)
 	if err != nil {
 		return "", err
-	}
-	awsCreds, err := cfg.Credentials.Retrieve(context.TODO())
-	if err != nil {
-		return "", err
-	}
-	cmdEnv = append(cmdEnv, "AWS_ACCESS_KEY_ID="+awsCreds.AccessKeyID)
-	cmdEnv = append(cmdEnv, "AWS_SECRET_ACCESS_KEY="+awsCreds.SecretAccessKey)
-	if awsCreds.SessionToken != "" {
-		cmdEnv = append(cmdEnv, "AWS_SESSION_TOKEN="+awsCreds.SessionToken)
-	}
-	if os.Getenv("AWS_PROFILE") != "" {
-		cmdEnv = append(cmdEnv, "AWS_PROFILE="+os.Getenv("AWS_PROFILE"))
 	}
 
 	// Handle backslash line continuations before parsing
@@ -1349,6 +1516,52 @@ func (a *awsProvider) ExecuteCliCommand(ctx providers.CloudProviderContext, acco
 	}
 
 	return stdout, nil
+}
+
+// ExecuteCliCommandV2 executes exactly one AWS CLI process for workspace
+// shims. Shell pipelines and local processing remain in the workspace; command
+// exits are returned as data so the shim can preserve ordinary shell behavior.
+func (a *awsProvider) ExecuteCliCommandV2(ctx providers.CloudProviderContext, account providers.Account, command string) (providers.CliExecutionResult, error) {
+	command = strings.TrimSpace(command)
+	if err := validateAwsV2Command(command); err != nil {
+		return providers.CliExecutionResult{}, err
+	}
+	cmdEnv, err := awsCliEnv(ctx.GetContext(), account, command)
+	if err != nil {
+		return providers.CliExecutionResult{}, err
+	}
+	timeout := time.Duration(config.Config.CloudCollectorCliTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	maxOutput := config.Config.CloudCollectorCliMaxOutputBytes
+	if maxOutput <= 0 {
+		maxOutput = 1024 * 1024
+	}
+	outputTruncated := false
+	stdout, stderr, execErr := common.SecureExecute(ctx.GetContext(), common.SecureCommandOptions{
+		Command:         command,
+		Env:             cmdEnv,
+		Timeout:         timeout,
+		MaxOutputBytes:  maxOutput,
+		OutputTruncated: &outputTruncated,
+	})
+	result := providers.CliExecutionResult{Stdout: stdout, Stderr: stderr, OutputTruncated: outputTruncated}
+	if execErr == nil {
+		return result, nil
+	}
+	var exitErr *common.CommandExitError
+	if errors.As(execErr, &exitErr) {
+		result.ExitCode = exitErr.ExitCode
+		return result, nil
+	}
+	var timeoutErr *common.CommandTimeoutError
+	if errors.As(execErr, &timeoutErr) {
+		result.ExitCode = 124
+		result.TimedOut = true
+		return result, nil
+	}
+	return result, execErr
 }
 
 func (a *awsProvider) QueryServiceMap(ctx providers.CloudProviderContext, account providers.Account, query providers.QueryServiceMapRequest) (providers.QueryServiceMapResponse, error) {
@@ -1687,86 +1900,29 @@ func (a *awsProvider) ListEventRules(ctx providers.CloudProviderContext, account
 		wg.Add(1)
 		go func(regionName string) {
 			defer wg.Done()
-			cfg.Region = regionName
-			cwSvc := cloudwatch.NewFromConfig(cfg)
+			// Each goroutine needs its own config: mutating the shared cfg.Region
+			// raced across regions, so a client could be built for another region.
+			regionCfg := cfg.Copy()
+			regionCfg.Region = regionName
 
-			paginator := cloudwatch.NewDescribeAlarmsPaginator(cwSvc, &cloudwatch.DescribeAlarmsInput{})
-			for paginator.HasMorePages() {
-				page, err := paginator.NextPage(context.TODO())
-				if err != nil {
-					if isRegionEndpointMissing(err) {
-						ctx.GetLogger().Debug("skipping region without cloudwatch endpoint", "region", regionName)
-						return
-					}
-					if isThrottleError(err) {
-						ctx.GetLogger().Warn("skipping rate-limited cloudwatch region; will retry next sync", "error", err, "region", regionName)
-						return
-					}
-					errChan <- fmt.Errorf("failed to describe alarms in %s: %w", regionName, err)
+			// Deliberately not derived from the job context: this runs at the end
+			// of the post-report job, often after its time budget has expired, and
+			// the alarm sync would otherwise fail outright on those accounts. The
+			// region still gets its own bound so a hung endpoint can't pin the
+			// goroutine.
+			regionCtx, cancel := context.WithTimeout(context.Background(), alarmRegionTimeout)
+			defer cancel()
+			rules, err := describeRegionAlarmRules(regionCtx, ctx.GetLogger(), cloudwatch.NewFromConfig(regionCfg), regionName, account.AccountNumber)
+			if err != nil {
+				if skipAlarmRegion(ctx.GetLogger(), err, regionName) {
 					return
 				}
-				mu.Lock()
-				for _, alarm := range page.MetricAlarms {
-					namespace, ok := cloudwatchNamespaceServiceMap[aws.ToString(alarm.Namespace)]
-					serviceName := ""
-					if ok {
-						serviceName = namespace.ServiceName
-					} else {
-						// Fallback for custom namespaces
-						serviceName = "CloudWatch"
-						ctx.GetLogger().Info("using fallback for custom namespace in event rules", "namespace", aws.ToString(alarm.Namespace), "alarmName", aws.ToString(alarm.AlarmName))
-					}
-
-					exprJson, err := common.MarshalJson(alarm)
-					if err != nil {
-						ctx.GetLogger().Error("unable to serialize data", "error", err)
-						continue
-					}
-
-					// Handle optional fields safely to avoid nil pointer dereference
-					var duration time.Duration
-					if alarm.Period != nil {
-						duration = time.Second * time.Duration(*alarm.Period)
-					}
-
-					threshold := "0"
-					if alarm.Threshold != nil {
-						threshold = fmt.Sprintf("%f", *alarm.Threshold)
-					}
-
-					metricName := ""
-					if alarm.MetricName != nil {
-						metricName = *alarm.MetricName
-					}
-
-					statistic := ""
-					if alarm.Statistic != "" {
-						statistic = string(alarm.Statistic)
-					}
-
-					eventRules = append(eventRules, providers.EventRule{
-						Name:        aws.ToString(alarm.AlarmName),
-						Description: aws.ToString(alarm.AlarmDescription),
-						Summary:     fmt.Sprintf("CloudWatch Alarm '%s' in region %s", aws.ToString(alarm.AlarmName), regionName),
-						Expr:        string(exprJson),
-						Source:      "AWS_CloudWatch_Alarm",
-						Severity:    providers.EventDefinitionSeverityCritical,
-						Category:    serviceName,
-						Duration:    duration,
-						Labels: map[string]string{
-							"aws_region":                 regionName,
-							"aws_alarm":                  aws.ToString(alarm.AlarmName),
-							"aws_account":                account.AccountNumber,
-							"aws_service_name":           serviceName,
-							"aws_event_threshold":        threshold,
-							"aws_event_metric_namespace": aws.ToString(alarm.Namespace),
-							"aws_event_metric_name":      metricName,
-							"aws_event_metric_statistic": statistic,
-						},
-					})
-				}
-				mu.Unlock()
+				errChan <- fmt.Errorf("failed to describe alarms in %s: %w", regionName, err)
+				return
 			}
+			mu.Lock()
+			eventRules = append(eventRules, rules...)
+			mu.Unlock()
 		}(region)
 	}
 

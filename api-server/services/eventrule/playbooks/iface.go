@@ -11,13 +11,20 @@ type PlaybookEvent struct {
 	Source      string            `json:"source"`
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
-	StartedAt   *time.Time        `json:"started_at"`
-	EndedAt     *time.Time        `json:"ended_at"`
+	// StartedAt is the start of the observability window, NOT the alert's start:
+	// the event service sets it 10 minutes before the alert so metric and log
+	// queries cover the lead-up. Anything asking "what happened before the
+	// alert" must use AlertStart instead, or it misses those 10 minutes.
+	StartedAt *time.Time `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at"`
+	// DetectedAt is the alert's own start time, without the lead-in applied to
+	// StartedAt. Read it through AlertStart.
+	DetectedAt *time.Time `json:"detected_at,omitempty"`
 	// IncidentAt is when the failure actually happened, as opposed to when we
 	// noticed it. Set only when something authoritative told us — currently the
 	// container termination time read off the pod object for the
 	// terminated-container classes. When present it is the anchor every
-	// observability window is centred on; StartedAt stays the detection time,
+	// observability window is centred on; DetectedAt stays the detection time,
 	// which is what triage, dedup and the inbox key on.
 	IncidentAt   *time.Time `json:"incident_at,omitempty"`
 	SubjectName  string     `json:"subject_name"`
@@ -48,6 +55,16 @@ type PlaybookEvent struct {
 	// consumer_timeout and get its message redelivered forever. Zero means no bound,
 	// which is the inline request path's behaviour.
 	Deadline time.Time `json:"deadline,omitempty"`
+}
+
+// AlertStart is when the alert started: DetectedAt when the caller set it,
+// otherwise StartedAt (callers that build a PlaybookEvent by hand set StartedAt
+// to the alert start). Nil when neither is set.
+func (e PlaybookEvent) AlertStart() *time.Time {
+	if e.DetectedAt != nil && !e.DetectedAt.IsZero() {
+		return e.DetectedAt
+	}
+	return e.StartedAt
 }
 
 type PlaybookActionContext interface {

@@ -26,14 +26,7 @@ import BlockOutlinedIcon from '@mui/icons-material/BlockOutlined';
 import SaveOutlinedIcon from '@mui/icons-material/SaveOutlined';
 import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined';
 import TuneOutlinedIcon from '@mui/icons-material/TuneOutlined';
-
-// Maps the legacy severity labels to ds/SeverityIcon levels (Debug has no DS level → info).
-const SEVERITY_LEVEL_BY_LABEL = {
-  High: 'high',
-  Medium: 'medium',
-  Low: 'low',
-  Debug: 'info',
-};
+import { buildSeverityData } from './clusterEventSeverity';
 
 // Leading icon per optimization card, keyed by title. The optimize cards render from
 // a single map (optimizeBlockData), so the icon lives here in one lookup — not seven
@@ -108,32 +101,7 @@ const KubernetesClusterSummaryUtilization = ({ accountId }) => {
     },
   ];
   const defaultEventSummaryData = {
-    severityData: [
-      {
-        value: 0,
-        label: 'High',
-        color: 'var(--ds-background-100)',
-        background: 'var(--ds-red-500)',
-      },
-      {
-        value: 0,
-        label: 'Medium',
-        color: 'var(--ds-red-500)',
-        background: 'var(--ds-red-100)',
-      },
-      {
-        value: 0,
-        label: 'Low',
-        color: 'var(--ds-amber-700)',
-        background: 'var(--ds-amber-100)',
-      },
-      {
-        value: 0,
-        label: 'Debug',
-        color: 'var(--ds-blue-500)',
-        background: 'var(--ds-blue-100)',
-      },
-    ],
+    severityData: buildSeverityData(),
     highEvents: 0,
     applicationEvents: 0,
     podEvents: 0,
@@ -324,12 +292,7 @@ const KubernetesClusterSummaryUtilization = ({ accountId }) => {
         applicationEvents: firstRow.count_application_issues,
         podEvents: firstRow.count_pod_issues,
 
-        severityData: [
-          { value: firstRow.count_priority_high, label: 'High', color: 'var(--ds-background-100)', background: 'var(--ds-red-500)' },
-          { value: firstRow.count_priority_medium, label: 'Medium', color: 'var(--ds-red-500)', background: 'var(--ds-red-100)' },
-          { value: firstRow.count_priority_low, label: 'Low', color: 'var(--ds-amber-700)', background: 'var(--ds-amber-100)' },
-          { value: firstRow.count_priority_debug, label: 'Debug', color: 'var(--ds-blue-500)', background: 'var(--ds-blue-100)' },
-        ],
+        severityData: buildSeverityData(firstRow),
       });
     }
   };
@@ -546,13 +509,7 @@ const KubernetesClusterSummaryUtilization = ({ accountId }) => {
                         },
                       }}
                     >
-                      <SeverityIcon
-                        level={SEVERITY_LEVEL_BY_LABEL[data.label] || 'info'}
-                        count={data.value || 0}
-                        variant='square'
-                        size={16}
-                        aria-label={data.label}
-                      />
+                      <SeverityIcon level={data.level} count={data.value || 0} variant='square' size={16} aria-label={data.label} />
                     </Box>
                   ))
                 )}

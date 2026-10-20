@@ -167,7 +167,24 @@ const ENUM_VALUE_LABELS = {
   cloud_api_token: 'Confluence Cloud — email + API token',
   datacenter_pat: 'Data Center / Server — personal access token',
   datacenter_password: 'Data Center / Server — username + password',
+  // Elasticsearch trace_schema. snakeToTitleCase renders these as "Data Prepper",
+  // "Otel Native" and "Elastic Apm" — none of which names the thing that WROTE the
+  // data, which is what the operator actually knows. Each label pairs the writer
+  // with the index pattern it produces, since that is how they recognise it.
+  data_prepper: 'Data Prepper (otel-v1-apm-span-*)',
+  otel_native: 'OpenTelemetry native (traces-*.otel)',
+  elastic_apm: 'Elastic APM Server (traces-apm*)',
 };
+
+// Options for the per-account Trace Schema selector in the ES "Per-Account Index"
+// cards. The top-level trace_schema field is schema-driven and gets its options from
+// the integration's Enum automatically; these cards are hand-built, so the same set is
+// listed here. Keep in sync with ESTraceSchemas in
+// api-server/services/integrations/elasticsearch.go.
+const ES_TRACE_SCHEMA_OPTIONS = ['data_prepper', 'otel_native', 'elastic_apm'].map((value) => ({
+  label: ENUM_VALUE_LABELS[value],
+  value,
+}));
 
 const COMMON_WEBHOOK_LABEL_KEYS = [
   'alertname',
@@ -207,6 +224,15 @@ const COMMON_WEBHOOK_LABEL_KEYS = [
   'rule_type',
 ];
 
+/**
+ * `editData`'s default of `null` with no other annotation left TypeScript
+ * inferring the prop as `null | undefined` for any `.tsx` caller — narrower
+ * than what the component actually does with it (`editData.integrations_cloud_accounts`,
+ * `editData?.source`, …), just never hit before because every caller so far
+ * has been a `.jsx` file, unchecked either way. `propTypes` below already
+ * documents it as `PropTypes.object`; this just gives that same fact to `tsc`.
+ * @param {{ editData?: Record<string, unknown> | null }} props
+ */
 const IntegrationDynamicFormModal = ({
   integrationName,
   openModal,
@@ -242,9 +268,10 @@ const IntegrationDynamicFormModal = ({
   // integration record commonly serves both logs and traces, so a shared list would
   // apply log filters to trace queries.
   const [defaultTraceFilterRules, setDefaultTraceFilterRules] = useState([emptyFilterCard()]);
-  // Per-account ES index override (Advanced Settings): each card maps an account to
-  // its own log/metrics/trace index; unmapped accounts fall back to the top-level index.
-  const [indexRules, setIndexRules] = useState([{ accountId: '', log_index: '', metrics_index: '', trace_index: '' }]);
+  // Per-account ES override (Advanced Settings): each card maps an account to its own
+  // log/metrics/trace index, plus the trace schema that index is in; unmapped accounts
+  // fall back to the top-level values.
+  const [indexRules, setIndexRules] = useState([{ accountId: '', log_index: '', metrics_index: '', trace_index: '', trace_schema: '' }]);
   // Per-account canonical -> provider log field mapping (Advanced Settings). Highest
   // precedence layer of the mapping merge, above the account and tenant settings.
   const [labelMappingCards, setLabelMappingCards] = useState([{ accountId: '', rows: [{ canonical: '', field: '' }] }]);
@@ -347,7 +374,23 @@ const IntegrationDynamicFormModal = ({
         //   never cloud-eligible, hence !isAgentSource.
         // 'es' is the ES page's integrationName (account-form.jsx passes {'ES'}); the
         // check lowercases it, so 'es' — not 'elasticsearch' — is what matches here.
-        const CLOUD_CAPABLE_INTEGRATIONS = ['datadog', 'observe', 'dynatrace', 'splunk_observability_platform', 'solarwinds', 'elasticsearch', 'es'];
+        // chronosphere/jaeger: both are hosted/SaaS-reachable backends with no
+        // proprietary k8s-column dependency (unlike the loggly/pinot/hive/
+        // azure_app_insights/signoz group above), and neither carries a documented
+        // product decision restricting it the way New Relic does — their absence
+        // here looked like an oversight, not a decision (interim call, pending
+        // product confirmation — see docs/setup-center-build-spec.md §9).
+        const CLOUD_CAPABLE_INTEGRATIONS = [
+          'datadog',
+          'observe',
+          'dynatrace',
+          'splunk_observability_platform',
+          'solarwinds',
+          'elasticsearch',
+          'es',
+          'chronosphere',
+          'jaeger',
+        ];
         const isWebhook = configs.category === 'incident_webhook' || (integrationName || '').toLowerCase().includes('webhook');
         // The VM agent (forager) is the exception to the !isAgentSource rule above.
         // That rule excludes agent-sourced providers because they need an
@@ -668,7 +711,9 @@ const IntegrationDynamicFormModal = ({
   }, [editData]);
 
   // Hydrate the ES per-account index override from the saved index_account_mapping
-  // blob (JSON array of { account_id, log_index?, metrics_index?, trace_index? }).
+  // blob (JSON array of { account_id, log_index?, metrics_index?, trace_index?,
+  // trace_schema? }). trace_schema rides in the same blob because the layout is a
+  // property of what that account's trace index holds.
   useEffect(() => {
     const raw = editData?.integration_config_values?.index_account_mapping;
     if (!raw) return;
@@ -681,6 +726,7 @@ const IntegrationDynamicFormModal = ({
         log_index: e.log_index || '',
         metrics_index: e.metrics_index || '',
         trace_index: e.trace_index || '',
+        trace_schema: e.trace_schema || '',
       }))
     );
   }, [editData]);
@@ -1159,7 +1205,7 @@ const IntegrationDynamicFormModal = ({
 
   // --- Per-account ES index (Advanced Settings) handlers ---
   const handleAddIndexCard = () => {
-    setIndexRules([...indexRules, { accountId: '', log_index: '', metrics_index: '', trace_index: '' }]);
+    setIndexRules([...indexRules, { accountId: '', log_index: '', metrics_index: '', trace_index: '', trace_schema: '' }]);
   };
   const handleRemoveIndexCard = (cardIdx) => {
     setIndexRules(indexRules.filter((_, i) => i !== cardIdx));
@@ -1446,7 +1492,16 @@ const IntegrationDynamicFormModal = ({
       );
       if (result?.success) {
         setConnectionVerified(true);
-        snackbar.success(`${snakeToTitleCase(integrationName)} connection successful`);
+        // A passing test can still carry an advisory note — a part of the
+        // integration that is configured but not usable, such as CubeAPM's
+        // alert-rule API answering with a different credential. The note rides in
+        // `message`; showing only the hardcoded string threw it away.
+        const note = (result.message || '').replace(/^Connection successful\.?\s*/, '');
+        if (note) {
+          snackbar.warning(`${snakeToTitleCase(integrationName)} connection successful. ${note}`);
+        } else {
+          snackbar.success(`${snakeToTitleCase(integrationName)} connection successful`);
+        }
       } else {
         snackbar.error(result?.error || `${snakeToTitleCase(integrationName)} connection test failed`);
       }
@@ -1491,9 +1546,13 @@ const IntegrationDynamicFormModal = ({
       }
     }
     if (integrationName === 'ES' || integrationName === 'elasticsearch') {
-      // Any index card with an index entered must have an account selected.
+      // Any index card with something entered must have an account selected —
+      // including a lone Trace Schema, which the serializer would otherwise drop
+      // without saying so.
       const indexCardMissingAccount = indexRules.some(
-        (c) => !c.accountId && ((c.log_index || '').trim() || (c.metrics_index || '').trim() || (c.trace_index || '').trim())
+        (c) =>
+          !c.accountId &&
+          ((c.log_index || '').trim() || (c.metrics_index || '').trim() || (c.trace_index || '').trim() || (c.trace_schema || '').trim())
       );
       if (indexCardMissingAccount) {
         snackbar.error('Per-Account Index: please select an account for each index card.');
@@ -1741,12 +1800,16 @@ const IntegrationDynamicFormModal = ({
           const log = (c.log_index || '').trim();
           const metrics = (c.metrics_index || '').trim();
           const trace = (c.trace_index || '').trim();
+          const traceSchema = (c.trace_schema || '').trim();
           if (log) row.log_index = log;
           if (metrics) row.metrics_index = metrics;
           if (trace) row.trace_index = trace;
+          if (traceSchema) row.trace_schema = traceSchema;
           return row;
         })
-        .filter((r) => r.account_id && (r.log_index || r.metrics_index || r.trace_index));
+        // trace_schema counts as content on its own: an account can share the
+        // top-level trace index and still need its own layout declared.
+        .filter((r) => r.account_id && (r.log_index || r.metrics_index || r.trace_index || r.trace_schema));
       const indexPreviouslySet = !!editData?.integration_config_values?.index_account_mapping;
       if (cleanedIndexRows.length > 0 || indexPreviouslySet) {
         transformedValues.push({
@@ -1986,7 +2049,7 @@ const IntegrationDynamicFormModal = ({
     cubeapm_webhook: {
       endpoint: 'cubeapm',
       message:
-        'Add the following URL as a Webhook notification channel in CubeAPM. Leave the payload template unset — CubeAPM’s default body is already Alertmanager-compatible, which is what NudgeBee parses',
+        'Add the following URL as a Webhook notification channel in CubeAPM. Leave the payload template unset — CubeAPM’s default body is already Alertmanager-compatible, which is the expected format',
     },
   };
 
@@ -2143,7 +2206,7 @@ const IntegrationDynamicFormModal = ({
                 sx={{
                   color: ds.gray[600],
                   fontSize: 'var(--ds-text-body)',
-                  fontFamily: 'monospace',
+                  fontFamily: ds.font.mono,
                   lineHeight: 1.6,
                   flex: 1,
                   m: 0,
@@ -2261,7 +2324,7 @@ const IntegrationDynamicFormModal = ({
         }}
         title={
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-            <Typography component='h2' variant='h6' fontWeight={600}>
+            <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
               {`Set up ${titleCase(integrationName)}`}
             </Typography>
           </Box>
@@ -2732,6 +2795,10 @@ const IntegrationDynamicFormModal = ({
                                           ? 'textarea'
                                           : 'text'
                                       }
+                                      // Nothing on this form is a saved browser login. The secret opts out
+                                      // via `new-password`; its neighbours opt out too, so the browser can't
+                                      // pair a config field like Username with the adjacent secret and fill both.
+                                      autoComplete={field.is_encrypted ? 'new-password' : 'off'}
                                       value={formValues[key] || ''}
                                       onChange={(value) => handleChange(key, value)}
                                       trailingIcon={
@@ -2871,7 +2938,7 @@ const IntegrationDynamicFormModal = ({
                         </Typography>
                         {rules.length > 1 && (
                           <Button
-                            tone='danger'
+                            tone='ghost'
                             size='xs'
                             composition='icon-only'
                             icon={<SafeIcon src={NewDelete} alt='Remove rule' style={{ width: ds.space.mul(0, 7), height: ds.space.mul(0, 7) }} />}
@@ -3217,6 +3284,23 @@ const IntegrationDynamicFormModal = ({
                                       onSelect={(_e, v) => handleIndexCardChange(cardIdx, 'trace_index', v?.value ?? v ?? '')}
                                       isOptionsLoading={esIndexesLoading}
                                       placeholder={formValues.trace_index ? `inherit: ${formValues.trace_index}` : 'inherit top-level'}
+                                    />
+                                  </Box>
+                                  {/* The three trace layouts share no field names, so the reader
+                                      cannot be inferred from the index above — it is declared. Only
+                                      needed when this account's cluster writes a different layout
+                                      than the integration's top-level Trace Schema. */}
+                                  <Box sx={{ flex: '1 1 30%', minWidth: 180 }}>
+                                    <FilterDropdown
+                                      label='Trace Schema'
+                                      options={ES_TRACE_SCHEMA_OPTIONS}
+                                      value={card.trace_schema}
+                                      onSelect={(_e, v) => handleIndexCardChange(cardIdx, 'trace_schema', v?.value ?? v ?? '')}
+                                      placeholder={
+                                        formValues.trace_schema
+                                          ? `inherit: ${ENUM_VALUE_LABELS[formValues.trace_schema] || formValues.trace_schema}`
+                                          : 'inherit top-level'
+                                      }
                                     />
                                   </Box>
                                 </Box>

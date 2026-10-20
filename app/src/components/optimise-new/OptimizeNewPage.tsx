@@ -27,8 +27,10 @@ import DismissModal from './DismissModal';
 import TicketLink from '@shared/links/TicketLink';
 import { formatMemory } from '@lib/formatter';
 import ResolveModal from './ResolveModal';
+import K8sActionModal from './K8sActionModal';
+import { k8sActionFor } from './k8sActions';
 import CliCommandModal from './CliCommandModal';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Stat } from '@ui/Stat';
 import { CostCallout } from '@ui/CostCallout';
@@ -56,13 +58,15 @@ import {
   ruleNameSearchText,
   makeRuleFilterValue,
   parseRuleFilterValue,
+  parseQueryArray,
+  accountFilterFromQuery,
+  filtersToUrlQuery,
   getRecommendationBrief,
   getResourceDisplayName,
   safeParseJSON,
   STATUS_FILTER_OPTIONS,
   dismissalLabel,
   cardTabSx,
-  cardKeyDown,
   type SortField,
   type SortDirection,
 } from './utils';
@@ -169,14 +173,6 @@ const WIDGET_CATEGORY_TOOLTIPS: Record<string, string> = {
   InfraUpgrade: 'Infrastructure upgrade recommendations including node groups, instance types, and cluster versions',
   Configuration: 'Configuration best practices and policy compliance recommendations',
   K8sSpotRecommendation: 'Workloads eligible for Spot/preemptible instances to reduce compute costs',
-};
-
-/** Parse a URL query param that may be a string or string[] into a string[] */
-const parseQueryArray = (param: string | string[] | undefined): string[] => {
-  if (!param) {
-    return [];
-  }
-  return Array.isArray(param) ? param : [param];
 };
 
 // Map between CustomTable header labels and backend sort fields.
@@ -332,7 +328,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
   const { setAllCluster } = useData();
 
   // Accounts state: id → { name, cloud_provider }
-  const [accounts, setAccounts] = useState<Record<string, { name: string; cloud_provider: string }>>({});
+  const [accounts, setAccounts] = useState<Record<string, { name: string; cloud_provider: string; agentConnected: boolean }>>({});
 
   // Summary state — split into two independent fetches so the summary cards
   // (Total Recommendations, per-category counts) stay a static overview,
@@ -380,7 +376,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
     const severityFromUrl = parseQueryArray(router.query.severity) as SeverityLevel[];
     return {
       severity: severityFromUrl.length > 0 ? severityFromUrl : DEFAULT_SEVERITY,
-      account: parseQueryArray(router.query.account),
+      account: accountFilterFromQuery(router.query),
       // A locked tab owns its category outright — a stale ?category= from an old
       // link cannot select a different one out from under it.
       category: lockedCategory ? [lockedCategory] : parseQueryArray(router.query.category),
@@ -436,38 +432,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
   // Sync filters to URL
   const updateUrl = useCallback((newFilters: FilterState) => {
     const r = routerRef.current;
-    const query: Record<string, string | string[]> = {};
-    if (r.query.accountId) {
-      query.accountId = r.query.accountId as string;
-    }
-    if (newFilters.severity.length > 0) {
-      query.severity = newFilters.severity;
-    }
-    if (newFilters.account.length > 0) {
-      query.account = newFilters.account;
-    }
-    if (newFilters.category.length > 0) {
-      query.category = newFilters.category;
-    }
-
-    if (newFilters.search) {
-      query.search = newFilters.search;
-    }
-    if (newFilters.safety.length > 0) {
-      query.safety = newFilters.safety;
-    }
-    if (newFilters.rules.length > 0) {
-      query.rules = newFilters.rules;
-    }
-    if (newFilters.status.length > 0) {
-      query.status = newFilters.status;
-    }
-    if (newFilters.savings) {
-      query.savings = newFilters.savings;
-    }
-    if (newFilters.lastSeen) {
-      query.seen = newFilters.lastSeen;
-    }
+    const query = filtersToUrlQuery(newFilters);
 
     const currentHash = r.asPath.split('#')[1];
     r.replace({ pathname: r.pathname, query, ...(currentHash ? { hash: `#${currentHash}` } : {}) }, undefined, { shallow: true });
@@ -505,7 +470,15 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
     apiHome
       .getCloudAccounts()
       .then((res: any) => {
-        setAccounts(Object.fromEntries(res.map((v: any) => [v.id, { name: v.account_name, cloud_provider: v.cloud_provider || '' }])));
+        setAccounts(
+          Object.fromEntries(
+            res.map((v: any) => [
+              v.id,
+              // Same signal the connections page uses for an agent being up.
+              { name: v.account_name, cloud_provider: v.cloud_provider || '', agentConnected: v.agents?.[0]?.status === 'CONNECTED' },
+            ])
+          )
+        );
         const clusters = transformClusters(res);
         setAllCluster(clusters);
       })
@@ -1571,30 +1544,21 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
           which exist to switch between categories — have nothing to offer. */}
       {!lockedCategory && (
         <Box sx={{ display: 'flex', gap: ds.space[3], mt: ds.space[4] }}>
-          <WidgetCard
-            id='optimize-card-savings'
-            sx={{
-              flex: 1,
-              minWidth: 0,
-              mt: 0,
-              padding: `${ds.space[3]} ${ds.space[4]}`,
-            }}
-          >
+          <Card id='optimize-card-savings' size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Savings'
               info={{ tooltip: 'Total estimated monthly savings if all recommendations are applied' }}
               value={cardsLoading ? '…' : <CostCallout size='lg' tone='high-savings' value={totalSavings} period='/ mo' />}
             />
-          </WidgetCard>
-          <WidgetCard
+          </Card>
+          <Card
             id='optimize-card-all'
-            role='button'
-            tabIndex={0}
-            aria-pressed={filters.category.length === 0}
+            interactive
+            pressed={filters.category.length === 0}
+            size='sm'
             data-testid='optimize-card-all'
             onClick={handleAllCardClick}
-            onKeyDown={cardKeyDown(handleAllCardClick)}
             sx={cardTabSx(filters.category.length === 0, false)}
           >
             <Stat
@@ -1625,7 +1589,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
                 )
               }
             />
-          </WidgetCard>
+          </Card>
 
           {WIDGET_CATEGORIES.map((cat) => {
             const catCount = categoryCounts[cat]?.count || 0;
@@ -1633,15 +1597,14 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
             const pressed = filters.category.length === 1 && filters.category[0] === cat;
             const muted = catCount === 0 && !pressed && !cardsLoading;
             const card = (
-              <WidgetCard
+              <Card
                 key={cat}
-                role='button'
-                tabIndex={muted ? -1 : 0}
-                aria-pressed={pressed}
-                aria-disabled={muted || undefined}
+                interactive
+                disabled={muted}
+                pressed={pressed}
+                size='sm'
                 data-testid={`optimize-card-${cat.toLowerCase()}`}
-                onClick={muted ? undefined : () => handleCategoryCardClick(cat)}
-                onKeyDown={muted ? undefined : cardKeyDown(() => handleCategoryCardClick(cat))}
+                onClick={() => handleCategoryCardClick(cat)}
                 sx={cardTabSx(pressed, muted)}
               >
                 <Stat
@@ -1659,7 +1622,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
                     )
                   }
                 />
-              </WidgetCard>
+              </Card>
             );
             return muted ? (
               <Tooltip key={cat} title='No open recommendations' placement='top'>
@@ -2049,8 +2012,18 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
         />
       )}
 
-      {/* Direct Resolve modal */}
-      {resolveModalRec && (
+      {/* Direct Resolve modal. The three agent fixes that are not pod
+          right-sizing have their own confirm surface. */}
+      {resolveModalRec && k8sActionFor(resolveModalRec) && (
+        <K8sActionModal
+          open
+          onClose={() => setResolveModalRec(null)}
+          recommendation={resolveModalRec}
+          agentConnected={accounts[resolveModalRec.account_id]?.agentConnected}
+          onSuccess={fetchTableData}
+        />
+      )}
+      {resolveModalRec && !k8sActionFor(resolveModalRec) && (
         <ResolveModal
           open={!!resolveModalRec}
           onClose={() => setResolveModalRec(null)}

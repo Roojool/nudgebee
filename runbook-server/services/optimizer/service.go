@@ -193,7 +193,7 @@ func (s *optimizerService) NotifyPRsReady(ctx context.Context, autoOptimizeID uu
 	if buildPRsReadySummary(ao, tasks, resolutions, "") == "" {
 		return nil
 	}
-	s.sendToConfiguredChannels(ao, func(platform string) string {
+	s.sendToConfiguredChannels(ao, prsReadyEventType(tasks, resolutions), func(platform string) string {
 		return buildPRsReadySummary(ao, tasks, resolutions, platform)
 	})
 	return nil

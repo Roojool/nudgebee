@@ -285,3 +285,98 @@ func TestProbeCubeAPMTraceQueryAPIIgnoresTransportErrors(t *testing.T) {
 		t.Errorf("err = %v, want nil on a transport failure", err)
 	}
 }
+
+// A 401 from the query probe has two causes, and the one the message names first
+// used to be the only one it named. CubeAPM's UI port answers the metrics path
+// with 401 rather than 404, so the port mix-up never reaches the 404 branch that
+// was written for it — verified against a live CubeAPM. The message must offer
+// both, or it sends the user to rotate a working token.
+func TestCubeAPMTestConnectionUnauthorizedNamesBothCauses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	err := CubeAPM{}.TestConnection(nil, []core.IntegrationConfigValue{
+		{Name: "cubeapm_url", Value: server.URL},
+	}, "acct")
+	if err == nil {
+		t.Fatal("expected an error for a 401 response")
+	}
+	for _, want := range []string{"cubeapm_token", "web interface", CubeAPMDefaultQueryPort} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("401 message does not mention %q: %s", want, err)
+		}
+	}
+}
+
+// The admin plane is reported through notes, never through the error return: a
+// CubeAPM used only for logs, metrics and traces is correctly configured, and the
+// same probe's pass/fail decides whether those three signals read as connected.
+func TestCubeAPMConnectionNotes(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		wantSubstr string
+	}{
+		{"unauthorized names the admin token", http.StatusUnauthorized, "cubeapm_admin_token"},
+		{"missing admin server names the setting", http.StatusNotFound, "http-host-admin"},
+		{"forbidden says rules will not sync", http.StatusForbidden, "will not sync"},
+		// Without a default arm these fell through to "no note", so a broken admin
+		// API reported a clean connection while alert rules silently stopped syncing.
+		{"server error is still reported", http.StatusInternalServerError, "HTTP 500"},
+		{"bad gateway is still reported", http.StatusBadGateway, "HTTP 502"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != CubeAPMAlertRulesPath {
+					t.Errorf("probed %s, want %s", r.URL.Path, CubeAPMAlertRulesPath)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+
+			notes := CubeAPM{}.ConnectionNotes(nil, []core.IntegrationConfigValue{
+				{Name: "cubeapm_url", Value: "http://cube:3140"},
+				{Name: "cubeapm_admin_url", Value: server.URL},
+			}, "acct")
+			if len(notes) != 1 {
+				t.Fatalf("got %d notes, want 1: %v", len(notes), notes)
+			}
+			if !strings.Contains(notes[0], tc.wantSubstr) {
+				t.Errorf("note does not mention %q: %s", tc.wantSubstr, notes[0])
+			}
+		})
+	}
+
+	t.Run("healthy admin API produces no note", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		notes := CubeAPM{}.ConnectionNotes(nil, []core.IntegrationConfigValue{
+			{Name: "cubeapm_url", Value: "http://cube:3140"},
+			{Name: "cubeapm_admin_url", Value: server.URL},
+		}, "acct")
+		if len(notes) != 0 {
+			t.Errorf("a working admin API must produce no note, got: %v", notes)
+		}
+	})
+
+	// A non-standard query port makes the admin URL underivable. That is not a
+	// fault to report as unreachable — nothing was probed, so say so.
+	t.Run("underivable admin URL asks for it explicitly", func(t *testing.T) {
+		notes := CubeAPM{}.ConnectionNotes(nil, []core.IntegrationConfigValue{
+			{Name: "cubeapm_url", Value: "http://cube:9999"},
+		}, "acct")
+		if len(notes) != 1 || !strings.Contains(notes[0], "cubeapm_admin_url") {
+			t.Fatalf("want a note naming cubeapm_admin_url, got: %v", notes)
+		}
+		if strings.Contains(notes[0], "could not be reached") {
+			t.Error("nothing was probed; must not claim the admin API was unreachable")
+		}
+	})
+}

@@ -71,173 +71,79 @@ The App is a frontend application built with **Next.js** (v16) and **React** (v1
 
 ## Partner Branding (White-Label)
 
-The app supports per-deployment white-labeling — logo, favicon, app title, AI assistant name, signin imagery/carousel, MUI palette, and the full `--nb-*` CSS variable token set — driven by a single JSON file at runtime. No code changes or rebuilds are required to onboard a new partner.
+The app supports per-hostname white-labeling — logo, favicon, app title, AI assistant name, signin imagery/carousel, MUI palette, fonts, and the full `--nb-*` CSS variable token set. **Branding is configured in one place: the `tenant_branding_override` table**, one row per hostname. No rebuild, and no deploy once the image files are mounted.
+
+**Enterprise only.** Everything that reads or writes the table — the frontend provider (`src/ee/branding/`), the `branding_*` actions (`src/ee/actions.yaml`), and services-server's `ee/branding` package with `GET /v1/branding/overrides` — is stripped from the OSS build. OSS renders the house brand everywhere, and its notifications-server keeps the bundled `theme.json` branding.
 
 ### How it works
 
-1. The runtime endpoint [`/api/public/app_config`](src/pages/api/public/app_config.js) resolves branding for the **request's hostname** via [`resolveServerBranding`](src/lib/serverBranding.ts). The EE provider ([`serverInit.ts`](src/ee/branding/serverInit.ts)) picks the theme file: `TENANT_BRANDING_HOST_MAP` (JSON `{host: slug}`) → `branding/<slug>/theme.json`, else `TENANT_BRANDING_FILE`, else `branding/default/theme.json`.
-2. A per-host **runtime override** from the `tenant_branding_override` table is merged on top of that file — see [Runtime overrides](#runtime-overrides-no-deploy) below.
-3. On the client, [`useBrandingConfig`](src/hooks/useTenantBranding.js) fetches `/api/public/app_config` once per page load and caches it.
+1. Every host starts from the bundled house brand, [`public/branding/default/theme.json`](public/branding/default/theme.json).
+2. The EE provider ([`serverInit.ts`](src/ee/branding/serverInit.ts)) merges the `tenant_branding_override` row for the **request's hostname** (`X-Forwarded-Host`) on top. The table is loaded into an in-process snapshot by [`overrideClient.ts`](src/ee/branding/overrideClient.ts) and refreshed every 30s, because SSR resolves branding synchronously.
+3. [`/api/public/app_config`](src/pages/api/public/app_config.js) returns the result. On the client, [`useBrandingConfig`](src/hooks/useTenantBranding.js) fetches it once per page load and renders nothing brand-specific until it answers.
 4. [`useThemeProvider`](src/hooks/useThemeProvider.ts) applies `theme` to MUI and writes `colorTokens` to `:root` as CSS variables. Critical above-the-fold tokens are inlined during SSR to prevent FOUC.
-5. The notifications-server brands every outbound notification from the `tenant_branding_override` row whose host matches its **`BASE_URL`** (`title`, plus the row's `email` block for email), over its bundled theme. It no longer reads `TENANT_BRANDING_FILE`.
+
+A host with no row renders the house brand.
+
+notifications-server has no request host, so it brands every outbound notification from the row whose host matches its **`BASE_URL`** — see **Email and bot branding** below.
+
+> The per-host theme file map (`TENANT_BRANDING_HOST_MAP`, chart `branding.hostMap`), the deployment-wide theme file (`TENANT_BRANDING_FILE`, chart `branding.defaultTenant`) and the inline env overrides (`TENANT_THEME_CONFIG`, `TENANT_COLOR_TOKENS`) were **removed**. The app ignores them, and the chart refuses to render with `hostMap` or `defaultTenant` set.
 
 ### Onboarding a new partner
 
-**1. Drop static assets** into `public/branding/<partner>/`:
+**1. Mount the image files.** A row stores URLs, not bytes, so the partner's images still have to be served from `/branding/<partner>/`. Create a ConfigMap with one key per file (names must match `[-._a-zA-Z0-9]+`) and list it under the chart's `branding.tenants`:
 
-```
-app/public/branding/<partner>/
-├── logo.svg              # required — header / signin logo
-├── favicon.ico
-├── nubi-icon.svg         # assistant avatar (dark variant)
-├── nubi-icon-light.svg   # assistant avatar (light variant)
-├── helpbee-icon.svg      # optional
-├── troubleshoot-bee.svg  # optional, empty-state illustrations
-├── optimize-bee.svg      # optional
-├── k8s-bee.svg           # optional
-├── new-user-bee.svg      # optional
-├── signin-left.svg       # optional, signin page left panel
-└── carousel/             # optional, partner-supplied signin carousel slides
+```yaml
+branding:
+  enabled: true
+  tenants:
+    - slug: acme
+      configMapName: acme-branding # mounted at /app/public/branding/acme/
 ```
 
-Assets are served at `/branding/<partner>/<filename>` by Next.js's static handler — no import or registration step. See `public/branding/default/` for the bundled defaults.
-
-**2. Write `theme.json`** for the partner. The full schema:
+**2. Save the row** for the partner's hostname (super-admin):
 
 ```jsonc
+// branding_upsert_override { host: "cloud.acme.example.com", overrides: { ... } }
 {
-  // --- Identity ---
-  "title": "Acme Cloud", // tab title, app name in welcome strings
-  "assistantName": "Ace", // AI assistant display name (default "NuBi")
-  "logoUrl": "/branding/acme/logo.svg", // header + signin logo
-  "faviconUrl": "/branding/acme/favicon.ico",
-
-  // --- Assistant / empty-state illustrations (each optional; falls back to /branding/default/) ---
-  "nubiIconUrl": "/branding/acme/nubi-icon.svg",
-  "nubiIconLightUrl": "/branding/acme/nubi-icon-light.svg",
-  "helpbeeIconUrl": "/branding/acme/helpbee-icon.svg",
-  "troubleshootBeeUrl": "/branding/acme/troubleshoot-bee.svg",
-  "optimizeBeeUrl": "/branding/acme/optimize-bee.svg",
-  "k8sBeeUrl": "/branding/acme/k8s-bee.svg",
-  "newUserBeeUrl": "/branding/acme/new-user-bee.svg",
-
-  // --- Signin page ---
-  "signinImageUrl": "", // optional hero image
-  "signinLeftImageUrl": "/branding/acme/signin-left.svg", // optional left-panel illustration
-  "loaderUrl": "", // optional GIF/SVG for the loading screen
-  "carouselSlides": [
-    // optional — overrides bundled carousel
-    { "title": "Cut cloud spend 40%", "image": "/branding/acme/carousel/slide1.svg" },
-    { "title": "Auto-remediate incidents", "image": "/branding/acme/carousel/slide2.svg" }
-  ],
-
-  // --- MUI theme (used by createDynamicTheme) ---
-  "theme": {
-    "palette": { "primary": "#0047AB", "success": "#00a800", "error": "#e60013" },
-    "typography": { "fontFamily": "'Inter', sans-serif" },
-    "components": { "borderRadius": 8 }
-  },
-
-  // --- CSS variable overrides (all keys are optional; missing keys fall back to defaults) ---
-  // See app/src/styles/defaultTokens.ts for the full token list and
-  // notifications-server/.../branding/default/theme.json for a complete worked example.
-  "colorTokens": {
-    "--nb-color-primary": "#0047AB",
-    "--nb-bg-sidebar": "#001f4d",
-    "--nb-btn-primary": "#0047AB",
-    "--nb-btn-primary-hover": "#003380",
-    "--nb-mui-primary": "#0047AB"
-    // … any --nb-* token the partner wants to override
-  },
-
-  // --- Email branding (consumed by notifications-server) ---
-  "email": {
-    "logoUrl": "/branding/acme/logo.png",
-    "supportEmail": "support@acme.com",
-    "primaryColor": "#0047AB",
-    "headerBgColor": "#001f4d",
-    "footerBgColor": "#10264c",
-    "footerLinkColor": "#ffcc00",
-    "address": "1 Acme Way, Anytown",
-    "copyrightStartYear": 2024
-  }
+  "title": "Acme Cloud", // tab title, app name in copy
+  "assistantName": "Ace",
+  "logoUrl": "/branding/acme/logo.svg",
+  "faviconUrl": "/branding/acme/favicon.svg",
+  "nubiIconUrl": "/branding/acme/assistant.svg",
+  "nubiIconLightUrl": "/branding/acme/assistant-light.svg",
+  "loaderUrl": "/branding/acme/assistant.svg", // otherwise the loading screen falls back to a spinner
+  "signinImageUrl": "/branding/acme/logo.svg",
+  "theme": { "palette": { "primary": "#0047AB" }, "typography": { "fontFamily": "'Inter', sans-serif" } },
+  "colorTokens": { "--nb-color-primary": "#0047AB", "--nb-bg-sidebar": "#001f4d" },
+  "fontRemap": [{ "family": "Roboto", "src": "url(https://fonts.gstatic.com/...) format(woff2)" }]
 }
 ```
 
-A complete working example is committed at [`notifications-server/notifications_server/branding/default/theme.json`](../notifications-server/notifications_server/branding/default/theme.json) — clone it and edit.
+It takes effect within ~30s. See [`app/src/styles/defaultTokens.ts`](src/styles/defaultTokens.ts) for the full token list.
 
-**3. Point the deployment at the file** via env vars. The path is resolved relative to `app/public/` unless absolute:
+### The row
 
-```bash
-# Relative path under app/public — typical when bundling the partner folder into the image
-TENANT_BRANDING_FILE=branding/acme/theme.json
+**Allowed fields** mirror the house `theme.json`: copy (`title`, `assistantName`), every asset URL (`logoUrl`, `faviconUrl`, `loaderUrl`, `signinImageUrl`, `signinLeftImageUrl`, the nubi/bee illustration set, `connectClusterGifUrl`, `carouselSlides`), and styling (`theme`, `colorTokens`, `fontRemap`), plus an `email` block read only by notifications-server (see below). One field is refused, with its reason in the error:
 
-# Absolute path — typical when mounting a partner overlay ConfigMap/Secret
-TENANT_BRANDING_FILE=/etc/nudgebee/theme.json
-```
+- `isWhiteLabel` — derived, never stored. A host is white-label when its row sets `title` or `logoUrl` (a rename or re-logo is a different brand, so the Nudgebee mascots are suppressed). A colour-only row is a retint of the house brand and keeps them.
 
-**Inline overrides** (skip editing the file — useful for hot-patching a single field): set `TENANT_THEME_CONFIG` or `TENANT_COLOR_TOKENS` to a JSON-encoded object. These take precedence over the file's `theme` / `colorTokens` blocks respectively. Invalid JSON is silently ignored.
+**Asset URLs must be same-origin root-relative paths** (`/branding/acme/logo.svg`, or `""` to clear back to the house default). Absolute and scheme-relative URLs are rejected: a stored row that could point at another host is brand hijack and a tracking pixel on every page.
 
-### Runtime overrides (no deploy)
+**Merge semantics** ([`mergeOverride.ts`](src/ee/branding/mergeOverride.ts)): `title`/`assistantName` and asset URLs replace, `colorTokens` merge per key over the house tokens, `theme` merges one level deep (setting `palette` keeps `typography`), `fontRemap` and `carouselSlides` replace wholesale.
 
-Everything above ships a partner's brand as **files in a mounted ConfigMap**, which means onboarding
-and every subsequent tweak costs an infra PR plus a deploy (and prod deploys are `workflow_dispatch`
-only). The `tenant_branding_override` table removes the deploy from the part that actually churns.
-
-The split is by **churn rate**, not storage type:
-
-|                                                               | Lives in                       | Changed by                           |
-| ------------------------------------------------------------- | ------------------------------ | ------------------------------------ |
-| Asset kit (SVGs, favicon) + base `theme.json`                 | ConfigMap mount                | infra PR + deploy (once per partner) |
-| `title`, `assistantName`, `theme`, `colorTokens`, `fontRemap` | `tenant_branding_override` row | RPC action, takes effect in ≤30s     |
-
-**The override is strictly additive.** No row, a row with `enabled=false`, or an unreachable
-services-server all leave the mounted kit's branding exactly as it was — the file is always the
-floor. This is deliberate: branding used to consult `hasLicenseFeature('branding.custom')`, so a
-transient services-server failure at boot silently repainted a partner's UI as Nudgebee until the
-next restart (see [`docs/ee/licensing-design.md`](../docs/ee/licensing-design.md) and migration V826).
-Nothing in this layer may reintroduce that.
-
-**The allow-list tracks `theme.json`.** Anything a mounted kit can express, an override can express
-too — copy (`title`, `assistantName`), every asset URL (`logoUrl`, `faviconUrl`, `loaderUrl`, the
-signin imagery, the nubi/bee illustration set, `carouselSlides`), and styling (`theme`,
-`colorTokens`, `fontRemap`). A subset would force operators to remember which half of the brand
-lives where.
-
-Two fields are refused, each with its own reason in the error:
-
-- `isWhiteLabel` — derived, never stored. A host is white-label when its kit is a partner kit **or**
-  its row sets `title` or `logoUrl` (a rename or re-logo is a different brand, so the Nudgebee
-  mascots are suppressed). A colour-only row stays a retint. A row that could set the flag directly
-  would desynchronise mascot suppression from the actual brand.
-
-**Asset URLs must be same-origin root-relative paths** (`/branding/acme/logo.svg`, or `""` to clear
-back to the bundled default). Absolute and scheme-relative URLs are rejected: a stored row that could
-point at another host is brand hijack and a tracking pixel on every page, neither of which shows up in
-a diff. The _files_ still come from the mount — what an override buys is re-pointing a slot at a
-different file the kit already ships, with no deploy. A path that resolves to nothing is just a broken
-image: visible immediately, and undone with `branding_apply_previous_override`.
-
-Merge semantics ([`mergeOverride.ts`](src/ee/branding/mergeOverride.ts)): `title`/`assistantName` and
-asset URLs replace, `colorTokens` merge per key, `theme` merges one level deep (so setting `palette`
-keeps `typography`), `fontRemap` and `carouselSlides` replace wholesale.
-
-Managing overrides — super-admin only, because rows are keyed by hostname and carry no tenant column
-(branding resolves before authentication, so there is no tenant scope to constrain a `tenant_admin`):
+**Actions** — super-admin only, because rows are keyed by hostname and carry no tenant column (branding resolves before authentication, so there is no tenant scope to constrain a `tenant_admin`):
 
 ```
 branding_list_overrides            list every row, including disabled
 branding_get_override              { host }
 branding_upsert_override           { host, overrides, enabled? }
 branding_apply_previous_override   { host }   # one-step undo
-branding_delete_override           { host }   # host falls back to its kit
+branding_delete_override           { host }   # host falls back to the house brand
 ```
 
-`branding_upsert_override` validates against the allow-list and rejects CSS-injection payloads in
-`colorTokens` / `fontRemap`. Each write stores the outgoing value in `previous_overrides`, which is
-what `branding_apply_previous_override` restores — moving a brand out of git costs the `git revert`
-the ConfigMap kit gets for free, and audit rows do not close that gap because `audit.LogChange`
-skips super-admin actors.
+`branding_upsert_override` validates against the allow-list and rejects CSS-injection payloads in `colorTokens` / `fontRemap`. Each write keeps the outgoing value in `previous_overrides` for `branding_apply_previous_override`; audit rows do not cover this because `audit.LogChange` skips super-admin actors.
+
+**Failure behaviour.** Once a snapshot has loaded, an unreachable services-server keeps the last good values — a failed refresh never repaints a partner. Before the first successful fetch there is nothing to keep, so a cold start behind an unreachable services-server renders the house brand until it recovers. Branding never consults a license feature: that coupling once repainted partners as Nudgebee on a transient failure (see [`docs/ee/licensing-design.md`](../docs/ee/licensing-design.md), migration V826).
 
 **Email and bot branding.** notifications-server has no request host, so it applies the row for its own
 **`BASE_URL`** hostname, refreshed every 60s ([`branding_overrides.py`](../notifications-server/notifications_server/configs/branding_overrides.py)).
@@ -262,34 +168,30 @@ host's row.
 ### Local development
 
 ```bash
-# 1. Create partner asset folder
-mkdir -p public/branding/acme
-cp my-logo.svg public/branding/acme/logo.svg
+# 1. Put image files where the dev server serves them
+mkdir -p public/branding/acme && cp my-logo.svg public/branding/acme/logo.svg
 
-# 2. Write theme.json (see schema above)
-$EDITOR public/branding/acme/theme.json
+# 2. Run services-server locally and point the app at it (SERVICE_API_SERVER_URL in .env.local)
 
-# 3. Point the dev server at it via .env.local
-echo "TENANT_BRANDING_FILE=branding/acme/theme.json" >> .env.local
-
-# 4. Restart the dev server — the branding file is read once per process and cached
-npm run dev
+# 3. Save a row for localhost (as a super admin), then reload within ~30s
+#    branding_upsert_override { host: "localhost", overrides: { title: "Acme", logoUrl: "/branding/acme/logo.svg" } }
 ```
+
+The row's host is matched after normalisation (lower-cased, port stripped), so `localhost:3000` and `localhost` are the same key.
 
 ### Verifying
 
-- `curl http://localhost:3000/api/public/app_config | jq` — confirms the resolved config the client will receive
-- Open DevTools → Elements → `<html>` style — verify `--nb-*` CSS variables match `colorTokens`
-- Signin page (`/signin`) — confirms `logoUrl`, `signinLeftImageUrl`, and `carouselSlides`
+- `curl http://localhost:3000/api/public/app_config | jq` — the resolved config the client will receive
+- DevTools → Elements → `<html>` style — `--nb-*` CSS variables match `colorTokens`
+- Signin page (`/signin`) — `logoUrl`, `signinImageUrl`, `carouselSlides`
 
 ### Pitfalls
 
-- **Asset paths must start with `/branding/<partner>/`** — assets outside `public/branding/` won't pick up the default-fallback behavior in `SafeIcon`.
-- **The branding file is cached per path after a successful read** ([`loadBrandingFile.ts`](src/ee/branding/loadBrandingFile.ts)). Editing `theme.json` while the dev server runs requires a restart. Failed reads are not cached for an operator-configured path, so a transient miss self-heals.
-- **Runtime overrides are per-replica and eventually consistent.** `app` runs 2 replicas, each refreshing on its own 30s clock, so an edit can take up to ~30s to appear everywhere. That is why overrides are limited to presentation fields — the divergence is a colour, never a missing asset.
-- **MUI palette colors must be hex strings**, not CSS variable references — the MUI theme is built at module load, before CSS variables are applied.
+- **Asset paths must start with `/branding/<partner>/`** and the file must be mounted, or the slot renders a broken image.
+- **Overrides are per-replica and eventually consistent.** `app` runs 2 replicas, each refreshing on its own 30s clock, so an edit can take up to ~30s to appear everywhere.
+- **MUI palette colors must be hex strings**, not CSS variable references — the MUI theme is built before CSS variables are applied.
+- **A hostname with no row is the house brand.** Save the row before pointing a partner's domain at the deployment.
 - **Notifications follow `BASE_URL`, not the partner's hostname.** A row for `calsoft.example.com` only reaches notifications from a deployment whose `BASE_URL` is that host.
-- **Don't commit partner secrets** to the public branding folder. For customer-specific deployments, ship `theme.json` via a Helm value or a ConfigMap mounted at `TENANT_BRANDING_FILE`.
 
 ---
 

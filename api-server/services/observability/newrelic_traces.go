@@ -46,7 +46,7 @@ func (s *NewRelicTraceSource) QueryTraces(ctx *security.RequestContext, req Trac
 		return nil, fmt.Errorf("failed to get New Relic configs: %w", err)
 	}
 
-	// Get time range (also removes timestamp and trace_source from Binary)
+	// Get time range (also removes timestamp from Binary)
 	startTime, endTime := s.getTimeRange(&req)
 
 	// Build NRQL query
@@ -148,7 +148,7 @@ func (s *NewRelicTraceSource) GetLabelValues(ctx *security.RequestContext, req T
 		}
 	} else {
 		// Top-level fields are set: skip extraction but still clean binary so
-		// timestamp and trace_source are not emitted as NRQL WHERE conditions.
+		// timestamp is not emitted as an NRQL WHERE condition.
 		cleanBinaryWhereClause(req.QueryRequest.Where.Binary)
 	}
 	// Convert milliseconds to seconds if needed
@@ -454,15 +454,13 @@ func buildNRQLSpanWhereClause(where query.QueryWhereClause) (string, error) {
 	return strings.Join(allParts, " AND "), nil
 }
 
-// cleanBinaryWhereClause removes non-NRQL fields (trace_source, timestamp) from
-// the Binary where clause and returns any extracted start/end timestamps.
+// cleanBinaryWhereClause removes the non-NRQL timestamp field from the Binary where
+// clause and returns any extracted start/end timestamps. trace_source never reaches
+// here: the dispatch layer evaluates it (allProviderCaps TraceSource).
 func cleanBinaryWhereClause(binary query.BinaryWhereClause) (startTime, endTime int64) {
 	if len(binary) == 0 {
 		return 0, 0
 	}
-
-	// Remove trace_source (not applicable to New Relic)
-	delete(binary, "trace_source")
 
 	timestampOps, hasTimestamp := binary["timestamp"]
 	if !hasTimestamp {
@@ -515,8 +513,8 @@ func parseTimestampBetween(val any) (startTime, endTime int64) {
 }
 
 // getTimeRange extracts and normalizes time range from request.
-// It also removes "timestamp" and "trace_source" from the Binary where clause
-// so they don't leak into the NRQL WHERE clause.
+// It also removes "timestamp" from the Binary where clause so it doesn't leak into
+// the NRQL WHERE clause.
 func (s *NewRelicTraceSource) getTimeRange(req *TracesV3Request) (int64, int64) {
 	startTime := req.StartTime
 	endTime := req.EndTime

@@ -188,7 +188,7 @@ test.describe("Admin -> Ownership: ownership rules", () => {
         await expect(locators.ruleRow(original)).toBeVisible();
 
         await test.step("The row's kebab offers Edit and opens the rule in the edit form", async () => {
-          await locators.rowMenuBtn(original).click();
+          await locators.openRowMenu(original);
           await locators.rowMenuItem("edit").click();
           await expect(locators.ruleDialog).toBeVisible();
           await expect(locators.ruleDialog).toContainText(EDIT_MODAL_TITLE);
@@ -391,7 +391,7 @@ test.describe("Admin -> Ownership: ownership rules", () => {
         await expect(locators.ruleRow(name)).toBeVisible();
 
         await test.step("The row's kebab offers Delete and asks to confirm", async () => {
-          await locators.rowMenuBtn(name).click();
+          await locators.openRowMenu(name);
           await locators.rowMenuItem("delete").click();
           await expect(locators.deleteDialog).toBeVisible();
           await expect(locators.deleteDialog).toContainText(`Delete rule "${name}"?`);

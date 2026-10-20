@@ -598,7 +598,6 @@ const NubiGlobalChat: React.FC = () => {
             <KubernetesLLMResponseGenerator
               accountId={accountId}
               popup
-              showBorder={false}
               source={chatContext?.source || 'ask_nudgbee_chat'}
               sessionId={chatContext?.sessionId || ''}
               query={chatContext?.query || ''}

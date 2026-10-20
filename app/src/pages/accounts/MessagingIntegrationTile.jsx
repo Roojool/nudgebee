@@ -21,10 +21,19 @@ import { safeJSONParse, toKebabCase } from 'src/utils/common';
 import ChannelAccountMapping from '@components/notifications/ChannelAccountMapping';
 import WatchedChannels from '@components/notifications/WatchedChannels';
 import MsTeamsWebhookTargets from '@components/notifications/MsTeamsWebhookTargets';
+import SlackWebhookTargets from '@components/notifications/SlackWebhookTargets';
+import Tabs from '@shared/navigation/Tabs';
+import { useFeatureAccess } from '@hooks/useFeatureAccess';
 import { getIntegrationDescription } from '@lib/integrationDescriptions';
 import { EmptyState } from '@ui/EmptyState';
 import CheckIcon from '@mui/icons-material/Check';
 import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
+
+// Which providers get which section under the installation table. Google Chat has
+// webhook targets too but renders through its own panel (GoogleChatSpacesPanel), and
+// Discord has neither section, so neither appears here.
+const MAPPING_PROVIDERS = ['slack', 'ms_teams'];
+const WEBHOOK_TARGETS_BY_PROVIDER = { slack: SlackWebhookTargets, ms_teams: MsTeamsWebhookTargets };
 
 const MessagingIntegrationTile = ({
   provider, // "slack" | "google_chat"
@@ -63,6 +72,11 @@ const MessagingIntegrationTile = ({
   // untagged flag stays true through the swap.
   const [loadedFor, setLoadedFor] = useState(null);
   const hasLoaded = loadedFor === provider;
+  // Which of the sections under the installation table is showing. Component-local
+  // (not a URL fragment), like Admin Overview's sub-views.
+  const [sectionTab, setSectionTab] = useState('mappings');
+  // Same flag WatchedChannels gates itself on; still resolving (null) counts as off.
+  const channelAwarenessEnabled = useFeatureAccess('CHANNEL_AWARENESS') === true;
 
   // Fetch installations
   const listMessagingPlatform = () => {
@@ -461,6 +475,28 @@ const MessagingIntegrationTile = ({
 
   const isConnected = tableData?.length > 0;
 
+  const showConnectPrompt = hasLoaded && !isLoading && tableData?.length === 0;
+
+  // Sections under the installation table, one tab each. Webhook targets need no
+  // app install, so they stay available before Connect; the other two only render
+  // once the app is installed (and Watched Channels only behind its feature flag) —
+  // a hidden tab, not an empty one. Nothing shows until the installation lookup has
+  // landed: before it, Webhook targets is the only visible tab, so it would render
+  // (and fetch) first and then be swapped out when the default tab becomes Mappings.
+  const hasInstallation = installationData?.length > 0;
+  const WebhookTargets = WEBHOOK_TARGETS_BY_PROVIDER[provider];
+  const mappingsHidden = !MAPPING_PROVIDERS.includes(provider) || !hasInstallation;
+  const watchedHidden = provider !== 'slack' || !hasInstallation || !channelAwarenessEnabled;
+  const sectionTabs = [
+    { value: 'mappings', text: 'Channel-Account Mappings', hidden: mappingsHidden },
+    { value: 'watched', text: 'Watched Channels', hidden: watchedHidden },
+    { value: 'webhooks', text: 'Webhook targets', hidden: !WebhookTargets },
+  ].map((tab) => ({ ...tab, id: `${toKebabCase(provider)}-${tab.value}-tab` }));
+  const visibleSectionTabs = hasLoaded ? sectionTabs.filter((tab) => !tab.hidden) : [];
+  // Falls back to the first visible tab when the remembered one is not available
+  // (the default, Mappings, is hidden while the workspace is not connected).
+  const activeSection = visibleSectionTabs.find((tab) => tab.value === sectionTab)?.value ?? visibleSectionTabs[0]?.value;
+
   return (
     <>
       <Modal
@@ -471,7 +507,7 @@ const MessagingIntegrationTile = ({
         subtitle={getIntegrationDescription(provider)}
         loader={isInstalling}
         actionButtons={
-          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', p: '12px 24px' }}>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: ds.space[3], p: '12px 24px' }}>
             {inviteUrl ? (
               <DsButton id='done-install-modal-btn' size='md' tone='primary' onClick={closeInstallModal}>
                 Done
@@ -666,27 +702,16 @@ const MessagingIntegrationTile = ({
                 >
                   Test Notification
                 </DsButton>
-                <DsButton
-                  id={`add-to-${toKebabCase(provider)}-btn`}
-                  tone='primary'
-                  size='md'
-                  icon={
-                    isConnected ? (
-                      <CheckIcon sx={{ fontSize: 18 }} />
-                    ) : (
-                      <CloudProviderIcon cloud_provider={provider.toUpperCase()} width='18px' height='18px' />
-                    )
-                  }
-                  disabled={isConnected}
-                  onClick={handleInstall}
-                >
-                  {isConnected ? 'Connected' : `Connect ${displayName}`}
-                </DsButton>
+                {hasLoaded && isConnected && (
+                  <DsButton id={`add-to-${toKebabCase(provider)}-btn`} tone='primary' size='md' icon={<CheckIcon sx={{ fontSize: 18 }} />} disabled>
+                    Connected
+                  </DsButton>
+                )}
               </Stack>
             ) : undefined
           }
         />
-        {hasLoaded && !isLoading && tableData?.length === 0 ? (
+        {showConnectPrompt ? (
           // This page has no filters, so an empty table can only mean "the app is not
           // installed yet" — the install instruction that used to sit permanently under
           // the title now lives here, where it is the one thing left to do.
@@ -699,6 +724,7 @@ const MessagingIntegrationTile = ({
               action={
                 canManage('messagingplatforms', 'Write')
                   ? {
+                      id: `add-to-${toKebabCase(provider)}-btn`,
                       label: `Connect ${displayName}`,
                       onClick: handleInstall,
                       icon: <CloudProviderIcon cloud_provider={provider.toUpperCase()} width='16px' height='16px' />,
@@ -714,13 +740,40 @@ const MessagingIntegrationTile = ({
         )}
       </ListingLayout>
 
-      {(provider === 'slack' || provider === 'ms_teams') && (
-        <ChannelAccountMapping provider={provider} displayName={displayName} isConfigured={installationData?.length > 0} />
+      {visibleSectionTabs.length > 1 && (
+        <Box sx={{ mb: 'var(--ds-space-3)' }}>
+          <Tabs
+            value={activeSection}
+            onChange={setSectionTab}
+            behavior='filter'
+            ariaLabel={`${displayName} settings sections`}
+            options={{ tabOptions: visibleSectionTabs }}
+          />
+        </Box>
       )}
 
-      {provider === 'slack' && <WatchedChannels provider={provider} isConfigured={installationData?.length > 0} />}
+      {/* Once visible, every section stays mounted across tab switches (hidden via CSS,
+          not unmounted) so its already-fetched data survives switching tabs instead of
+          re-fetching on every switch back — Mappings/Watched Channels both paginate the
+          same Slack channels_list endpoint and were colliding on Slack's rate limit;
+          Webhook targets has no such collision but was re-querying needlessly too. */}
+      {!mappingsHidden && (
+        <Box sx={{ display: activeSection === 'mappings' ? 'block' : 'none' }}>
+          <ChannelAccountMapping provider={provider} displayName={displayName} isConfigured={hasInstallation} />
+        </Box>
+      )}
 
-      {provider === 'ms_teams' && <MsTeamsWebhookTargets />}
+      {!watchedHidden && (
+        <Box sx={{ display: activeSection === 'watched' ? 'block' : 'none' }}>
+          <WatchedChannels provider={provider} isConfigured={hasInstallation} />
+        </Box>
+      )}
+
+      {WebhookTargets && (
+        <Box sx={{ display: activeSection === 'webhooks' ? 'block' : 'none' }}>
+          <WebhookTargets />
+        </Box>
+      )}
     </>
   );
 };

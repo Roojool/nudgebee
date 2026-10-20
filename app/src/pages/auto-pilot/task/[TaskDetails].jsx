@@ -29,7 +29,7 @@ const DRILL_DOWN_LISTING_HEADER = ['Name', 'Old Value', 'New Value'];
 import DateTime from '@shared/format/Datetime';
 import { titleCase } from '@lib/formatter';
 import PropTypes from 'prop-types';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import Banner from '@ui/Banner';
 import { Stat } from '@ui/Stat';
 import k8sApi from '@api1/kubernetes';
@@ -519,7 +519,7 @@ const AutoOptimizeSummary = ({ autoOptimizeData = {}, title, actions }) => {
       </ListingLayout.Toolbar>
       <ListingLayout.Body>
         <Box sx={{ display: 'flex', flexDirection: 'row', width: '100%', gap: ds.space[3], padding: `${ds.space[2]} 0` }}>
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='sm'
               label='Namespace'
@@ -532,8 +532,8 @@ const AutoOptimizeSummary = ({ autoOptimizeData = {}, title, actions }) => {
                 </Link>
               }
             />
-          </WidgetCard>
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          </Card>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='sm'
               label={autoOptimizeData.category === 'pv_rightsize' ? 'Persistent Volume Claim' : 'Workload'}
@@ -552,16 +552,16 @@ const AutoOptimizeSummary = ({ autoOptimizeData = {}, title, actions }) => {
                 </Link>
               }
             />
-          </WidgetCard>
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          </Card>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat size='sm' label='Kind' value={selectedWorkloadType || '-'} />
-          </WidgetCard>
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          </Card>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat size='sm' label='Category' value={autoOptimizeData?.category || '-'} />
-          </WidgetCard>
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          </Card>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat size='sm' label='Last Executed At' value={<DateTime value={autoOptimizeData?.last_executed_time} />} />
-          </WidgetCard>
+          </Card>
         </Box>
         <Box sx={{ mb: ds.space[4] }} />
         {autoOptimizeData.category == 'pv_rightsize' && (

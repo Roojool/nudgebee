@@ -57,6 +57,11 @@ type CloneResult struct {
 	Branch        string
 	CommitHash    string
 	CommitMessage string
+	// DefaultBranch is the repository's default branch as the bare clone sees
+	// it. A commit-pinned checkout leaves HEAD detached at that commit, so a
+	// caller asking "did this change since?" must compare against
+	// origin/<DefaultBranch>; comparing against HEAD is always empty.
+	DefaultBranch string
 }
 
 type RepositoryInfo struct {
@@ -671,6 +676,23 @@ func baseCanCheckout(ctx context.Context, baseDir string) bool {
 // agent's `git branch -a` view stays limited to branches the request actually asked
 // for. Failures are logged and tolerated: a missing base branch should degrade the
 // merge-conflict view, not fail the whole analysis.
+// refspecConfigured reports whether origin already fetches this branch into a
+// remote-tracking ref. Matches the whole refspec line so a branch whose name is
+// a suffix of another ("main" vs "feature/main") is not mistaken for it.
+func refspecConfigured(ctx context.Context, baseDir, branch string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "config", "--get-all", "remote.origin.fetch").Output()
+	if err != nil {
+		return false
+	}
+	want := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (gc *GitClient) ensureRemoteTracking(ctx context.Context, baseDir string, branches ...string) {
 	seen := map[string]struct{}{}
 	for _, branch := range branches {
@@ -687,12 +709,18 @@ func (gc *GitClient) ensureRemoteTracking(ctx context.Context, baseDir string, b
 			continue
 		}
 
-		addBr := exec.CommandContext(ctx, "git", "-C", baseDir, "remote", "set-branches", "--add", "origin", branch)
-		if out, err := addBr.CombinedOutput(); err != nil {
-			gc.logger.Log(common.EventStepFailure, "Failed to add branch to refspec", map[string]any{
-				"error": err.Error(), "output": string(out), "branch": branch,
-			})
-			continue
+		// `git remote set-branches --add` appends unconditionally, so a bare
+		// clone reused across runs accumulates one duplicate refspec per call.
+		// Add it only when it is not already configured; the fetch below still
+		// runs either way so the ref is up to date.
+		if !refspecConfigured(ctx, baseDir, branch) {
+			addBr := exec.CommandContext(ctx, "git", "-C", baseDir, "remote", "set-branches", "--add", "origin", branch)
+			if out, err := addBr.CombinedOutput(); err != nil {
+				gc.logger.Log(common.EventStepFailure, "Failed to add branch to refspec", map[string]any{
+					"error": err.Error(), "output": string(out), "branch": branch,
+				})
+				continue
+			}
 		}
 		fetchCmd := exec.CommandContext(ctx, "git", "-C", baseDir, "fetch", "origin", branch)
 		if out, err := fetchCmd.CombinedOutput(); err != nil {
@@ -1067,6 +1095,23 @@ func (gc *GitClient) CloneOrReuseRepositoryAtCommit(ctx context.Context, repoURL
 		}
 	}
 
+	// The bare clone is single-branch with no fetch refspec, so refs/remotes is
+	// empty and origin/<default> does not resolve. With a pinned commit the
+	// worktree is detached at that commit, so `git diff <commit> HEAD` compares
+	// the commit with itself and silently reports no change — which reads as
+	// "this code is unchanged on the default branch" when nothing has been
+	// compared at all. Track the default branch so the comparison is possible.
+	// Read the repository's own default branch rather than the requested one: a
+	// caller that pinned a commit wants to know what the default branch holds
+	// now, whatever branch it happened to ask for.
+	var defaultBranch string
+	if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "symbolic-ref", "--short", "HEAD").Output(); err == nil {
+		defaultBranch = strings.TrimSpace(string(out))
+	}
+	if commit != "" && defaultBranch != "" {
+		gc.ensureRemoteTracking(ctx, baseDir, defaultBranch)
+	}
+
 	// A pinned commit overrides the branch tip. The single-branch refspec above
 	// will usually not have brought the object down, so fetch it explicitly.
 	if commit != "" {
@@ -1140,6 +1185,7 @@ func (gc *GitClient) CloneOrReuseRepositoryAtCommit(ctx context.Context, repoURL
 		Branch:        branchName,
 		CommitHash:    commitHash,
 		CommitMessage: commitMsg,
+		DefaultBranch: defaultBranch,
 	}, nil
 }
 

@@ -29,22 +29,41 @@ import (
 // fakeSource lets tests inject the observation or an error per poll. The
 // SourceKind is a unique tag so each test's source registers cleanly.
 type fakeSource struct {
-	kind         SourceKind
-	observation  Observation
-	observeErr   error
-	validateErr  error
+	kind        SourceKind
+	observation Observation
+	observeErr  error
+	validateErr error
+	// observeWait makes Observe block, so a test can drive a deadline. The
+	// wait is context-aware: a source that ignored cancellation would make
+	// any timeout assertion meaningless.
+	observeWait  time.Duration
 	observeCalls int
 	mu           sync.Mutex
+}
+
+// observeCount reports how many times the source was polled.
+func (f *fakeSource) observeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.observeCalls
 }
 
 func (f *fakeSource) Kind() SourceKind { return f.kind }
 
 func (f *fakeSource) ValidateConfig(_ json.RawMessage) error { return f.validateErr }
 
-func (f *fakeSource) Observe(_ *security.RequestContext, _ Watch) (Observation, error) {
+func (f *fakeSource) Observe(rctx *security.RequestContext, _ Watch) (Observation, error) {
 	f.mu.Lock()
 	f.observeCalls++
+	wait := f.observeWait
 	f.mu.Unlock()
+	if wait > 0 && rctx != nil {
+		select {
+		case <-time.After(wait):
+		case <-rctx.GetContext().Done():
+			return Observation{}, rctx.GetContext().Err()
+		}
+	}
 	if f.observeErr != nil {
 		return Observation{}, f.observeErr
 	}
@@ -161,8 +180,11 @@ func TestRunOnePoll_PredicateMet_TerminatesCompleted(t *testing.T) {
 	installSource(t, src)
 
 	w := validRunningWatch(src.kind, PredicateKindRegex, "successfully rolled out")
-	mock.ExpectExec(`SET status = \$1, final_result = \$2`).
-		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID).
+	// $7 is the observation the terminal decision was made on: a terminating
+	// poll must both count towards poll_count and persist its evidence in
+	// last_poll_result (see TestMarkTerminal_CountsTerminatingPoll).
+	mock.ExpectExec(`(?s)SET status = \$1, final_result = \$2.*poll_count = poll_count \+ 1.*last_poll_result = \$7`).
+		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	exec.RunOnePoll(context.Background(), w)
@@ -188,8 +210,11 @@ func TestRunOnePoll_PredicateMet_WithNegateInverts(t *testing.T) {
 	w.PredicateNegate = true
 	// Predicate sees "still in progress" → does NOT match "completed" → Met=false.
 	// Negate flips to Met=true → terminate COMPLETED.
-	mock.ExpectExec(`SET status = \$1, final_result = \$2`).
-		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID).
+	// $7 is the observation the terminal decision was made on: a terminating
+	// poll must both count towards poll_count and persist its evidence in
+	// last_poll_result (see TestMarkTerminal_CountsTerminatingPoll).
+	mock.ExpectExec(`(?s)SET status = \$1, final_result = \$2.*poll_count = poll_count \+ 1.*last_poll_result = \$7`).
+		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	exec.RunOnePoll(context.Background(), w)
@@ -290,51 +315,77 @@ func TestRunOnePoll_MaxFailuresZero_DefaultsTo3(t *testing.T) {
 	assert.Equal(t, 0, notifier.callCount())
 }
 
-func TestRunOnePoll_ExpiresBeforePoll_TerminatesExpired(t *testing.T) {
+func TestRunOnePoll_ExpiredAndStillUnmet_TerminatesExpired(t *testing.T) {
 	exec, _, mock, notifier, _ := newExecutorWithMocks(t)
 	src := &fakeSource{
 		kind:        SourceKind("fake_expiry"),
-		observation: Observation{Data: "still running"}, // wouldn't match anyway
+		observation: Observation{Data: "still running"},
 	}
 	installSource(t, src)
 
 	w := validRunningWatch(src.kind, PredicateKindRegex, "completed")
 	w.ExpiresAt = time.Now().Add(-1 * time.Minute) // already expired
-	last := "still running"
-	w.LastPollResult = &last
 
 	mock.ExpectExec(`SET status = \$1`).
-		WithArgs(string(StatusExpired), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID).
+		WithArgs(string(StatusExpired), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID, "still running").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	exec.RunOnePoll(context.Background(), w)
 
 	require.NoError(t, mock.ExpectationsWereMet())
 	require.Equal(t, 1, notifier.callCount())
-	last2 := notifier.lastCall(t)
-	assert.Equal(t, StatusExpired, last2.Status)
-	assert.Contains(t, last2.Summary, "expired")
-	assert.Contains(t, last2.Summary, "still running")
+	last := notifier.lastCall(t)
+	assert.Equal(t, StatusExpired, last.Status)
+	assert.Contains(t, last.Summary, "expired")
+	// Summary quotes THIS tick's observation, not a stale LastPollResult.
+	assert.Contains(t, last.Summary, "still running")
 
-	// Source must NOT be observed when the row already expired.
+	// The final observation is what makes EXPIRED trustworthy.
 	src.mu.Lock()
 	defer src.mu.Unlock()
-	assert.Equal(t, 0, src.observeCalls)
+	assert.Equal(t, 1, src.observeCalls)
 }
 
-func TestRunOnePoll_ExpiredWithNoPriorObservation(t *testing.T) {
-	// Watch expires before any successful poll — summary should be the
-	// generic "before condition was met" line, not a NPE on LastPollResult.
+// The regression: a condition met after the last scheduled poll. Expiry used to
+// short-circuit before Observe -> EXPIRED without ever looking (#39021).
+func TestRunOnePoll_ExpiredButPredicateNowMet_TerminatesCompleted(t *testing.T) {
+	exec, _, mock, notifier, _ := newExecutorWithMocks(t)
+	src := &fakeSource{
+		kind:        SourceKind("fake_expiry_late_success"),
+		observation: Observation{Data: "deployment completed"},
+	}
+	installSource(t, src)
+
+	w := validRunningWatch(src.kind, PredicateKindRegex, "completed")
+	w.ExpiresAt = time.Now().Add(-1 * time.Minute)
+
+	mock.ExpectExec(`SET status = \$1`).
+		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID, "deployment completed").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	exec.RunOnePoll(context.Background(), w)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+	last := notifier.lastCall(t)
+	assert.Equal(t, StatusCompleted, last.Status)
+
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	assert.Equal(t, 1, src.observeCalls)
+}
+
+func TestRunOnePoll_ExpiredWithEmptyObservation(t *testing.T) {
+	// Source returns nothing — summary falls back to the generic line rather
+	// than quoting an empty observation.
 	exec, _, mock, notifier, _ := newExecutorWithMocks(t)
 	src := &fakeSource{kind: SourceKind("fake_expiry_no_prior")}
 	installSource(t, src)
 
 	w := validRunningWatch(src.kind, PredicateKindRegex, "completed")
 	w.ExpiresAt = time.Now().Add(-1 * time.Minute)
-	// LastPollResult left nil
 
 	mock.ExpectExec(`SET status = \$1`).
-		WithArgs(string(StatusExpired), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID).
+		WithArgs(string(StatusExpired), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID, "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	exec.RunOnePoll(context.Background(), w)
@@ -371,8 +422,10 @@ func TestRunOnePoll_PredicateCompileErrorAtPollTime_TerminatesFailed(t *testing.
 	installSource(t, src)
 
 	w := validRunningWatch(src.kind, PredicateKind("nonexistent"), "ok")
-	mock.ExpectExec(`SET status = \$1`).
-		WithArgs(string(StatusFailed), nil, sqlmock.AnyArg(), sqlmock.AnyArg(), w.ID, w.TenantID).
+	// The source DID observe before the predicate blew up, so this tick counts
+	// as a poll and its observation is preserved for post-mortem.
+	mock.ExpectExec(`(?s)SET status = \$1.*poll_count = poll_count \+ 1.*last_poll_result = \$7`).
+		WithArgs(string(StatusFailed), nil, sqlmock.AnyArg(), sqlmock.AnyArg(), w.ID, w.TenantID, "anything").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	exec.RunOnePoll(context.Background(), w)
@@ -935,4 +988,88 @@ func TestRunOnePoll_Concurrent_AllPathsRaceClean(t *testing.T) {
 	// Terminal half notified; non-terminal half didn't.
 	assert.Equal(t, n/2, notifier.callCount(),
 		"exactly half (predicate-met, non-negated) should notify; the other half reschedules silently")
+}
+
+// TestRunOnePoll_EmptyObservationCompletesAndIsRecorded walks the whole path
+// for the "wait until this command prints nothing" case: predicate "^$",
+// source returns empty output, watch completes, and the terminal row records
+// the empty observation as the evidence rather than skipping the write.
+//
+// This scenario only became reachable in this change set (before it, "^$"
+// could never be satisfied because match required non-empty matched text), and
+// the first cut of the terminal write then dropped its evidence by gating on
+// `Observation != ""`. Fresh-context review caught that; this pins both halves.
+func TestRunOnePoll_EmptyObservationCompletesAndIsRecorded(t *testing.T) {
+	exec, _, mock, notifier, _ := newExecutorWithMocks(t)
+	src := &fakeSource{
+		kind:        SourceKind("fake_empty_obs"),
+		observation: Observation{Data: ""},
+	}
+	installSource(t, src)
+
+	w := validRunningWatch(src.kind, PredicateKindRegex, "^$")
+	// $7 bound to "" — the empty observation IS the evidence here.
+	mock.ExpectExec(`(?s)SET status = \$1, final_result = \$2.*poll_count = poll_count \+ 1.*last_poll_result = \$7`).
+		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID, "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	exec.RunOnePoll(context.Background(), w)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+	last := notifier.lastCall(t)
+	assert.Equal(t, StatusCompleted, last.Status)
+}
+
+// TestRunOnePoll_ObserveFailureLeavesLastPollResultAlone is the complement:
+// when Source.Observe never returned an observation, the terminal write must
+// not clobber the last real one, so a FAILED watch still shows what it last saw.
+func TestRunOnePoll_ObserveFailureLeavesLastPollResultAlone(t *testing.T) {
+	exec, _, mock, _, _ := newExecutorWithMocks(t)
+	src := &fakeSource{
+		kind:       SourceKind("fake_observe_err_terminal"),
+		observeErr: errors.New("connection refused"),
+	}
+	installSource(t, src)
+
+	w := validRunningWatch(src.kind, PredicateKindRegex, "^0$")
+	// Already at the failure ceiling, so this poll terminates as FAILED.
+	w.FailureCount = config.Config.WatchMaxFailures - 1
+	if w.FailureCount < 0 {
+		w.FailureCount = 2
+	}
+	// Six args: poll counted, but no last_poll_result clause.
+	mock.ExpectExec(`(?s)SET status = \$1.*poll_count = poll_count \+ 1`).
+		WithArgs(string(StatusFailed), nil, sqlmock.AnyArg(), sqlmock.AnyArg(), w.ID, w.TenantID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	exec.RunOnePoll(context.Background(), w)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A failing source past expires_at must expire, not buy more time.
+// poll_interval_sec has no upper clamp, so rescheduling here ran the watch up
+// to 3x that interval beyond its deadline and ended FAILED (#39023 review).
+func TestRunOnePoll_ExpiredAndSourceFails_ExpiresWithoutRetrying(t *testing.T) {
+	exec, _, mock, notifier, _ := newExecutorWithMocks(t)
+	src := &fakeSource{
+		kind:       SourceKind("fake_expiry_observe_err"),
+		observeErr: errors.New("boom"),
+	}
+	installSource(t, src)
+
+	w := validRunningWatch(src.kind, PredicateKindRegex, "completed")
+	w.ExpiresAt = time.Now().Add(-1 * time.Minute)
+	w.PollIntervalSec = 300 // no upper clamp: a reschedule would cost 15 min
+
+	mock.ExpectExec(`SET status = \$1`).
+		WithArgs(string(StatusExpired), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), w.ID, w.TenantID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	exec.RunOnePoll(context.Background(), w)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+	last := notifier.lastCall(t)
+	assert.Equal(t, StatusExpired, last.Status)
+	assert.Contains(t, last.Summary, "boom")
 }

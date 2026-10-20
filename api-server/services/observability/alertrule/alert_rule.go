@@ -19,6 +19,12 @@ type AlertRuleConfig struct {
 	Labels         map[string]string      `json:"labels"`      // custom labels/tags
 	Enabled        bool                   `json:"enabled"`
 	ProviderConfig map[string]interface{} `json:"provider_config"` // provider-specific fields
+	// SetEnabled switches an existing rule on or off (cloud providers only).
+	// Enabled above is not used for that: it is sent on every update.
+	SetEnabled *bool `json:"-"`
+	// Restore carries the Previous values of an earlier update, to undo it
+	// exactly (cloud providers only).
+	Restore map[string]any `json:"-"`
 }
 
 // AlertRuleResult is returned after creating/updating an alert rule.
@@ -26,6 +32,9 @@ type AlertRuleResult struct {
 	ExternalRuleId string `json:"external_rule_id"` // ID in the external system
 	Name           string `json:"name"`
 	Status         string `json:"status"` // "created", "updated", "deleted"
+	// Previous holds the provider values an update replaced, where the provider
+	// reports them (cloud providers); pass it back as Restore to undo.
+	Previous map[string]any `json:"previous,omitempty"`
 }
 
 // AlertRuleSource is implemented by each provider that supports alert rule creation.

@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"encoding/json"
 	"errors"
 	"nudgebee/services/common"
 	"nudgebee/services/query"
@@ -366,4 +367,110 @@ func queryRootSpansViaSpans(ctx *security.RequestContext, src TraceSource, req T
 // contract Jaeger's CountTraces already uses.
 func countTracesByTraceEstimate() (common.OpenTelemetryTraceCount, error) {
 	return common.OpenTelemetryTraceCount{Count: -1}, nil
+}
+
+// labelKeyExpander is implemented by a log source on which one canonical label is
+// stored under several provider keys (SigNoz keeps a workload's name under
+// k8s.deployment.name, k8s.statefulset.name, … depending on its kind). The first
+// key of each list is the one GetLabelMapping maps the label to.
+type labelKeyExpander interface {
+	ExpandedLabelKeys() map[string][]string
+}
+
+// negativeWhereOperators match rows where a condition does NOT hold. Expanded over
+// several keys they must hold for every key (AND); the rest need any key (OR).
+var negativeWhereOperators = map[query.BinaryWhereClauseType]bool{
+	query.Nq: true, query.NqF: true, query.NotIn: true, query.NLike: true,
+	query.NIContains: true, query.NRegex: true,
+	NotContains: true, NotRegEx: true, NotExist: true,
+}
+
+// expandCanonicalLabelKeys rewrites every condition on an expandable canonical
+// label into the same condition over each of the source's keys for it — OR for a
+// positive condition, AND for a negative one — before the label mapping runs, so
+// `app = redis` also finds a StatefulSet named redis. A label the merged mapping
+// sends elsewhere (an account override) is left for the mapping. It also returns
+// every provider key an applied expansion wrote, for the validators.
+func expandCanonicalLabelKeys(where query.QueryWhereClause, source LogSource, mapping map[string]string) (query.QueryWhereClause, map[string]bool) {
+	expander, ok := source.(labelKeyExpander)
+	if !ok {
+		return where, nil
+	}
+	expansions := map[string][]string{}
+	for label, keys := range expander.ExpandedLabelKeys() {
+		if len(keys) > 1 && mapping[label] == keys[0] {
+			expansions[label] = keys
+		}
+	}
+	if len(expansions) == 0 {
+		return where, nil
+	}
+	written := map[string]bool{}
+	return expandLabelKeys(where, expansions, written), written
+}
+
+func expandLabelKeys(where query.QueryWhereClause, expansions map[string][]string, written map[string]bool) query.QueryWhereClause {
+	out := query.QueryWhereClause{Binary: query.BinaryWhereClause{}}
+	// app and workload expand to the same keys, so `app = x AND workload = x` would
+	// AND two identical 5-way ORs — 25 SigNoz queries for a 5-query filter. An
+	// expanded group identical to a sibling is added once.
+	seen := map[string]bool{}
+	addAnd := func(c query.QueryWhereClause) {
+		if b, err := json.Marshal(c); err == nil {
+			if seen[string(b)] {
+				return
+			}
+			seen[string(b)] = true
+		}
+		out.And = append(out.And, c)
+	}
+	for field, conds := range where.Binary {
+		keys, expand := expansions[field]
+		if !expand {
+			out.Binary[field] = conds
+			continue
+		}
+		for op, value := range conds {
+			leaves := make([]query.QueryWhereClause, len(keys))
+			for i, k := range keys {
+				leaves[i] = query.QueryWhereClause{Binary: query.BinaryWhereClause{k: {op: value}}}
+				written[k] = true
+			}
+			isNull, _ := value.(bool)
+			if negativeWhereOperators[op] || (op == query.IsNull && isNull) {
+				addAnd(query.QueryWhereClause{And: leaves})
+			} else {
+				addAnd(query.QueryWhereClause{Or: leaves})
+			}
+		}
+	}
+	for _, sub := range where.And {
+		addAnd(expandLabelKeys(sub, expansions, written))
+	}
+	for _, sub := range where.Or {
+		out.Or = append(out.Or, expandLabelKeys(sub, expansions, written))
+	}
+	if where.Not != nil {
+		n := expandLabelKeys(*where.Not, expansions, written)
+		out.Not = &n
+	}
+	return out
+}
+
+// expandedSecondaryKeys lists the extra keys expandCanonicalLabelKeys may add for
+// source. Validation ignores them: a cluster with no StatefulSet logs has no
+// k8s.statefulset.name, which must not be reported as an unknown label the caller
+// typed.
+func expandedSecondaryKeys(source LogSource) map[string]bool {
+	expander, ok := source.(labelKeyExpander)
+	if !ok {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, keys := range expander.ExpandedLabelKeys() {
+		for _, k := range keys[1:] {
+			out[k] = true
+		}
+	}
+	return out
 }

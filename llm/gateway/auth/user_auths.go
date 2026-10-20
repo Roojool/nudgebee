@@ -62,15 +62,17 @@ func (v *userAuthsValidator) Validate(raw string) (Identity, bool) {
 		TenantID string `db:"tenant_id"`
 		UserID   string `db:"user"`
 		Name     string `db:"name"`
+		APIKeyID string `db:"api_key_id"`
 	}
-	// uuid columns cast to text so they scan into strings. Only active, unexpired
-	// PAT rows match. "user" is quoted (reserved word).
+	// uuid columns cast to text so they scan into strings; "user" is a reserved word.
+	// kind excludes platform keys: an app-API credential must not authenticate LLM traffic.
 	query := `
-		SELECT tenant_id::text AS tenant_id, "user"::text AS "user", name
+		SELECT tenant_id::text AS tenant_id, "user"::text AS "user", name, id::text AS api_key_id
 		FROM user_auths
 		WHERE ` + tokenHashColumn + ` = $1
 		  AND provider_type = 'credentials'
 		  AND provider = 'token'
+		  AND kind IN ('gateway', 'all')
 		  AND status = 'active'
 		  AND (expires_at IS NULL OR expires_at > now())
 		LIMIT 1`
@@ -82,7 +84,7 @@ func (v *userAuthsValidator) Validate(raw string) (Identity, bool) {
 		return Identity{}, false
 	}
 	v.recordTokenAccess(db, hash)
-	return Identity{TenantID: row.TenantID, UserID: row.UserID, TokenID: row.Name}, true
+	return Identity{TenantID: row.TenantID, UserID: row.UserID, TokenID: row.Name, APIKeyID: row.APIKeyID}, true
 }
 
 func (v *userAuthsValidator) recordTokenAccess(db *common.DatabaseManager, hash string) {

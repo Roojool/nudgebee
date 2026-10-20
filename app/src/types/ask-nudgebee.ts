@@ -102,10 +102,11 @@ export interface GenerateQueryRequest {
   // user's "Log Provider:" dropdown selection, when it differs from the
   // account's default. Ignored by the other AI query-generation actions.
   log_provider?: string;
-  // Optional Elasticsearch index for ai_generate_log_query — the user's "Select
-  // an Index" dropdown selection. ES field sets are per-index, so this both
-  // scopes the fields the generator is shown and pins the index the generated
-  // query resolves against. Ignored by backends with no index concept.
+  // Optional Elasticsearch index for ai_generate_log_query and
+  // ai_generate_metrics_query — the user's "Select an Index" dropdown
+  // selection on the logs and metrics tabs. ES field sets are per-index, so this
+  // both scopes the fields the generator is shown and pins the index the
+  // generated query resolves against. Ignored by backends with no index concept.
   index?: string;
 }
 
@@ -140,7 +141,8 @@ export interface FollowupRequest {
 export type ConversationActiveFilter = 'All' | 'Mine' | 'Saved' | 'Waiting';
 
 export interface ConversationHistoryRequest {
-  account_id: string;
+  // One account (`_eq`) or several (`_in`), e.g. the Ask page's all-accounts chat list.
+  account_id: string | string[];
   skipTotalCount?: boolean;
   latestLastRecordedAt?: string;
   source?: string | string[];

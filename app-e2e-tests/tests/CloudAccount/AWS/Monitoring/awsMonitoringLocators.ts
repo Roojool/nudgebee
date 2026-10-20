@@ -151,6 +151,16 @@ export class AwsMonitoringLocators extends AWSLocators {
       .first();
   }
 
+  // buildAlertRuleMenuItems offers Enable/Disable only when the rule can be disabled at source; CloudWatch alarms get Mute instead.
+  get ruleChangeMenuItem(): Locator {
+    return this.rowMenuItem("toggle-enabled", /^(Enable|Disable)$/).or(this.rowMenuItem("mute", /^Mute/)).first();
+  }
+
+  // Deliberately no .or(): the snackbar carries no id or testid, and its wording is the only handle on it.
+  get ruleChangeSnackbar(): Locator {
+    return this.page.getByText(/Rule .* (Enabled|Disabled) Successful| muted$/);
+  }
+
   // ── Confirmation modal ──────────────────────────────────────────────────────
 
   // ds/Modal titles its dialog with a fixed id (Modal.tsx:357) and renders no testid.

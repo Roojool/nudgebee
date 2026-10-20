@@ -4,7 +4,7 @@ Inventory read through DB MCP on 2026-09-06 for account a2a30b02-0f67-42e5-a2ab-
 
 | Path | Existing skill | Size/status | Observable assertion |
 | --- | --- | --- | --- |
-| logs v3 | Nudgebee_Namespace_Log_Correlation | 3,526 bytes, active/enabled; mapped to fetch_logs and logs | For cross-service investigation, correlate account/tenant plus the same time window, not a shared trace_id. Loki labels use namespace/pod/app. Inspect fetch_logs_v3 input and rendered query. |
+| logs | Nudgebee_Namespace_Log_Correlation | 3,526 bytes, active/enabled; mapped to fetch_logs and logs | For cross-service investigation, correlate account/tenant plus the same time window, not a shared trace_id. Loki labels use namespace/pod/app. Inspect fetch_logs_direct input and rendered query. |
 | metrics -> Prometheus | APP_Metrics_Discovery | 4,941 bytes, active/enabled; mapped to prometheus | Discover series for the actual workload and namespace before guessing metric prefixes. Check selectors use the returned label group, with exact vs prefix matching preserved. |
 | metrics -> dashboard | Golden_Signal_Dashboard | 4,525 bytes, active/enabled; mapped to prometheus and k8s_debug | Discover unknown families; keep missing metrics distinct from zero. Optional later case: raw timestamped series reach the visualizer. |
 | traces provider | es_metrics_discovery | 4,625 bytes, active/enabled; mapped to elastic_search_metrics but content explicitly applies to logs/metrics/traces | Verify actual trace fields and configured scope before filtering; bound time. This is a general backend guide, not a dedicated traces runbook. Confirm a usable traces provider/service before running. |

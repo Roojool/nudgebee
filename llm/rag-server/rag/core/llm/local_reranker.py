@@ -226,6 +226,44 @@ def _to_unit_scale(scores) -> List[float]:
     return [1 / (1 + math.exp(-v)) if v >= 0 else math.exp(v) / (1 + math.exp(v)) for v in values]
 
 
+def score_documents(query: str, docs: List) -> Tuple[List[float], bool]:
+    """Cross-encoder scores for ``docs``, in the order they were given.
+
+    ``rerank`` sorts and filters, which loses the retrieval similarity each
+    document arrived with. Callers that blend the two scores need them aligned,
+    so this returns scores positionally and leaves ranking to the caller.
+
+    Returns ``(scores, ok)``; ``ok`` is False when scoring could not run, and
+    the caller must not treat the unscored list as ranked.
+    """
+    if not docs:
+        return [], True
+
+    queued_at = time.monotonic()
+    try:
+        model = get_reranker()
+        # page_content is typed str, but it arrives from a Qdrant payload that
+        # can carry an explicit null; without the fallback one malformed
+        # document would fail the whole batch closed.
+        pairs = [(query, (d[0].page_content or "")[: Config.reranker_max_doc_chars]) for d in docs]
+        admitted_at = time.monotonic()
+        with _inference_slots:
+            waited = time.monotonic() - admitted_at
+            scored = _to_unit_scale(model.predict(pairs, batch_size=Config.reranker_batch_size))
+    except Exception as e:
+        logger.warning(f"Reranker failed to score documents: {e}", exc_info=True)
+        return [], False
+
+    # zip() elsewhere would silently truncate to the shorter side, so a short
+    # score list would drop documents with no error and a success return.
+    if len(scored) != len(docs):
+        logger.warning(f"Reranker scored {len(scored)} of {len(docs)} documents; discarding the batch")
+        return [], False
+
+    logger.info(f"Scored {len(docs)} documents (queued={waited:.2f}s, total={time.monotonic() - queued_at:.2f}s)")
+    return list(scored), True
+
+
 def rerank(query: str, docs: List, threshold: float | None = None) -> Tuple[List[Tuple], bool]:
     """Score ``docs`` against ``query`` and drop everything below the threshold.
 

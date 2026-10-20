@@ -45,6 +45,16 @@ const workspaceSpecUpgradeBatchSize = 5
 
 const CacheNamespaceWorkspaceTokens = "workspace_tokens"
 
+// ErrWorkspaceRunLost marks a workspace API failure that CONFIRMS — not merely
+// suspects — that whatever the caller previously dispatched against this pod
+// (an async analysis, a followup run) is gone: either the pod is in a terminal
+// k8s phase (isPodInTerminalState), or a reachable pod answered with 404 for
+// the specific resource, meaning the pod now serving this account has no
+// memory of it. This is a stronger signal than an ordinary timeout/connection
+// error, where the old pod may still be working and the caller should not
+// assume it is safe to retry. See callWorkspaceAPIWithClient (#38994).
+var ErrWorkspaceRunLost = stderrors.New("workspace: run is confirmed lost (pod replaced or terminal)")
+
 const ENV_NB_LLM_SERVER_URL = "NB_LLM_SERVER_URL"
 const ENV_NB_ACCOUNT_ID = "NB_ACCOUNT_ID"
 const ENV_NB_CONVERSATION_ID = "NB_CONVERSATION_ID"
@@ -62,6 +72,9 @@ type WorkspaceTokenClaims struct {
 	AccountId       string `json:"account_id"`
 	TenantId        string `json:"tenant_id"`
 	TargetAccountId string `json:"target_account_id,omitempty"`
+	// Grants is set only on execution tokens (audience AudienceWorkspaceExecute):
+	// the authority of the user whose command is running.
+	Grants *security.WorkspaceGrants `json:"grants,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -70,6 +83,7 @@ func signWorkspaceToken(accountID, tenantID string) (string, error) {
 		AccountId: accountID,
 		TenantId:  tenantID,
 		RegisteredClaims: jwt.RegisteredClaims{
+			Audience:  jwt.ClaimStrings{AudienceWorkspacePod},
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(workspaceTokenLifetime)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "llm-server",
@@ -800,23 +814,35 @@ func isPodInCrashLoop(pod *corev1.Pod) bool {
 // crash loop.  Callers should treat the returned error as recoverable so that
 // lazy-create can spin up a replacement.
 func isPodInTerminalState(pod *corev1.Pod) (bool, string) {
+	// pod.Status.Reason/Message carry the kubelet's own explanation for a
+	// Failed pod (e.g. Reason="Evicted", Message="...node had condition:
+	// [DiskPressure]..."). Appended below so a poller's error names the
+	// actual cause instead of just the phase — previously only visible by
+	// querying the DB and cross-referencing a stale k8s event (#38994).
+	detail := ""
+	if pod.Status.Reason != "" {
+		detail = ": " + pod.Status.Reason
+		if pod.Status.Message != "" {
+			detail += " (" + pod.Status.Message + ")"
+		}
+	}
 	if pod.DeletionTimestamp != nil {
-		return true, "pod is terminating"
+		return true, "pod is terminating" + detail
 	}
 	if pod.Status.Phase == corev1.PodSucceeded {
-		return true, "pod has completed (Succeeded phase)"
+		return true, "pod has completed (Succeeded phase)" + detail
 	}
 	if pod.Status.Phase == corev1.PodFailed {
-		return true, "pod has failed (Failed phase)"
+		return true, "pod has failed (Failed phase)" + detail
 	}
 	if isPodInCrashLoop(pod) {
-		return true, "pod is in CrashLoopBackOff"
+		return true, "pod is in CrashLoopBackOff" + detail
 	}
 	// Check if the container exited but hasn't restarted yet (brief window
 	// between termination and kubelet restart with RestartPolicy=Always).
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Terminated != nil && cs.State.Terminated.Reason == "Completed" {
-			return true, "container has terminated (Completed)"
+			return true, "container has terminated (Completed)" + detail
 		}
 	}
 	return false, ""
@@ -1126,12 +1152,9 @@ func (w *workspaceManager) ExecuteCommand(ctx *security.RequestContext, accountI
 	}
 	logger.Info("workspace: executing command", "command_preview", cmdLog, "account_id", accountId, "conversation_id", conversationId)
 
-	if env == nil {
-		env = make(map[string]string)
-	}
-	env["nb_account_id"] = accountId
-	if ctx.GetSecurityContext() != nil {
-		env["nb_tenant_id"] = ctx.GetSecurityContext().GetTenantId()
+	env, err := w.commandEnv(ctx, accountId, env)
+	if err != nil {
+		return "", err
 	}
 	payload := executePayload{
 		Command:        command,
@@ -1509,7 +1532,11 @@ func (w *workspaceManager) callWorkspaceAPIWithClient(ctx *security.RequestConte
 	}
 
 	if terminal, reason := isPodInTerminalState(pod); terminal {
-		return nil, fmt.Errorf("workspace pod is not ready: %s", reason)
+		// The k8s API confirms the pod backing this account is gone — not
+		// merely unreachable — so a caller polling a previously dispatched
+		// async run can treat this as proof there is nothing left running to
+		// collide with (#38994).
+		return nil, fmt.Errorf("%w: workspace pod is not ready: %s", ErrWorkspaceRunLost, reason)
 	}
 
 	podIP := pod.Status.PodIP
@@ -1557,6 +1584,15 @@ func (w *workspaceManager) callWorkspaceAPIWithClient(ctx *security.RequestConte
 				}
 				errBody, _ := io.ReadAll(resp.Body)
 				logger.Warn("workspace: direct API call returned non-2xx status", "status", resp.StatusCode, "body", string(errBody))
+				if resp.StatusCode == http.StatusNotFound {
+					// A reachable pod that doesn't recognise the requested
+					// resource (an analysis id, a followup run) is the
+					// signature of a pod that was replaced since the caller
+					// dispatched it — as certain a "this run is gone" signal
+					// as isPodInTerminalState above, just discovered a step
+					// later once the pod itself answers (#38994).
+					return nil, fmt.Errorf("%w: status %d: %s", ErrWorkspaceRunLost, resp.StatusCode, string(errBody))
+				}
 				return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(errBody))
 			}
 			logger.Info("workspace: direct API call failed, falling back to proxy", "error", directErr, "endpoint", endpoint)
@@ -1927,15 +1963,4 @@ func getKubeClient(qps float32, burst int) (*kubernetes.Clientset, error) {
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 	return clientset, nil
-}
-
-// KubernetesTargetToken permits the shim to route only to this selected cluster.
-// It authenticates the original workspace and cannot choose a different target.
-func KubernetesTargetToken(ctx *security.RequestContext, workspaceAccount, targetAccount string) (string, error) {
-	if !ctx.GetSecurityContext().HasAccountAccess(targetAccount, security.SecurityAccessTypeRead) {
-		return "", fmt.Errorf("target cluster access denied")
-	}
-	claims := WorkspaceTokenClaims{AccountId: workspaceAccount, TenantId: ctx.GetSecurityContext().GetTenantId(), TargetAccountId: targetAccount,
-		RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(10 * time.Minute)), IssuedAt: jwt.NewNumericDate(time.Now()), Issuer: "llm-server"}}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(config.Config.LlmServerJwtSecret))
 }

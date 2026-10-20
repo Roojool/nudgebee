@@ -254,3 +254,9 @@ func (s *K8sSource) createNodeFromK8sPV(pv *K8sPVFromRelay, clusterName string, 
 
 	return core.NewNode(core.NodeTypePV, uniqueKey, properties, req.TenantID, req.CloudAccountID, "k8s")
 }
+
+// A persistent volume is scoped to the cluster, not to a namespace (see
+// kinds.go).
+func init() {
+	registerClusterScopedKind(core.NodeTypePV, clusterScopedKeyRule{})
+}

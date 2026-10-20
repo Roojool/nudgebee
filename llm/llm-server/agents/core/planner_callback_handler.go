@@ -118,6 +118,27 @@ func mergeToolResponseMetadata(metadata *toolcore.NBToolResponseMetadata, additi
 	}
 }
 
+// withResolvedToolTarget copies additionalDetails and adds the config this tool
+// call resolved to, plus the strategy that chose it. Returns the input unchanged
+// when no config was involved (tools that need none).
+func withResolvedToolTarget(additionalDetails map[string]any, queryConfig toolcore.NBQueryConfig, toolName string) map[string]any {
+	// The executing tool context is authoritative for WHICH target ran and has
+	// already recorded it; this only adds HOW it was chosen. Falling
+	// back to the request map would attribute a stale name to a call that ran
+	// against something else. Checked before cloning: this runs on every tool
+	// call and most tools need no config at all.
+	if _, ran := additionalDetails[toolcore.MetadataResolvedTarget]; !ran {
+		return additionalDetails
+	}
+	out := maps.Clone(additionalDetails)
+	if meta, ok := queryConfig.ToolConfigMetadata[toolName].(map[string]any); ok {
+		if strategy, ok := meta["strategy"].(string); ok && strategy != "" {
+			out[toolcore.MetadataResolvedBy] = strategy
+		}
+	}
+	return out
+}
+
 func actionExecutionMetadata(action NBAgentPlannerToolAction) map[string]any {
 	if action.ExecutionBatchID == "" && action.PlannerIteration <= 0 {
 		return nil
@@ -253,6 +274,30 @@ func (h *plannerExecutorCallbackHandler) BeforeToolCall(toolcall NBAgentPlannerT
 	}
 }
 
+// skillReferenceMetadata builds the Additional Contexts row for one skill or
+// knowledge-base reference produced by load_skills / search_skills.
+//
+// Description carries the purpose guidance, which is the same sentence for every
+// knowledge base of a category. That is enough for a whole-document knowledge
+// base, whose body the panel reads from the KB row itself — but not for a
+// chunked one (a PDF's pages and figures), where the row would say nothing about
+// WHICH chunk was read. Stamping the retrieved text as "content" mirrors what
+// the pre-step already does, and the panel prefers it over the description.
+func skillReferenceMetadata(kind, tool string, ref toolcore.NBToolResponseReference) map[string]any {
+	metadata := map[string]any{
+		// Skills share reference_type "knowledge_base" with pre-step documents;
+		// kind is what tells them apart.
+		"kind":        kind,
+		"via":         tool,
+		"name":        ref.Text,
+		"description": ref.Description,
+	}
+	if snippet := strings.TrimSpace(ref.Snippet); snippet != "" {
+		metadata["content"] = TruncateHead(snippet, kbRefSnippetMaxChars)
+	}
+	return metadata
+}
+
 func (h *plannerExecutorCallbackHandler) AfterToolCallResponse(tcr NBAgentPlannerToolAction, response toolcore.NBToolResponse) {
 	tool, ok := h.findTool(tcr.Tool)
 
@@ -283,7 +328,12 @@ func (h *plannerExecutorCallbackHandler) AfterToolCallResponse(tcr NBAgentPlanne
 	// with the non-internal subset of AdditionalDetails (per-tool extras like
 	// delegate_agent's iterations_used / tools_used). Failure is non-fatal —
 	// log and persist NULL so the row still lands.
-	metadataJSON, mErr := mergeToolResponseMetadataWithAction(response.Metadata, response.AdditionalDetails, tcr)
+	// Which target this call actually hit, and how it was chosen. Without this a
+	// wrong-target answer is invisible in the transcript: an event investigation
+	// queried another server entirely and the only way to notice was matching its
+	// figures against a different run's output.
+	additionalDetails := withResolvedToolTarget(response.AdditionalDetails, h.request.QueryConfig, tcr.Tool)
+	metadataJSON, mErr := mergeToolResponseMetadataWithAction(response.Metadata, additionalDetails, tcr)
 	if mErr != nil {
 		h.ctx.GetLogger().Warn("toolcallbackhandler: failed to marshal tool metadata", "error", mErr)
 	}
@@ -316,14 +366,7 @@ func (h *plannerExecutorCallbackHandler) AfterToolCallResponse(tcr NBAgentPlanne
 				kbRefs = append(kbRefs, AgentReference{
 					Type:        AgentReferenceTypeKB,
 					ReferenceID: ref.Url,
-					Metadata: map[string]any{
-						// Skills share reference_type "knowledge_base" with
-						// pre-step documents; kind is what tells them apart.
-						"kind":        kind,
-						"via":         tcr.Tool,
-						"name":        ref.Text,
-						"description": ref.Description,
-					},
+					Metadata:    skillReferenceMetadata(kind, tcr.Tool, ref),
 				})
 			}
 		}

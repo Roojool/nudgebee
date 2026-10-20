@@ -316,3 +316,29 @@ func (s *K8sSource) enrichK8sNodesWithCloudAttributes(reqCtx *security.RequestCo
 
 	return nil
 }
+
+// hasActiveK8sNode reports whether the cluster still has an active node with
+// the name. k8s_nodes is keyed by cloud_resource_id, not name, so a node that was
+// replaced under the same name has an inactive and an active row; the active one
+// is what counts. Node graph nodes carry no provider id and are addressed by name.
+func hasActiveK8sNode(tenantID, accountID, name string) (bool, error) {
+	dbManager, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return false, fmt.Errorf("failed to get database manager: %w", err)
+	}
+	var exists bool
+	if err := dbManager.Db.Get(&exists, `
+		SELECT EXISTS (
+			SELECT 1 FROM k8s_nodes
+			WHERE tenant_id = $1 AND cloud_account_id = $2 AND name = $3 AND is_active = true
+		)
+	`, tenantID, accountID, name); err != nil {
+		return false, fmt.Errorf("failed to check k8s node: %w", err)
+	}
+	return exists, nil
+}
+
+// A worker node is scoped to the cluster, not to a namespace (see kinds.go).
+func init() {
+	registerClusterScopedKind(core.NodeTypeNode, clusterScopedKeyRule{})
+}

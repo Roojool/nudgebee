@@ -366,10 +366,16 @@ func queryCreditsTotal(dbManager *common.DatabaseManager, tenantId string, accou
 }
 
 func querySpendByService(dbManager *common.DatabaseManager, tenantId string, accountId string, filter string, windowStart, windowEnd time.Time) ([]spendByServiceRow, error) {
-	// When accountId is provided, scope spends to that account and deduplicate
-	// resources by resourse_id to avoid counting the same cloud resource multiple
-	// times (GCP sub-projects that share the same billing account create duplicate
-	// cloud_resourses rows with the same resourse_id).
+	// accountId scopes both spends and the resource set. resource_count is
+	// COUNT(DISTINCT resourse_id) below, not a row count, so the same
+	// resourse_id sharing several cloud_resourses rows (GCP sub-projects on one
+	// billing account, or repeated crawls that insert a new row instead of
+	// updating in place) still counts once. Deliberately NOT collapsed to one
+	// row per resourse_id upstream of the spend/savings joins: each duplicate
+	// row can carry its own spends rows (a new crawl row starts a new
+	// cloud_resource_id, and cost data keeps landing against whichever id was
+	// current that day), so joining spend against a single chosen row silently
+	// dropped whatever spend landed on the others.
 	accountFilter := ""
 	resourceAccountFilter := ""
 	args := []any{tenantId, windowStart, windowEnd}
@@ -379,7 +385,7 @@ func querySpendByService(dbManager *common.DatabaseManager, tenantId string, acc
 		args = append(args, accountId)
 	}
 
-	// Optional case-insensitive service-name scope, applied early in the dedup
+	// Optional case-insensitive service-name scope, applied early in the resource
 	// subquery so a question about one service narrows the resource set instead of
 	// returning the top-20.
 	nameFilter := ""
@@ -402,38 +408,37 @@ func querySpendByService(dbManager *common.DatabaseManager, tenantId string, acc
 	// churned out — on a K8s account that undercounted the prior period by ~5x
 	// while the account-level query reported the true figure.
 	query := fmt.Sprintf(`
-		WITH dedup AS (
-			SELECT DISTINCT ON (cr.resourse_id, cr.service_name) cr.id, cr.resourse_id, cr.service_name
+		WITH resources AS (
+			SELECT cr.id, cr.resourse_id, cr.service_name
 			FROM cloud_resourses cr
 			WHERE cr.tenant = $1 AND cr.service_name IS NOT NULL%s%s
-			ORDER BY cr.resourse_id, cr.service_name, cr.created_at ASC
 		),
 		cur AS (
-			SELECT dedup.service_name,
-				COUNT(DISTINCT dedup.resourse_id)::int AS resource_count,
+			SELECT resources.service_name,
+				COUNT(DISTINCT resources.resourse_id)::int AS resource_count,
 				SUM(s.amount) AS amount,
 				SUM(r.estimated_savings) AS estimated_savings
-			FROM dedup
+			FROM resources
 			INNER JOIN (
 				SELECT spends.cloud_resource_id, SUM(spends.amount) AS amount
 				FROM spends
 				WHERE spends.date >= $2 AND spends.date < $3 AND tenant = $1 AND spends.exclude_aggregate = false%s
 				GROUP BY spends.cloud_resource_id
-			) s ON s.cloud_resource_id = dedup.id
-			LEFT JOIN `+PrimarySavingsSubquery("resource_id", savingsScope)+` r ON dedup.id = r.resource_id
+			) s ON s.cloud_resource_id = resources.id
+			LEFT JOIN `+PrimarySavingsSubquery("resource_id", savingsScope)+` r ON resources.id = r.resource_id
 			WHERE s.amount > 0
-			GROUP BY dedup.service_name
+			GROUP BY resources.service_name
 		),
 		prev AS (
-			SELECT dedup.service_name, SUM(s1.amount) AS amount
-			FROM dedup
+			SELECT resources.service_name, SUM(s1.amount) AS amount
+			FROM resources
 			INNER JOIN (
 				SELECT spends.cloud_resource_id, SUM(spends.amount) AS amount
 				FROM spends
 				WHERE spends.date >= $2 - ($3 - $2) AND spends.date < $2 AND tenant = $1 AND spends.exclude_aggregate = false%s
 				GROUP BY spends.cloud_resource_id
-			) s1 ON s1.cloud_resource_id = dedup.id
-			GROUP BY dedup.service_name
+			) s1 ON s1.cloud_resource_id = resources.id
+			GROUP BY resources.service_name
 		)
 		SELECT
 			cur.service_name,

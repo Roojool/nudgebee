@@ -47,6 +47,9 @@ const (
 	// CategoryListing (app/src/components/audits/common.ts) or the rows are
 	// written but cannot be filtered.
 	EventCategoryKnowledgeGraph EventCategory = "KNOWLEDGE_GRAPH"
+	// Kept in sync with llm-server's audit/model.go (separate Go module —
+	// cannot import this package); budget config writes happen in llm-server.
+	EventCategoryBudget EventCategory = "BUDGET"
 )
 
 type EventType string
@@ -255,6 +258,16 @@ const (
 
 	// Chat Actions (EventCategoryChatActions) — follow-up answers are emitted by llm-server; conversation delete is emitted by api-server's feedback handler.
 	EventTypeChatConversationDelete EventType = "CHAT_CONVERSATION_DELETE"
+
+	// Budget config change history (EventCategoryBudget), emitted by llm-server
+	// (llm_budget_config lives there). Kept in sync with llm-server's
+	// audit/model.go — separate Go module, cannot import this package.
+	EventTypeBudgetConfigCreate   EventType = "BUDGET_CONFIG_CREATE"
+	EventTypeBudgetConfigDelete   EventType = "BUDGET_CONFIG_DELETE"
+	EventTypeBudgetConfigIncrease EventType = "BUDGET_CONFIG_INCREASE"
+	EventTypeBudgetConfigDecrease EventType = "BUDGET_CONFIG_DECREASE"
+	EventTypeBudgetConfigEnable   EventType = "BUDGET_CONFIG_ENABLE"
+	EventTypeBudgetConfigDisable  EventType = "BUDGET_CONFIG_DISABLE"
 )
 
 type EventActor string

@@ -218,7 +218,15 @@ export default function OwnershipRules() {
         <CustomTable tableData={tableData} headers={HEADERS} loading={loading} id='ownership-rules-table' />
       </ListingLayout.Body>
       {modalOpen ? <OwnershipRuleModal open={modalOpen} onClose={handleModalClose} rule={editingRule} /> : null}
-      <Modal open={!!deleting} handleClose={() => setDeleting(null)} title='Delete rule' width='xs' confirmText='Delete' onConfirm={confirmDelete}>
+      <Modal
+        open={!!deleting}
+        handleClose={() => setDeleting(null)}
+        title='Delete rule'
+        width='xs'
+        confirmText='Delete'
+        confirmTone='danger'
+        onConfirm={confirmDelete}
+      >
         <Text value={deleting ? `Delete rule "${deleting.name}"? This cannot be undone.` : ''} />
       </Modal>
     </ListingLayout>

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Stack, Typography } from '@mui/material';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 import { Button } from '@ui/Button';
 import { Input } from '@ui/Input';
@@ -121,7 +122,7 @@ const EntityQueryBuilder: React.FC<Props> = ({ draft, tables, onChange }) => {
           cannot work out from the column names, so it is spelled out rather
           than hidden in a tooltip. */}
       <Box sx={{ p: 1.5, border: `1px solid ${ds.gray[300]}`, background: ds.background[200], borderRadius: ds.radius.md }}>
-        <Typography variant='body2' sx={{ color: ds.gray[700], fontWeight: 600, mb: 0.25 }}>
+        <Typography variant='body2' sx={{ color: ds.gray[700], fontWeight: ds.weight.semibold, mb: 0.25 }}>
           {table.label} — {table.description}
         </Typography>
         <Typography variant='body2' sx={{ color: ds.gray[600] }}>
@@ -168,7 +169,9 @@ const EntityQueryBuilder: React.FC<Props> = ({ draft, tables, onChange }) => {
 
       <Box>
         <Stack direction='row' alignItems='center' gap={1} sx={{ mb: 1 }}>
-          <Typography sx={{ fontFamily: 'var(--ds-font-display)', fontSize: 13, fontWeight: 600, color: ds.gray[700] }}>Filters</Typography>
+          <Typography sx={{ fontFamily: 'var(--ds-font-display)', fontSize: 13, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
+            Filters
+          </Typography>
           <Box sx={{ flex: 1 }} />
           <Button
             tone='secondary'
@@ -226,7 +229,7 @@ const EntityQueryBuilder: React.FC<Props> = ({ draft, tables, onChange }) => {
                     tone='ghost'
                     composition='icon-only'
                     aria-label='Remove filter'
-                    icon={<DeleteOutlineIcon sx={{ fontSize: 18 }} />}
+                    icon={<SafeIcon src={DeleteIconRed} alt='delete' width={16} height={16} />}
                     onClick={() => patch({ filters: draft.filters.filter((_f, i) => i !== index) })}
                     id={`remove-entity-filter-${index}`}
                   />

@@ -92,6 +92,98 @@ mutation DisableAlertManagerRule {
 }
 `;
 
+export const GET_EVENT_RULE_CAPABILITIES = `
+query GetEventRuleCapabilities {
+  capabilities: eventrules_get_capabilities(request: __REQUEST__)
+}
+`;
+
+export const UPDATE_EVENT_RULE_MUTE = `
+mutation UpdateEventRuleMute {
+  mute: eventrules_update_mute(request: __REQUEST__)
+}
+`;
+
+export const GET_EVENT_ALERT_CONTROLS = `
+query GetEventAlertControls {
+  controls: eventrules_get_event_alert_controls(request: __REQUEST__)
+}
+`;
+
+export const UPDATE_EVENT_MUTE = `
+mutation UpdateEventMute {
+  controls: eventrules_update_event_mute(request: __REQUEST__)
+}
+`;
+
+export const APPLY_RULE_CHANGE = `
+mutation ApplyRuleChange {
+  result: eventrules_apply_rule_change(request: __REQUEST__)
+}
+`;
+
+export interface EventRuleCapability {
+  available: boolean;
+  reason?: string;
+  warning?: string;
+}
+
+export interface EventRuleCapabilities {
+  rule_id: string;
+  alert: string;
+  source: string;
+  target: string;
+  enabled?: boolean;
+  muted: boolean;
+  // Workloads muted on their own from the investigation screen.
+  muted_workloads?: number;
+  operations: {
+    edit_definition: EventRuleCapability;
+    update_threshold: EventRuleCapability;
+    update_duration: EventRuleCapability;
+    disable_at_source: EventRuleCapability;
+    mute: EventRuleCapability;
+    pr: EventRuleCapability;
+  };
+}
+
+export type EventMuteScopeName = 'workload' | 'rule';
+
+export interface EventMuteScope {
+  scope: EventMuteScopeName;
+  namespace?: string;
+  owner?: string;
+  matched_7d: number;
+  workloads_7d: number;
+  muted: boolean;
+  expires_at?: string | null;
+}
+
+export interface EventSuppression {
+  rule_id: string;
+  name: string;
+  is_mute: boolean;
+  mute_scope?: EventMuteScopeName;
+  expires_at?: string | null;
+}
+
+// What the investigation screen can do about an event's alert.
+export interface EventAlertControls {
+  event_id: string;
+  alert: string;
+  source: string;
+  rule: EventRuleCapabilities | null;
+  rule_location?: { namespace: string; name: string; managed_by?: string };
+  // The rule's expression and `for` when they can be changed from here.
+  rule_definition?: { expr: string; duration: string; expr_normalized: string };
+  scopes: EventMuteScope[];
+  suppressions: EventSuppression[];
+}
+
+// The first GraphQL error message, so a rejected rule change shows the server's reason.
+export const firstGraphQLError = (res: any): string | undefined =>
+  res?.data?.errors?.[0]?.message || res?.data?.data?.errors?.[0]?.message || res?.response?.data?.errors?.[0]?.message;
+
 export const LIST_ACC = `
 query ListAcc($limit: Int, $offset: Int) {
   accounts_list(where: __WHERE__, order_by: [{column: "created_at", order: desc}] limit: $limit, offset: $offset) {
@@ -617,6 +709,71 @@ const apiKubernetes1 = {
       return error;
     }
   },
+  // Which rule changes Nudgebee can really make, keyed by rule id. An empty map
+  // (request failed) hides every write control rather than offering fake ones.
+  async getEventRuleCapabilities(ruleIds: string[]): Promise<Record<string, EventRuleCapabilities>> {
+    if (!ruleIds.length) {
+      return {};
+    }
+    try {
+      const response = await queryGraphQL(
+        GET_EVENT_RULE_CAPABILITIES.replace('__REQUEST__', gqlStringify({ rule_ids: ruleIds })),
+        'GetEventRuleCapabilities',
+        {}
+      );
+      const list: EventRuleCapabilities[] = response?.data?.data?.capabilities?.capabilities || [];
+      return Object.fromEntries(list.map((c) => [c.rule_id, c]));
+    } catch (error) {
+      console.warn('failed to fetch alert rule capabilities', error);
+      return {};
+    }
+  },
+  async updateEventRuleMute(data: { rule_id: string; account_id: string; muted: boolean }) {
+    try {
+      const response = await queryGraphQL(UPDATE_EVENT_RULE_MUTE.replace('__REQUEST__', gqlStringify(data)), 'UpdateEventRuleMute', {});
+      return {
+        data: response?.data,
+      };
+    } catch (error) {
+      return error;
+    }
+  },
+  async getEventAlertControls(data: { event_id: string; account_id: string }): Promise<EventAlertControls | null> {
+    try {
+      const response = await queryGraphQL(GET_EVENT_ALERT_CONTROLS.replace('__REQUEST__', gqlStringify(data)), 'GetEventAlertControls', {});
+      return response?.data?.data?.controls || null;
+    } catch (error) {
+      console.warn('failed to fetch event alert controls', error);
+      return null;
+    }
+  },
+  async updateEventMute(data: { event_id: string; account_id: string; scope: EventMuteScopeName; duration_hours: number; muted: boolean }) {
+    try {
+      const response = await queryGraphQL(UPDATE_EVENT_MUTE.replace('__REQUEST__', gqlStringify(data)), 'UpdateEventMute', {});
+      return {
+        data: response?.data,
+      };
+    } catch (error) {
+      return error;
+    }
+  },
+  async applyRuleChange(data: {
+    rule_id: string;
+    account_id: string;
+    expr?: string;
+    duration?: string;
+    expected_expr: string;
+    expected_duration?: string;
+  }) {
+    try {
+      const response = await queryGraphQL(APPLY_RULE_CHANGE.replace('__REQUEST__', gqlStringify(data)), 'ApplyRuleChange', {});
+      return {
+        data: response?.data,
+      };
+    } catch (error) {
+      return error;
+    }
+  },
   async disableAlertManager(data: any) {
     try {
       const response = await queryGraphQL(DISABLE_ALERT_MANAGER.replace('__REQUEST__', gqlStringify(data)), 'DisableAlertManagerRule', {});
@@ -991,6 +1148,12 @@ const apiKubernetes1 = {
     }
     if (data?.status) {
       query['status'] = { _eq: data['status'] };
+    }
+    if (data?.start_date || data?.end_date) {
+      const and: any[] = query['_and'] || [];
+      if (data?.start_date) and.push({ starts_at: { _gte: data['start_date'] } });
+      if (data?.end_date) and.push({ starts_at: { _lte: data['end_date'] } });
+      query['_and'] = and;
     }
 
     const response = await queryGraphQL(
@@ -1811,6 +1974,9 @@ const apiKubernetes1 = {
     if (data?.nodeTypes?.length > 0) {
       request['node_types'] = data.nodeTypes;
     }
+    if (data?.specificTypes?.length > 0) {
+      request['specific_types'] = data.specificTypes;
+    }
     if (data?.attributes) {
       request['attributes'] = data?.attributes;
     }
@@ -1826,7 +1992,7 @@ const apiKubernetes1 = {
       throw err;
     }
   },
-  knowledgeGraphFilterOptions: async function (data?: { accountIds?: string[]; nodeTypes?: string[] }) {
+  knowledgeGraphFilterOptions: async function (data?: { accountIds?: string[]; nodeTypes?: string[]; specificTypes?: string[] }) {
     const KNOWLEDGE_GRAPH_FILTER_OPTIONS = `
     query KgFilterOptions {
       kg_get_filter_options(request: __WHERE__) {
@@ -1852,9 +2018,10 @@ const apiKubernetes1 = {
       }
     }
     `;
-    const request: { account_ids?: string[]; node_types?: string[] } = {};
+    const request: { account_ids?: string[]; node_types?: string[]; specific_types?: string[] } = {};
     if (data?.accountIds?.length) request.account_ids = data.accountIds;
     if (data?.nodeTypes?.length) request.node_types = data.nodeTypes;
+    if (data?.specificTypes?.length) request.specific_types = data.specificTypes;
     try {
       return await queryGraphQL(KNOWLEDGE_GRAPH_FILTER_OPTIONS.replace('__WHERE__', gqlStringify(request)), 'KgFilterOptions', {});
     } catch (err) {

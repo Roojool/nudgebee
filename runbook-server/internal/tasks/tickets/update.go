@@ -15,7 +15,7 @@ func (t *TicketsUpdateTask) GetName() string {
 
 // GetDescription returns a brief description of the task.
 func (t *TicketsUpdateTask) GetDescription() string {
-	return "Updates ticket fields such as status, severity, assignee, description, or labels."
+	return "Updates ticket fields such as status, severity (Jira) or impact and urgency (ServiceNow), assignee, description, or labels."
 }
 
 // GetDisplayName returns a human-readable name for the task.
@@ -50,6 +50,16 @@ func (t *TicketsUpdateTask) Execute(taskCtx types.TaskContext, params map[string
 		return nil, err
 	}
 
+	impact, err := extractOptionalString(params, "impact")
+	if err != nil {
+		return nil, err
+	}
+
+	urgency, err := extractOptionalString(params, "urgency")
+	if err != nil {
+		return nil, err
+	}
+
 	assignee, err := extractOptionalString(params, "assignee")
 	if err != nil {
 		return nil, err
@@ -76,8 +86,8 @@ func (t *TicketsUpdateTask) Execute(taskCtx types.TaskContext, params map[string
 	}
 
 	// Validate that at least one field is being updated
-	if status == "" && severity == "" && assignee == "" && description == "" && len(labels) == 0 {
-		return nil, errors.New("at least one of status, severity, assignee, description, or labels must be provided")
+	if status == "" && severity == "" && impact == "" && urgency == "" && assignee == "" && description == "" && len(labels) == 0 {
+		return nil, errors.New("at least one of status, severity, impact, urgency, assignee, description, or labels must be provided")
 	}
 
 	if taskCtx.IsDryRun() {
@@ -96,6 +106,8 @@ func (t *TicketsUpdateTask) Execute(taskCtx types.TaskContext, params map[string
 		ProjectKey:    projectKey,
 		Status:        status,
 		Severity:      severity,
+		Impact:        impact,
+		Urgency:       urgency,
 		Assignee:      assignee,
 		Description:   description,
 		Labels:        labels,
@@ -174,13 +186,37 @@ func (t *TicketsUpdateTask) InputSchema() *types.Schema {
 			},
 			"severity": {
 				Type:        types.PropertyTypeString,
-				Description: "New priority/severity (e.g. High, Medium, Low). Supported on Jira and ServiceNow.",
+				Description: "New priority (e.g. High, Medium, Low). Supported on Jira; ServiceNow uses Impact and Urgency instead.",
 				Required:    false,
 				Order:       7,
 				DependsOn:   []string{"integration_id", "ticket_tool"},
 				VisibleWhen: &types.VisibleWhen{
 					Field: "ticket_tool",
-					Value: []string{"jira", "servicenow"},
+					Value: []string{"jira"},
+				},
+			},
+			"impact": {
+				Type:        types.PropertyTypeString,
+				Description: "New impact. ServiceNow derives the incident's priority from Impact and Urgency; a field left empty keeps its current value.",
+				Required:    false,
+				Order:       7,
+				Options:     []string{"High", "Medium", "Low"},
+				DependsOn:   []string{"integration_id", "ticket_tool"},
+				VisibleWhen: &types.VisibleWhen{
+					Field: "ticket_tool",
+					Value: []string{"servicenow"},
+				},
+			},
+			"urgency": {
+				Type:        types.PropertyTypeString,
+				Description: "New urgency. ServiceNow derives the incident's priority from Impact and Urgency; a field left empty keeps its current value.",
+				Required:    false,
+				Order:       7,
+				Options:     []string{"High", "Medium", "Low"},
+				DependsOn:   []string{"integration_id", "ticket_tool"},
+				VisibleWhen: &types.VisibleWhen{
+					Field: "ticket_tool",
+					Value: []string{"servicenow"},
 				},
 			},
 			"assignee": {

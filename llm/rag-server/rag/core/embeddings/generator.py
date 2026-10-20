@@ -15,7 +15,11 @@ from rag.core.embeddings.providers import (
     VertexAIEmbeddings,
 )
 from rag.core.types import LLM, Embeddings
-from rag.core.utils.db_query import get_llm_integrations, get_embeddings_integrations
+from rag.core.utils.db_query import (
+    get_default_llm_integration,
+    get_embeddings_integrations,
+    get_llm_integrations,
+)
 from utils.config import Config
 from utils.shared import bedrock_client
 
@@ -336,9 +340,17 @@ def get_llm(cloud_account_id: str) -> LLM:
 
     integration_config = None
     if cloud_account_id:
-        integrations = get_llm_integrations(cloud_account_id)
-        if integrations:
-            integration_config = integrations[0].get("config", {})
+        # Which integration, not just any integration: an account with several
+        # enabled LLM integrations has one the operator flagged default, and
+        # taking the first row instead lands on an arbitrary credential — for
+        # figure description that reads as "no vision-capable model" on an
+        # account that has one. Same rule llm-server applies.
+        integration_id = get_default_llm_integration(cloud_account_id)
+        if integration_id:
+            for integration in get_llm_integrations(cloud_account_id) or []:
+                if integration.get("integration_id") == integration_id:
+                    integration_config = integration.get("config", {})
+                    break
 
     def get_config_value(key: str, default: Optional[Any] = None) -> Any:
         if integration_config and key in integration_config:

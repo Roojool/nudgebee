@@ -2,6 +2,23 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
+// jsdom has no canvas; stand the chart in with its data so the sparkline path
+// is exercised instead of failing inside its error boundary.
+jest.mock('chart.js', () => ({
+  Chart: { register: jest.fn() },
+  CategoryScale: jest.fn(),
+  LinearScale: jest.fn(),
+  PointElement: jest.fn(),
+  LineElement: jest.fn(),
+  Filler: jest.fn(),
+  Title: jest.fn(),
+  Tooltip: jest.fn(),
+  Legend: jest.fn(),
+  Colors: jest.fn(),
+}));
+jest.mock('react-chartjs-2', () => ({
+  Line: ({ data, id }) => <div data-testid={`line-chart-${id}`} data-points={data.datasets[0]?.data?.length ?? 0} />,
+}));
 jest.mock('@api1/tickets', () => ({
   __esModule: true,
   default: { listTicketConfigsForCreate: jest.fn(() => Promise.resolve({ data: [] })) },

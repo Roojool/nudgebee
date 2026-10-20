@@ -3,11 +3,13 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"nudgebee/tickets-server/models"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -29,6 +31,7 @@ type fakeJira struct {
 	hits        map[string]int
 	lastPUT     map[string]interface{}
 	searchPages []interface{}
+	count       int // approximate-count answer; 0 leaves the endpoint unavailable
 }
 
 func (f *fakeJira) handler(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +71,8 @@ func (f *fakeJira) handler(w http.ResponseWriter, r *http.Request) {
 		default:
 			http.NotFound(w, r)
 		}
+	case r.Method == http.MethodPost && r.URL.Path == "/rest/api/2/search/approximate-count" && f.cloud && f.count > 0:
+		_, _ = fmt.Fprintf(w, `{"count":%d}`, f.count)
 	case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && !f.cloud:
 		f.searchPages = append(f.searchPages, r.URL.Query().Get("startAt")+"/"+r.URL.Query().Get("maxResults"))
 		_, _ = w.Write([]byte(`{"startAt":2,"maxResults":2,"total":7,"issues":[{"key":"PROJ-3","fields":{"summary":"c"}},{"key":"PROJ-4","fields":{"summary":"d"}}]}`))
@@ -297,9 +302,204 @@ func TestSearchJiraCloudPage_FailsWhenOffsetIsBeyondThePageCap(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	issues, hasMore, _, err := searchJiraCloudPage(context.Background(), client, "project = PROJ", 50, 10)
+	issues, hasMore, _, err := searchJiraCloudPage(context.Background(), client, "", "project = PROJ", 50, 10)
 	if err == nil {
 		t.Fatalf("expected an error, got %d issues has_more=%v", len(issues), hasMore)
 	}
 	mustEqual(t, "pages walked before giving up", calls, 20)
+}
+
+// A second page resumes from the cached cursor instead of re-walking from the
+// first page, and a stale cursor falls back to a full walk.
+func TestSearchJiraCloudPage_ResumesFromCachedCursor(t *testing.T) {
+	const total = 6
+	var bodies []map[string]interface{}
+	rejectCursor := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		start := 0
+		if tok, ok := body["nextPageToken"].(string); ok {
+			if rejectCursor {
+				http.Error(w, `{"errorMessages":["bad token"]}`, http.StatusBadRequest)
+				return
+			}
+			start, _ = strconv.Atoi(strings.TrimPrefix(tok, "t"))
+		}
+		n := min(int(body["maxResults"].(float64)), 2, total-start) // server caps pages at 2 rows
+		var issues []string
+		for i := 0; i < n; i++ {
+			issues = append(issues, fmt.Sprintf(`{"key":"PROJ-%d"}`, start+i))
+		}
+		next := ""
+		if start+n < total {
+			next = fmt.Sprintf(`,"nextPageToken":"t%d"`, start+n)
+		}
+		_, _ = w.Write([]byte(`{"issues":[` + strings.Join(issues, ",") + `]` + next + `}`))
+	}))
+	defer ts.Close()
+	client, err := jira.NewClient(ts.Client(), ts.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+	const integration, jql = "it-resume", "project = RESUME"
+
+	issues, hasMore, _, err := searchJiraCloudPage(ctx, client, integration, jql, 0, 2)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	mustEqual(t, "page 1 keys", issueKeys(issues), []string{"PROJ-0", "PROJ-1"})
+	mustEqual(t, "page 1 has_more", hasMore, true)
+
+	bodies = nil
+	issues, hasMore, _, err = searchJiraCloudPage(ctx, client, integration, jql, 2, 2)
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	mustEqual(t, "page 2 keys", issueKeys(issues), []string{"PROJ-2", "PROJ-3"})
+	mustEqual(t, "page 2 has_more", hasMore, true)
+	mustEqual(t, "page 2 requests (resumed, not re-walked)", len(bodies), 1)
+	mustEqual(t, "page 2 cursor", bodies[0]["nextPageToken"], "t2")
+
+	issues, hasMore, seen, err := searchJiraCloudPage(ctx, client, integration, jql, 4, 2)
+	if err != nil {
+		t.Fatalf("page 3: %v", err)
+	}
+	mustEqual(t, "page 3 keys", issueKeys(issues), []string{"PROJ-4", "PROJ-5"})
+	mustEqual(t, "page 3 has_more", hasMore, false)
+	mustEqual(t, "page 3 total", seen, total)
+
+	// Stale cursor: the server rejects it, so the search re-walks from the start.
+	rejectCursor = true
+	bodies = nil
+	issues, _, _, err = searchJiraCloudPage(ctx, client, integration, jql, 2, 2)
+	if err == nil {
+		t.Fatalf("expected the re-walk to fail while the server rejects every cursor, got %v", issueKeys(issues))
+	}
+	mustEqual(t, "resume attempt then first-page restart", len(bodies) >= 2, true)
+	_, hasCursor := bodies[1]["nextPageToken"]
+	mustEqual(t, "restart begins without a cursor", hasCursor, false)
+}
+
+func issueKeys(issues []jira.Issue) []string {
+	keys := []string{}
+	for _, i := range issues {
+		keys = append(keys, i.Key)
+	}
+	return keys
+}
+
+// Paging advances by the comments actually returned, so an instance that caps
+// maxResults below the requested page size does not drop comments.
+func TestFetchCommentsFromJira_AdvancesByReturnedCount(t *testing.T) {
+	const total, serverCap = 5, 2
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start, _ := strconv.Atoi(r.URL.Query().Get("startAt"))
+		n := min(serverCap, total-start)
+		var cs []string
+		for i := 0; i < n; i++ {
+			cs = append(cs, fmt.Sprintf(`{"author":{"displayName":"a"},"body":"c%d"}`, start+i))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"startAt":%d,"maxResults":%d,"total":%d,"comments":[%s]}`, start, serverCap, total, strings.Join(cs, ","))
+	}))
+	defer ts.Close()
+	client, err := jira.NewClient(ts.Client(), ts.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	got, err := fetchCommentsFromJira("PROJ-1", client)
+	if err != nil {
+		t.Fatalf("fetchCommentsFromJira: %v", err)
+	}
+	mustEqual(t, "comments fetched", len(got), total)
+}
+
+// The approximate count is fetched once per (integration, jql) and reused across
+// pages, and an unavailable endpoint leaves the total unknown (0).
+func TestJiraApproximateCount_CachesAndDegrades(t *testing.T) {
+	calls := 0
+	fail := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/rest/api/2/search/approximate-count" {
+			http.NotFound(w, r)
+			return
+		}
+		if fail {
+			http.Error(w, `{"errorMessages":["nope"]}`, http.StatusBadRequest)
+			return
+		}
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if strings.Contains(body["jql"].(string), "ORDER BY") {
+			http.Error(w, `{"errorMessages":["unexpected ORDER BY"]}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"count":770}`))
+	}))
+	defer ts.Close()
+	client, err := jira.NewClient(ts.Client(), ts.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+
+	mustEqual(t, "first count", jiraApproximateCount(ctx, client, "it-count", `project = "CNT"`), 770)
+	mustEqual(t, "second count (cached)", jiraApproximateCount(ctx, client, "it-count", `project = "CNT"`), 770)
+	mustEqual(t, "requests made", calls, 1)
+
+	fail = true
+	mustEqual(t, "endpoint failing leaves total unknown", jiraApproximateCount(ctx, client, "it-count-fail", `project = "OTHER"`), 0)
+}
+
+// While more pages remain the total is Jira's approximate count, and on the last
+// page it is the exact number of rows seen, without asking for a count.
+func TestJiraList_CloudReportsApproximateTotalWhileMorePagesRemain(t *testing.T) {
+	f, ts := startFakeJira(t, true)
+	f.count = 40
+	config := models.TicketConfigurations{URL: ts.URL, Username: "u", Password: "p"}
+
+	got, err := (&JiraService{}).List(nil, config, models.ListParams{ProjectKey: "PROJ", Offset: 0, Limit: 1})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	mustEqual(t, "has_more", got.HasMore, true)
+	mustEqual(t, "approximate total", got.Total, 40)
+	mustEqual(t, "count requests", f.hits["/rest/api/2/search/approximate-count"], 1)
+
+	f.hits = map[string]int{}
+	got, err = (&JiraService{}).List(nil, config, models.ListParams{ProjectKey: "PROJ", Offset: 2, Limit: 2})
+	if err != nil {
+		t.Fatalf("List last page: %v", err)
+	}
+	mustEqual(t, "has_more on last page", got.HasMore, false)
+	mustEqual(t, "exact total on last page", got.Total, 4)
+	mustEqual(t, "no count request on last page", f.hits["/rest/api/2/search/approximate-count"], 0)
+}
+
+// A self-hosted Jira served over plain http under a context path: API calls must
+// go to <base>/rest/api/2/..., and issue links must keep the scheme and the path.
+func TestJira_ContextPathOverHTTP(t *testing.T) {
+	f := &fakeJira{cloud: false, hits: map[string]int{}}
+	// StripPrefix makes every request outside /jira/ a 404, so a client that drops
+	// the context path fails the test instead of silently working.
+	ts := httptest.NewServer(http.StripPrefix("/jira", http.HandlerFunc(f.handler)))
+	defer ts.Close()
+	config := models.TicketConfigurations{URL: ts.URL + "/jira/", Username: "u", Password: "p"}
+
+	got, err := (&JiraService{}).List(nil, config, models.ListParams{ProjectKey: "PROJ", Offset: 2, Limit: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	mustEqual(t, "issues served", len(got.Tickets), 2)
+	for _, tk := range got.Tickets {
+		mustEqual(t, "issue link", tk.URL, ts.URL+"/jira/browse/"+tk.TicketID)
+	}
+	mustEqual(t, "server info fetched under the context path", f.hits["/rest/api/2/serverInfo"], 1)
 }

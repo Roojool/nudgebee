@@ -12,6 +12,12 @@ import (
 //go:embed default_relationships.json
 var defaultRelationshipsJSON []byte
 
+// CrossAccountEdgeSource is the `source` stamp carried by every edge created by
+// the cross-account relationship rules. The partial-build edge sweep matches on
+// it (see collectRanEdgeSources), so the producer and the sweep must agree on
+// the exact string.
+const CrossAccountEdgeSource = "cross_account"
+
 var (
 	defaultRelationships     []CrossAccountRelationship
 	defaultRelationshipsOnce sync.Once
@@ -94,7 +100,7 @@ func (s *Service) BuildCrossAccountRelationships(graph *Graph, rules []CrossAcco
 						},
 						graph.TenantID,
 						targetNode.CloudAccountID, // Use target's account ID
-						"cross_account",
+						CrossAccountEdgeSource,
 					)
 					newEdges = append(newEdges, edge)
 					matches++
@@ -113,7 +119,7 @@ func (s *Service) BuildCrossAccountRelationships(graph *Graph, rules []CrossAcco
 							},
 							graph.TenantID,
 							sourceNode.CloudAccountID,
-							"cross_account",
+							CrossAccountEdgeSource,
 						)
 						newEdges = append(newEdges, reverseEdge)
 					}

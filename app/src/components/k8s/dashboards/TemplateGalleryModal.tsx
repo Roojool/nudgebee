@@ -320,7 +320,7 @@ const TemplateGalleryModal: React.FC<Props> = ({ open, accountOptions, onClose, 
                       <Typography
                         sx={{
                           fontSize: 13,
-                          fontWeight: 600,
+                          fontWeight: ds.weight.semibold,
                           color: ds.gray[700],
                           minWidth: 0,
                           flex: '0 1 auto',

@@ -123,7 +123,9 @@ const WorkflowStateStrip: React.FC<WorkflowStateStripProps> = ({
                   backgroundColor: ds.amber[400],
                 }}
               />
-              <Typography sx={{ fontSize: ds.text.small, fontWeight: 500, color: ds.gray[700], whiteSpace: 'nowrap' }}>Unsaved changes</Typography>
+              <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.medium, color: ds.gray[700], whiteSpace: 'nowrap' }}>
+                Unsaved changes
+              </Typography>
             </Box>
           </Tooltip>
         )}

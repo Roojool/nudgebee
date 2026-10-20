@@ -461,3 +461,237 @@ func TestValidateToolInput_EnumStillCheckedWhenTypeMatches(t *testing.T) {
 			"type check must pass when value is a string")
 	}
 }
+
+// newArrayTestTool covers string-item arrays (the only ones widened) and the shapes that must not be.
+func newArrayTestTool() *validateTestTool {
+	return newValidateTestTool("arr", map[string]ToolSchemaProperty{
+		"node_types":  {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "string"}},
+		"account_ids": {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "string"}},
+		"commands":    {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "string"}},
+		"untyped":     {Type: ToolSchemaTypeArray}, // Items omitted — not declared as strings
+		"counts":      {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "integer"}},
+		"flags":       {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "boolean"}},
+		"targets":     {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "object"}},
+		"query":       {Type: ToolSchemaTypeString},
+		"limit":       {Type: ToolSchemaTypeInteger},
+	})
+}
+
+func TestCoerceScalarArrays_LeavesInputAlone(t *testing.T) {
+	tool := newArrayTestTool()
+
+	t.Run("nil tool", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(nil, `{"node_types":"Workload"}`)
+		assert.Equal(t, `{"node_types":"Workload"}`, got)
+		assert.Empty(t, fields)
+	})
+
+	t.Run("tool with no schema properties", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(newValidateTestTool("t", nil), `{"node_types":"Workload"}`)
+		assert.Equal(t, `{"node_types":"Workload"}`, got)
+		assert.Empty(t, fields)
+	})
+
+	t.Run("non-JSON input is passed through untouched", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, "kubectl get pods")
+		assert.Equal(t, "kubectl get pods", got)
+		assert.Empty(t, fields)
+	})
+
+	t.Run("malformed JSON is returned verbatim", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"node_types":`)
+		assert.Equal(t, `{"node_types":`, got)
+		assert.Empty(t, fields)
+	})
+
+	t.Run("nothing to coerce returns the byte-identical original", func(t *testing.T) {
+		in := `{  "query" : "redis%" ,  "limit": 20 }`
+		got, fields := CoerceScalarArrays(tool, in)
+		assert.Equal(t, in, got, "the no-op path must never re-serialize — it is by far the common case")
+		assert.Empty(t, fields)
+	})
+
+	t.Run("a key the schema does not declare is untouched", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"undeclared":"x"}`)
+		assert.Equal(t, `{"undeclared":"x"}`, got)
+		assert.Empty(t, fields)
+	})
+
+	t.Run("a non-array property keeps its scalar", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"query":"redis%"}`)
+		assert.Equal(t, `{"query":"redis%"}`, got)
+		assert.Empty(t, fields)
+	})
+
+	t.Run("an existing array is left alone", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"node_types":["Workload"]}`)
+		assert.Equal(t, `{"node_types":["Workload"]}`, got)
+		assert.Empty(t, fields)
+	})
+}
+
+func TestCoerceScalarArrays_Widens(t *testing.T) {
+	tool := newArrayTestTool()
+
+	t.Run("a bare string becomes a single-element array", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"node_types":"Workload"}`)
+		assert.JSONEq(t, `{"node_types":["Workload"]}`, got)
+		assert.Equal(t, []string{"node_types"}, fields)
+	})
+
+	t.Run("the repaired input now passes schema validation", func(t *testing.T) {
+		repaired, _ := CoerceScalarArrays(tool, `{"node_types":"Workload"}`)
+		assert.Nil(t, ValidateToolInput(tool, repaired),
+			"this is the whole point: the production rejection was `expected array, got string`")
+		assert.NotNil(t, ValidateToolInput(tool, `{"node_types":"Workload"}`),
+			"and the un-coerced form must still be the thing that fails, or the test proves nothing")
+	})
+
+	t.Run("two array fields are both coerced and reported sorted", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"node_types":"Workload","account_ids":"aws-prod"}`)
+		assert.JSONEq(t, `{"account_ids":["aws-prod"],"node_types":["Workload"]}`, got)
+		assert.Equal(t, []string{"account_ids", "node_types"}, fields)
+	})
+
+	t.Run("a whole command line in a string-item array stays one element", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"commands":"aws ec2 describe-instances"}`)
+		assert.JSONEq(t, `{"commands":["aws ec2 describe-instances"]}`, got)
+		assert.Equal(t, []string{"commands"}, fields)
+	})
+}
+
+func TestCoerceScalarArrays_OnlyStringItemArrays(t *testing.T) {
+	tool := newArrayTestTool()
+
+	cases := []struct{ name, in string }{
+		{"a string for an array with Items omitted", `{"untyped":"x"}`},
+		{"a number for a number-item array", `{"counts":5}`},
+		{"a boolean for a boolean-item array", `{"flags":true}`},
+		{"a number for a string-item array", `{"node_types":5}`},
+		{"a boolean for a string-item array", `{"node_types":true}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, fields := CoerceScalarArrays(tool, c.in)
+			assert.Equal(t, c.in, got)
+			assert.Empty(t, fields)
+		})
+	}
+
+	t.Run("a string is NOT widened into an object-item array", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"targets":"some-pod"}`)
+		assert.Equal(t, `{"targets":"some-pod"}`, got)
+		assert.Empty(t, fields)
+		assert.NotNil(t, ValidateToolInput(tool, got), "it must still fail validation, loudly")
+	})
+}
+
+func TestCoerceScalarArrays_BlankAndNull(t *testing.T) {
+	tool := newArrayTestTool()
+
+	t.Run("an empty string becomes an empty array, not an array holding an empty string", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"node_types":""}`)
+		assert.JSONEq(t, `{"node_types":[]}`, got)
+		assert.Equal(t, []string{"node_types"}, fields)
+	})
+
+	t.Run("a whitespace-only string becomes an empty array", func(t *testing.T) {
+		got, _ := CoerceScalarArrays(tool, `{"node_types":"   "}`)
+		assert.JSONEq(t, `{"node_types":[]}`, got)
+	})
+
+	t.Run("an explicit null is left untouched so a required-null still reports", func(t *testing.T) {
+		got, fields := CoerceScalarArrays(tool, `{"node_types":null}`)
+		assert.Equal(t, `{"node_types":null}`, got)
+		assert.Empty(t, fields)
+	})
+}
+
+// recommendation_execute_cli executes these strings; a comma split would truncate a real command.
+func TestCoerceScalarArrays_NeverSplitsOnCommas(t *testing.T) {
+	tool := newArrayTestTool()
+
+	t.Run("a comma-separated string stays one element", func(t *testing.T) {
+		got, _ := CoerceScalarArrays(tool, `{"node_types":"Workload,Database"}`)
+		assert.JSONEq(t, `{"node_types":["Workload,Database"]}`, got,
+			"guessing that a comma meant two values would silently change the query the model asked for")
+	})
+
+	t.Run("a CLI command line with comma-bearing flags stays intact", func(t *testing.T) {
+		in := `{"commands":"aws ec2 terminate-instances --instance-ids i-aaa,i-bbb"}`
+		got, _ := CoerceScalarArrays(tool, in)
+		assert.JSONEq(t, `{"commands":["aws ec2 terminate-instances --instance-ids i-aaa,i-bbb"]}`, got)
+		assert.NotContains(t, got, `","i-bbb`,
+			"a split here would produce an executable command that terminates only some of the instances")
+	})
+}
+
+func TestCoerceScalarArrays_PreservesUntouchedValues(t *testing.T) {
+	tool := newArrayTestTool()
+
+	t.Run("a large integer keeps its literal form", func(t *testing.T) {
+		got, _ := CoerceScalarArrays(tool, `{"limit":1755612345678,"node_types":"X"}`)
+		assert.Contains(t, got, "1755612345678")
+		assert.NotContains(t, got, "e+12", "a float64 round trip would corrupt a ms epoch")
+	})
+
+	t.Run("HTML-significant characters are not escaped", func(t *testing.T) {
+		got, _ := CoerceScalarArrays(tool, `{"query":"latency > 500 & up","node_types":"X"}`)
+		// json.Marshal would HTML-escape > and &; untouched values must be copied as raw bytes.
+		assert.Contains(t, got, "latency > 500 & up",
+			"the LLM sees this input echoed back in its scratchpad; escaping it would mangle the query it wrote")
+	})
+}
+
+// The confirmation and turn-cache keys hash this output, so it must not vary with map order.
+func TestCoerceScalarArrays_IsDeterministic(t *testing.T) {
+	tool := newArrayTestTool()
+	in := `{"node_types":"Workload","account_ids":"aws-prod","query":"redis%","limit":20,"commands":"ls","flags":true}`
+
+	first, _ := CoerceScalarArrays(tool, in)
+	for i := 0; i < 50; i++ {
+		got, _ := CoerceScalarArrays(tool, in)
+		assert.Equal(t, first, got, "map-order nondeterminism here would change the confirmation key between calls")
+	}
+}
+
+func TestCoerceScalarArrays_Exclusions(t *testing.T) {
+	t.Run("an argv field is left alone so it fails legibly instead of exec'ing a bad binary", func(t *testing.T) {
+		tool := newValidateTestTool("container", map[string]ToolSchemaProperty{
+			"command": {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "string"}},
+		})
+		got, fields := CoerceScalarArrays(tool, `{"command":"ls -la"}`)
+		assert.Equal(t, `{"command":"ls -la"}`, got,
+			`["ls -la"] is one argv word, so exec would look for a binary named "ls -la" — worse than the type error`)
+		assert.Empty(t, fields)
+	})
+
+	t.Run("an args field is excluded on the same grounds", func(t *testing.T) {
+		tool := newValidateTestTool("container", map[string]ToolSchemaProperty{
+			"args": {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "string"}},
+		})
+		got, fields := CoerceScalarArrays(tool, `{"args":"-la /tmp"}`)
+		assert.Equal(t, `{"args":"-la /tmp"}`, got)
+		assert.Empty(t, fields)
+	})
+
+	t.Run("a non-argv array on the same tool is still coerced", func(t *testing.T) {
+		tool := newValidateTestTool("mixed", map[string]ToolSchemaProperty{
+			"command":    {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "string"}},
+			"node_types": {Type: ToolSchemaTypeArray, Items: map[string]any{"type": "string"}},
+		})
+		got, fields := CoerceScalarArrays(tool, `{"command":"ls","node_types":"Workload"}`)
+		assert.Equal(t, []string{"node_types"}, fields, "the exclusion is per-field, not per-tool")
+		assert.Contains(t, got, `"node_types":["Workload"]`)
+		assert.Contains(t, got, `"command":"ls"`)
+	})
+
+	t.Run("a custom container tool's input is never touched", func(t *testing.T) {
+		tool := nbCustomContainerTool{}
+		in := `{"command":"ls -la","anything":"x"}`
+		got, fields := CoerceScalarArrays(tool, in)
+		assert.Equal(t, in, got,
+			"its schema is authored by the customer in the DB; we cannot reason about what its array fields mean")
+		assert.Empty(t, fields)
+	})
+}

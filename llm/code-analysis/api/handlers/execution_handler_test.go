@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,6 +278,11 @@ func TestHandleExecute_IsolatedEnv(t *testing.T) {
 		assert.Contains(t, resp.Response, "/usr/local/go/bin")
 		assert.Contains(t, resp.Response, "/usr/local/bin")
 		assert.Contains(t, resp.Response, "/app/google-cloud-sdk/bin")
+		assert.Less(t,
+			strings.Index(resp.Response, "/usr/local/bin"),
+			strings.Index(resp.Response, "/app/google-cloud-sdk/bin"),
+			"relay shims in /usr/local/bin must take precedence over bundled cloud CLIs",
+		)
 	})
 
 	t.Run("req.Env cannot override the isolation contract", func(t *testing.T) {

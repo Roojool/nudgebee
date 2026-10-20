@@ -7,7 +7,6 @@ import { Accordion } from '@ui/Accordion';
 import { Banner } from '@ui/Banner';
 import { Skeleton } from '@ui/Skeleton';
 import { EmptyState } from '@ui/EmptyState';
-import SafeIcon from '@shared/icons/SafeIcon';
 import ListingLayout from '@ui/ListingLayout';
 import { Select } from '@ui/Select';
 import apiWorkflow from '@api1/workflow';
@@ -15,19 +14,12 @@ import apiHome from '@api1/home';
 import { hasWriteAccess } from '@lib/auth';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import { generateNodeCategories } from './constants/nodeCategories';
+import { renderCategoryOrTaskIcon } from './utils/taskIcon';
 import ActionDetailsSidebar from './ActionDetailsSidebar';
 import type { TaskDefinition } from '@components/workflow/types';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
-
-const renderCategoryOrTaskIcon = (icon: any, label: string, size: number) => {
-  if (typeof icon === 'string' && !icon.includes('/') && !icon.includes('.')) {
-    // Emoji icon
-    return <span style={{ fontSize: size >= 24 ? 'var(--ds-text-heading)' : 'var(--ds-text-title)' }}>{icon}</span>;
-  }
-  return <SafeIcon src={icon} alt={label} width={size} height={size} style={{ objectFit: 'contain' }} />;
-};
 
 const matchesAnyAlias = (aliases: string[] | undefined, query: string): boolean => {
   if (!aliases?.length) return false;
@@ -294,7 +286,7 @@ const TaskRunner: React.FC = () => {
                 selectedActionType={selectedTaskType}
                 nodes={[]}
                 edges={[]}
-                onTaskDataChange={(data: any) => setTaskData(data)}
+                onTaskDataChange={setTaskData}
                 taskDefinitions={taskDefinitions}
                 taskData={taskData}
                 viewOnlyMode={false}

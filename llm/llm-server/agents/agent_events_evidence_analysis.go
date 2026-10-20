@@ -273,7 +273,10 @@ Noisy Neighbors
 3. Note any pods consuming significantly more memory than requested or approaching their memory limit.
 4. Assess namespace distribution, ownership, and controller behavior for potential anomalies.
 5. Compare resource usage patterns against the node's memory capacity to identify potential noisy neighbors.
-6. always provide the output in the specified format.
+6. If 'co_killed' is present, the same node killed other pods within minutes of this one. Say so plainly and name them: that is one machine running out of memory, not several unrelated faults, and it is the finding — not a footnote to the per-pod numbers.
+7. Anchor the analysis on the entry whose 'is_subject' is true. It is the pod the event is about, and it is usually NOT the largest consumer on the node.
+8. If 'subject_measured' is false, the subject reported no sample before it was killed and is absent from 'neighbours'. Say that it could not be measured; do not read its absence as low usage.
+9. always provide the output in the specified format.
 
 **Evidence Data Structure Description:**
 The 'neighbours' array includes metadata and resource information for each pod in the node. Each entry contains the following fields:
@@ -284,13 +287,20 @@ The 'neighbours' array includes metadata and resource information for each pod i
 5. **'namespace'**: Namespace of the pod.
 6. **'node_name'**: Node name where the pod is running.
 7. **'pod_name'**: Pod name.
+8. **'is_subject'**: Present and true on the pod this event is about.
+
+Alongside 'neighbours':
+- **'pods_on_node'**: How many pods are on the node. Absent when it could not be measured — say "not measured" rather than guessing.
+- **'subject_pod'** / **'subject_measured'**: Which pod the event is about, and whether it reported any usage before it died.
+- **'co_killed'**: Other pods this node killed in the same window, each with 'pod_name', 'namespace' and 'offset_seconds' (signed, relative to this kill — negative means it died first). Absent when there were none.
 
 ** output format **
 - Node name: node_name
-- Number of pods in node: total_pods
+- Number of pods in node: pods_on_node
 - Remaining memory allocatable in node: node_memory_allocatable
 - Memory requested: node_memory_requested
 - Memory used in node : node_memory_used
+- Other pods killed on this node in the same window: co_killed (omit this line when there are none)
 
 Noisy behavior detected in the following pods:
 - Pod: [pod_name], Namespace: [namespace]
@@ -906,6 +916,12 @@ func (m EvidenceInsightsTool) normalizedNoisyNieghbour(data []any) []map[string]
 		temp["pod_name"] = nie["pod_name"].(string)
 		temp["namespace"] = nie["namespace"].(string)
 		temp["node_name"] = nie["node_name"].(string)
+		// The pod the card is about, flagged by the enricher. It is usually not the
+		// biggest consumer on the node, so without the flag the model has no way to
+		// pick its row out of the ranking.
+		if isSubject, ok := nie["is_subject"].(bool); ok && isSubject {
+			temp["is_subject"] = true
+		}
 		if nie["kind"] == nil {
 			temp["kind"] = "Not provided"
 		} else {
@@ -1109,7 +1125,25 @@ func (m EvidenceInsightsTool) parseEventData(evidences map[string]any) RCAInvest
 							temp["neighbours"] = m.normalizedNoisyNieghbour(neighbours)
 						}
 						temp["node_name"] = data["node_name"]
-						temp["total_pods"] = data["total_pods"]
+						// Was total_pods, which held the length of a list truncated
+						// at 15 — so this agent was told every node has 15 pods on
+						// it. pods_on_node is counted from the node's own series and
+						// is absent when it could not be measured, which the prompt
+						// reads as unknown rather than as a node with no pods.
+						if podsOnNode, ok := data["pods_on_node"]; ok {
+							temp["pods_on_node"] = podsOnNode
+						}
+						// Which pod this card is about, and whether it could be
+						// measured at all. Without this the model cannot tell the
+						// subject's own row from its neighbours' (#39083).
+						temp["subject_pod"] = data["subject_pod"]
+						temp["subject_measured"] = data["subject_measured"]
+						// The other pods this node killed in the same window. Read
+						// from the events table because a pod killed between two
+						// scrapes leaves no metric to rank.
+						if coKilled, ok := data["co_killed"]; ok {
+							temp["co_killed"] = coKilled
+						}
 						allNoisyNeighbours = append(allNoisyNeighbours, temp)
 					}
 				}

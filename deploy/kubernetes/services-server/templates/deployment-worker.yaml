@@ -1,0 +1,117 @@
+{{- if (.Values.worker | default dict).enabled }}
+{{- /* The background-job deployment.
+
+       Same image and same config as the API deployment, but with
+       SERVER_ROLE=worker: it is the only place the eight RabbitMQ consumers and
+       the EE startup goroutines run once the split is enabled.
+
+       It keeps the HTTP listener and the /health probes — the binary serves
+       them regardless of role, and they are what makes the pod's liveness,
+       pprof and OTel metrics endpoint work. What makes it a worker is that its
+       app.kubernetes.io/name is "<name>-worker", so the services-server Service
+       selector does not match it and no API traffic is routed here. The only
+       HTTP traffic it takes is scheduled cron calls, via service-worker.yaml,
+       once runbook-server's SERVICE_API_SERVER_CRON_URL points at it.
+
+       Deliberately has no HPA: the point of the split is a *fixed*, known
+       number of consumers. Scaling this on CPU would silently change queue
+       concurrency (replicas x per-queue concurrency).
+
+       Not covered by this deployment: background work spawned from inside
+       user-facing HTTP handlers — scan_orchestrator's heartbeat evaluation,
+       application/profiler tickers, triage's rule-match batcher. Those run on
+       whichever pod took the request, which is always an API pod. Size the
+       API pods accordingly. */}}
+{{- $worker := .Values.worker }}
+{{- $resources := $worker.resources | default .Values.resources }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "services-server.fullname" . }}-worker
+  labels:
+    {{- include "services-server.workerLabels" . | nindent 4 }}
+  annotations:
+  {{- with .Values.annotations }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ $worker.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "services-server.workerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        rollme: {{ randAlphaNum 5 | quote }}
+      {{- with ($worker.podAnnotations | default .Values.podAnnotations) }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "services-server.workerSelectorLabels" . | nindent 8 }}
+    spec:
+      {{- with (( default .Values.global.imagePullSecrets .Values.imagePullSecrets )) }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "services-server.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.initCheckEnabled | default true }}
+      initContainers:
+        - name: db-check
+          image: {{ .Values.global.initImages.postgres }}
+          imagePullPolicy: IfNotPresent
+          command: ['sh', '-c', 'until pg_isready -d "$APP_DATABASE_URL"; do echo "Waiting for PostgreSQL to be ready..."; sleep 2; done;']
+          envFrom:
+            - secretRef:
+                name: {{ include "nudgebee.secretName" . | quote }}
+      {{- end}}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "imageName" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ include "nudgebee.secretName" . | quote }}
+            {{- with .Values.extraEnvFromSecret }}
+            - secretRef:
+                name: {{ . | quote }}
+                optional: true
+            {{- end }}
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            - name: SERVER_ROLE
+              value: {{ include "services-server.serverRole" (dict "ctx" . "role" "worker") | quote }}
+            {{- include "services-server.goMemLimitEnv" (dict "ctx" . "resources" $resources) | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+      {{- with ($worker.nodeSelector | default .Values.nodeSelector) }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with ($worker.affinity | default .Values.affinity) }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with ($worker.tolerations | default .Values.tolerations) }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

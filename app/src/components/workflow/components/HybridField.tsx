@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Box, Typography, ToggleButtonGroup, ToggleButton, Autocomplete, TextField, CircularProgress, Chip } from '@mui/material';
+import { Box, Typography, ToggleButtonGroup, ToggleButton, Autocomplete, TextField, CircularProgress } from '@mui/material';
+import { Chip } from '@ui/Chip';
 import { ArrowDropDown, Code } from '@mui/icons-material';
 import { colors } from 'src/utils/colors';
 import SafeIcon from '@shared/icons/SafeIcon';
@@ -180,24 +181,7 @@ const HybridField: React.FC<HybridFieldProps> = ({
       {/* Context chips - show current Account/Namespace/Kind */}
       {contextChips.length > 0 && (
         <Box sx={{ display: 'flex', gap: 0.5, mb: 1, flexWrap: 'wrap' }}>
-          {contextChips.map(
-            (chip) =>
-              chip.value && (
-                <Chip
-                  key={chip.label}
-                  label={`${chip.label}: ${chip.value}`}
-                  size='small'
-                  sx={{
-                    fontSize: 'var(--ds-text-caption)',
-                    height: '22px',
-                    backgroundColor: 'var(--ds-blue-100)',
-                    color: 'var(--ds-blue-700)',
-                    border: '1px solid var(--ds-brand-200)',
-                    '& .MuiChip-label': { px: 1 },
-                  }}
-                />
-              )
-          )}
+          {contextChips.map((chip) => chip.value && <Chip key={chip.label} tone='info'>{`${chip.label}: ${chip.value}`}</Chip>)}
         </Box>
       )}
 
@@ -279,18 +263,9 @@ const HybridField: React.FC<HybridFieldProps> = ({
                 )}
                 <Box sx={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{option.label}</Box>
                 {option.type && (
-                  <Chip
-                    label={option.type}
-                    size='small'
-                    sx={{
-                      height: 18,
-                      fontSize: 10,
-                      bgcolor: 'var(--ds-background-300)',
-                      color: colors.text.secondary,
-                      flexShrink: 0,
-                      '& .MuiChip-label': { px: 0.75 },
-                    }}
-                  />
+                  <Chip size='xs' tone='subtle' sx={{ flexShrink: 0 }}>
+                    {option.type}
+                  </Chip>
                 )}
               </Box>
             );

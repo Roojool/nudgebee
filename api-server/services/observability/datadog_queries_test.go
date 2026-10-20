@@ -17,6 +17,10 @@ import (
 // buildDatadogNodeQueries
 // ----------------------------------------------------------------------------
 
+// Every node-scoped query filters on `kube_node`, never `host`. Datadog's host tag is
+// the cloud instance's fully qualified name (`gke-…-fiik.us-central1-a.c.<project>.internal`
+// on GKE) while NodeName is the Kubernetes name, so an exact `host:` match finds
+// nothing — measured on the dev account: zero series for a node running 69 containers.
 func TestBuildDatadogNodeQueries(t *testing.T) {
 	meta := RequestMetadata{Kind: "node", NodeName: "node-1"}
 
@@ -28,27 +32,27 @@ func TestBuildDatadogNodeQueries(t *testing.T) {
 		{
 			name:     "cpu_usage scoped by host with host grouping",
 			metric:   "cpu_usage",
-			expected: "avg:kubernetes.cpu.usage.total{host:node-1} by {host}",
+			expected: "avg:kubernetes.cpu.usage.total{kube_node:node-1} by {kube_node}",
 		},
 		{
 			name:     "memory_usage uses system.mem.used",
 			metric:   "memory_usage",
-			expected: "avg:system.mem.used{host:node-1} by {host}",
+			expected: "avg:system.mem.used{kube_node:node-1} by {kube_node}",
 		},
 		{
 			name:     "cpu_request",
 			metric:   "cpu_request",
-			expected: "avg:kubernetes.cpu.requests{host:node-1} by {host}",
+			expected: "avg:kubernetes.cpu.requests{kube_node:node-1} by {kube_node}",
 		},
 		{
 			name:     "disk_used",
 			metric:   "disk_used",
-			expected: "avg:system.disk.used{host:node-1} by {host}",
+			expected: "avg:system.disk.used{kube_node:node-1} by {kube_node}",
 		},
 		{
 			name:     "pvc_usage is a ratio of disk used over total",
 			metric:   "pvc_usage",
-			expected: "(avg:system.disk.used{host:node-1} by {host} / avg:system.disk.total{host:node-1} by {host}) * 100",
+			expected: "(avg:system.disk.used{kube_node:node-1} by {kube_node} / avg:system.disk.total{kube_node:node-1} by {kube_node}) * 100",
 		},
 	}
 
@@ -89,6 +93,17 @@ func TestBuildDatadogWorkloadQueries_DeploymentResourceMetrics(t *testing.T) {
 			name:     "cpu_usage filtered by namespace + deployment tag, grouped by deployment",
 			metric:   "cpu_usage",
 			expected: "avg:kubernetes.cpu.usage.total{kube_namespace:shop, kube_deployment:web} by {kube_deployment}",
+		},
+		{
+			name:     "cpu_throttling from the agent's kubelet check, scoped by the same kube tags",
+			metric:   "cpu_throttling",
+			expected: "sum:kubernetes.cpu.cfs.throttled.seconds{kube_namespace:shop, kube_deployment:web} by {kube_deployment}",
+		},
+		{
+			// Trace metrics carry no kube_* tags, so the match is on the APM service name.
+			name:     "workload_http_latency_p99 from APM, matched on service name",
+			metric:   "workload_http_latency_p99",
+			expected: "p99:trace.http.server.request{service:web}",
 		},
 		{
 			name:     "memory_usage uses working_set",

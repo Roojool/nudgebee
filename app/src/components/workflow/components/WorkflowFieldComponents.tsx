@@ -1,8 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Typography, TextField, Chip, Autocomplete } from '@mui/material';
+import { Box, Typography, TextField, Autocomplete } from '@mui/material';
+import { Chip } from '@ui/Chip';
 import { Switch } from '@ui/Switch';
 import { ToggleGroup } from '@ui/ToggleGroup';
-import { Add, Delete, DragIndicator, Visibility, VisibilityOff, ExpandMore, ExpandLess, Code, ViewList } from '@mui/icons-material';
+import { Add, DragIndicator, Visibility, VisibilityOff, ExpandMore, ExpandLess, Code, ViewList, WrapText } from '@mui/icons-material';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import { Input } from '@ui/Input';
 import { Select } from '@ui/Select';
 import CollapsableCard from '@ui/CollapsableCard';
@@ -19,6 +22,7 @@ import { sql } from '@codemirror/lang-sql';
 import { javascript } from '@codemirror/lang-javascript';
 import { shell } from '@codemirror/legacy-modes/mode/shell';
 import { StreamLanguage } from '@codemirror/language';
+import { EditorView } from '@codemirror/view';
 import { Button } from '@ui/Button';
 import { CodeEditor } from '@ui/CodeEditor';
 import { FormField } from '@shared/forms/FormComponents';
@@ -384,9 +388,7 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
             <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-medium)', color: 'var(--ds-brand-500)' }}>
               Item {index + 1}
             </Typography>
-            {configuredCount > 0 && (
-              <Chip label={`${configuredCount} fields`} size='small' variant='outlined' sx={{ height: '18px', fontSize: 'var(--ds-text-caption)' }} />
-            )}
+            {configuredCount > 0 && <Chip size='xs'>{`${configuredCount} fields`}</Chip>}
             {isExpanded ? (
               <ExpandLess sx={{ fontSize: 18, color: 'var(--ds-gray-600)', ml: 'auto' }} />
             ) : (
@@ -399,7 +401,7 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
               tone='ghost'
               size='sm'
               aria-label='Remove item'
-              icon={<Delete fontSize='small' sx={{ color: 'var(--ds-red-500)' }} />}
+              icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
               onClick={() => removeItem(index)}
             />
           </Box>
@@ -589,7 +591,7 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
                   tone='ghost'
                   size='sm'
                   aria-label='Remove item'
-                  icon={<Delete sx={{ color: 'var(--ds-red-500)' }} />}
+                  icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                   onClick={() => removeItem(index)}
                 />
               </Box>
@@ -972,7 +974,7 @@ export const KeyValueEditor: React.FC<KeyValueEditorProps> = ({
                 size='sm'
                 disabled={disabled}
                 aria-label='Remove entry'
-                icon={<Delete fontSize='small' sx={{ color: 'var(--ds-red-500)' }} />}
+                icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                 onClick={() => removeEntry(entry.id)}
               />
             </Box>
@@ -1043,21 +1045,9 @@ export const MultiSelectChips: React.FC<MultiSelectChipsProps> = ({
         }}
       >
         {options.map((option) => (
-          <Chip
-            key={option}
-            label={option}
-            onClick={() => !disabled && handleToggle(option)}
-            color={value.includes(option) ? 'primary' : 'default'}
-            variant={value.includes(option) ? 'filled' : 'outlined'}
-            size='small'
-            disabled={disabled}
-            sx={{
-              cursor: disabled ? 'default' : 'pointer',
-              '&:hover': {
-                backgroundColor: value.includes(option) ? undefined : 'var(--ds-brand-150)',
-              },
-            }}
-          />
+          <Chip key={option} selected={value.includes(option)} onClick={() => !disabled && handleToggle(option)} disabled={disabled}>
+            {option}
+          </Chip>
         ))}
         {options.length === 0 && (
           <Typography variant='body2' sx={{ color: 'var(--ds-gray-400)', fontSize: 'var(--ds-text-body)' }}>
@@ -1089,6 +1079,9 @@ interface CodeEditorWithLanguageProps {
   height?: string;
 }
 
+// Keeps text from running under the wrap toggle pinned to the editor's top-right corner.
+const wrapToggleClearance = EditorView.theme({ '.cm-content': { paddingRight: '32px' } });
+
 export const CodeEditorWithLanguage: React.FC<CodeEditorWithLanguageProps> = ({
   value,
   onChange,
@@ -1114,12 +1107,15 @@ export const CodeEditorWithLanguage: React.FC<CodeEditorWithLanguageProps> = ({
     }
   };
 
+  // Long one-line commands (e.g. an AWS CLI call with template expressions) wrap by default; the toggle lets the user scroll sideways instead.
+  const [wrapLines, setWrapLines] = useState(true);
+
   return (
-    <Box>
+    <Box sx={{ position: 'relative', maxWidth: '500px' }}>
       <CodeMirror
         value={value || ''}
         height={height}
-        extensions={getLanguageExtension()}
+        extensions={[...getLanguageExtension(), wrapToggleClearance, ...(wrapLines ? [EditorView.lineWrapping] : [])]}
         onChange={onChange}
         editable={!disabled}
         placeholder={placeholder}
@@ -1143,6 +1139,29 @@ export const CodeEditorWithLanguage: React.FC<CodeEditorWithLanguageProps> = ({
           opacity: disabled ? 0.6 : 1,
         }}
       />
+      <Box
+        sx={{
+          position: 'absolute',
+          top: 'var(--ds-space-1)',
+          right: 'var(--ds-space-1)',
+          zIndex: 2,
+          borderRadius: 'var(--ds-radius-sm)',
+          border: `1px solid ${wrapLines ? ds.blue[300] : ds.gray[300]}`,
+          backgroundColor: wrapLines ? ds.blue[100] : ds.background[100],
+        }}
+      >
+        <Button
+          tone='ghost'
+          size='xs'
+          composition='icon-only'
+          icon={<WrapText />}
+          aria-label='Wrap lines'
+          aria-pressed={wrapLines}
+          tooltip={wrapLines ? 'Turn off line wrap' : 'Wrap long lines'}
+          onClick={() => setWrapLines((wrap) => !wrap)}
+          data-testid='code-editor-wrap-toggle'
+        />
+      </Box>
       {error && (
         <Typography variant='body2' sx={{ color: 'var(--ds-red-500)', fontSize: 'var(--ds-text-small)', mt: 0.5 }}>
           {error}
@@ -1395,17 +1414,7 @@ export const NestedSchemaEditor: React.FC<NestedSchemaEditorProps> = ({
             {title}
           </Typography>
         }
-        meta={
-          configuredCount > 0 ? (
-            <Chip
-              label={`${configuredCount} configured`}
-              size='small'
-              color='primary'
-              variant='outlined'
-              sx={{ height: '20px', fontSize: 'var(--ds-text-caption)' }}
-            />
-          ) : undefined
-        }
+        meta={configuredCount > 0 ? <Chip tone='info'>{`${configuredCount} configured`}</Chip> : undefined}
         sx={error ? { border: '1px solid var(--ds-red-500)' } : undefined}
       >
         {Object.entries(schema).map(([fieldName, fieldSchema]) => {

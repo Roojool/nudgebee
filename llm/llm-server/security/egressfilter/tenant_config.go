@@ -18,12 +18,13 @@ import (
 // individual env-loaded rules for this tenant only, CustomRules adds. A
 // tenant cannot weaken the env baseline by removing entries.
 type TenantConfig struct {
-	TenantID      uuid.UUID `db:"tenant_id"     json:"tenant_id"`
-	Mode          Mode      `db:"mode"          json:"mode"`
-	Enabled       bool      `db:"enabled"       json:"enabled"`
-	Allowlist     []string  `db:"allowlist"     json:"allowlist"`       // additive on env allowlist
-	CustomRules   []byte    `db:"custom_rules"  json:"custom_rules"`    // raw JSONB; no admin-API surface yet
-	DisabledRules []string  `db:"disabled_rules" json:"disabled_rules"` // additive; disables env-loaded rules per tenant
+	TenantID       uuid.UUID `db:"tenant_id"     json:"tenant_id"`
+	Mode           Mode      `db:"mode"          json:"mode"`
+	Enabled        bool      `db:"enabled"       json:"enabled"`
+	EntropyEnabled bool      `db:"entropy_enabled" json:"entropy_enabled"`
+	Allowlist      []string  `db:"allowlist"     json:"allowlist"`       // additive on env allowlist
+	CustomRules    []byte    `db:"custom_rules"  json:"custom_rules"`    // raw JSONB; no admin-API surface yet
+	DisabledRules  []string  `db:"disabled_rules" json:"disabled_rules"` // additive; disables env-loaded rules per tenant
 
 	// Agents whose payloads skip detection. Excludes by PRODUCER -> reaches
 	// noise no rule can (websearch sends a fetched public page). Audited, not silent.
@@ -369,9 +370,14 @@ func tenantConfigCacheReapExpired() {
 	}
 }
 
+// PlatformEntropyEnabled is the fallback when no tenant override exists.
+// Defaults to false so statistical entropy detection is opt-in.
+var PlatformEntropyEnabled bool
+
 // applyTenantOverrides filters Scan hits using a per-tenant TenantConfig:
 // - drops hits whose RuleID is in tcfg.DisabledRules (tenant disabled the rule)
 // - drops hits whose matched substring is in tcfg.Allowlist (tenant docs-sample)
+// - drops "high-entropy-blob" when entropy detection is disabled for the tenant
 //
 // Returns the result unchanged when tcfg is nil or both lists are empty
 // (zero allocation on the hot path when nothing applies).
@@ -379,7 +385,13 @@ func tenantConfigCacheReapExpired() {
 // CustomRules are not applied here — they need a fresh regex pass against
 // the payload and require admin-API surface that does not ship in 2a.
 func applyTenantOverrides(r Result, payload string, tcfg *TenantConfig) Result {
-	if tcfg == nil || (len(tcfg.DisabledRules) == 0 && len(tcfg.Allowlist) == 0) {
+	entropyEnabled := PlatformEntropyEnabled
+	if tcfg != nil {
+		entropyEnabled = tcfg.EntropyEnabled
+	}
+	dropEntropy := !entropyEnabled
+
+	if !dropEntropy && (tcfg == nil || (len(tcfg.DisabledRules) == 0 && len(tcfg.Allowlist) == 0)) {
 		return r
 	}
 	if len(r.Hits) == 0 {
@@ -387,14 +399,14 @@ func applyTenantOverrides(r Result, payload string, tcfg *TenantConfig) Result {
 	}
 
 	var disabledSet map[string]struct{}
-	if len(tcfg.DisabledRules) > 0 {
+	if tcfg != nil && len(tcfg.DisabledRules) > 0 {
 		disabledSet = make(map[string]struct{}, len(tcfg.DisabledRules))
 		for _, id := range tcfg.DisabledRules {
 			disabledSet[id] = struct{}{}
 		}
 	}
 	var allowSet map[string]struct{}
-	if len(tcfg.Allowlist) > 0 {
+	if tcfg != nil && len(tcfg.Allowlist) > 0 {
 		allowSet = make(map[string]struct{}, len(tcfg.Allowlist))
 		for _, v := range tcfg.Allowlist {
 			allowSet[v] = struct{}{}
@@ -403,6 +415,9 @@ func applyTenantOverrides(r Result, payload string, tcfg *TenantConfig) Result {
 
 	kept := r.Hits[:0]
 	for _, h := range r.Hits {
+		if dropEntropy && h.RuleID == "high-entropy-blob" {
+			continue
+		}
 		if disabledSet != nil {
 			if _, ok := disabledSet[h.RuleID]; ok {
 				continue

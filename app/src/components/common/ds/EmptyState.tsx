@@ -34,6 +34,10 @@ export type EmptyStateTone = 'neutral' | 'success';
 export interface EmptyStateAction {
   label: string;
   onClick: () => void;
+  /** Optional leading icon rendered inside the action button */
+  icon?: React.ReactNode;
+  /** Optional id forwarded to the action button (e.g. to keep an e2e locator stable) */
+  id?: string;
 }
 
 export interface EmptyStateProps {
@@ -196,7 +200,9 @@ export function EmptyState({
         {action && (
           <Box sx={{ mt: 'var(--ds-space-2)' }}>
             <Button
+              id={action.id}
               onClick={action.onClick}
+              startIcon={action.icon}
               variant='contained'
               size={size === 'page' ? 'medium' : 'small'}
               sx={{

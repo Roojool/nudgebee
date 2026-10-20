@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_recommendation_account_status_category_savings;
+DROP INDEX IF EXISTS idx_recommendation_account_status_savings;

@@ -475,6 +475,61 @@ func TestBuildLogsActionResponse(t *testing.T) {
 	assert.NotEmpty(t, resp.GetInsights())
 
 	assert.Contains(t, resp.ExtractLabels(), "status_code")
+
+	groups, ok := ai["log_groups"].([]playbooks.LogLineGroup)
+	require.True(t, ok, "provider logs carry the grouped view the log card renders")
+	require.Len(t, groups, 2)
+	assert.Equal(t, playbooks.LogLineGroup{Text: "status=500 error serving request", Count: 1, Level: "error", FirstSeen: "t1", LastSeen: "t1"}, groups[0])
+	assert.Equal(t, 2, ai["log_total_lines"])
+}
+
+func TestSummarizeOutputLogs(t *testing.T) {
+	// The job-failure event behind this change: two Loki rows, the provider's severity
+	// on each, and the error message already carrying its own "ERROR:" prefix.
+	logs := []OutputLog{
+		{Timestamp: "2026-09-18T04:42:00.82894806Z", Message: "nightly-report: generating report", Severity: "unknown"},
+		{Timestamp: "2026-09-18T04:42:00.82896782Z", Message: "ERROR: report generation failed: cannot write /data/report.csv: permission denied", Severity: "error"},
+	}
+	d := summarizeOutputLogs(logs, 3)
+
+	require.Len(t, d.Groups, 2)
+	assert.Equal(t, "error", d.Groups[0].Level, "the provider's severity decides the level")
+	assert.Equal(t, "2026-09-18T04:42:00.82896782Z", d.Groups[0].FirstSeen)
+	assert.Equal(t, []playbooks.PlaybookActionResponseInsight{
+		{Message: "Error logged: ERROR: report generation failed: cannot write /data/report.csv: permission denied", Severity: "High"},
+	}, d.Insights)
+}
+
+func TestSummarizeOutputLogs_StackTraceGroupsOnFirstLine(t *testing.T) {
+	trace := func(frame string) OutputLog {
+		return OutputLog{Message: "java.lang.IllegalStateException: pool exhausted\n\tat " + frame, Severity: "ERROR"}
+	}
+	d := summarizeOutputLogs([]OutputLog{trace("a.Foo.run(Foo.java:10)"), trace("b.Bar.call(Bar.java:22)")}, 3)
+
+	require.Len(t, d.Groups, 1, "one exception, two call paths")
+	assert.Equal(t, "java.lang.IllegalStateException: pool exhausted", d.Groups[0].Text)
+	assert.Equal(t, 2, d.Groups[0].Count)
+}
+
+func TestExtractLogInsights_DeduplicatesRepeatedErrors(t *testing.T) {
+	logs := []OutputLog{
+		{Message: "failed to get write symbol", Severity: "error"},
+		{Message: "failed to get write symbol", Severity: "error"},
+		{Message: "disk full", Severity: "error"},
+	}
+	assert.Equal(t, []playbooks.PlaybookActionResponseInsight{
+		{Message: "ERROR: failed to get write symbol", Severity: "Critical"},
+		{Message: "ERROR: disk full", Severity: "Critical"},
+	}, extractLogInsights(logs, 10))
+}
+
+func TestPrefixSeverity(t *testing.T) {
+	assert.Equal(t, "ERROR: boom", prefixSeverity("ERROR", "boom"))
+	assert.Equal(t, "ERROR: report generation failed", prefixSeverity("ERROR", "ERROR: report generation failed"))
+	assert.Equal(t, "error: lower-case already", prefixSeverity("ERROR", "error: lower-case already"))
+	assert.Equal(t, "ERROR: Errors occurred in batch", prefixSeverity("ERROR", "Errors occurred in batch"), "a word starting with the severity is not the severity")
+	assert.Equal(t, "ERROR", prefixSeverity("ERROR", "ERROR"))
+	assert.Equal(t, "ERROR— disk full", prefixSeverity("ERROR", "ERROR— disk full"), "a multi-byte separator is not a letter")
 }
 
 func TestAddExecutedQueryInfo(t *testing.T) {
@@ -598,4 +653,119 @@ func TestKubectlLogsFailed(t *testing.T) {
 			assert.Equal(t, tc.failed, kubectlLogsFailed(tc.stdout, tc.stderr, tc.exitCode, tc.haveExitCode))
 		})
 	}
+}
+
+// A CronJob's run is its own workload. Resolving to the CronJob made LokiSource
+// query `pod=~"nightly-report-.*"`, which matches every run it has ever made —
+// 69 of 976 job_failure findings on dev carried a different run's output.
+func TestGetEventWorkload_CronJobRunIsItsOwnWorkload(t *testing.T) {
+	got := getEventWorkload(playbooks.PlaybookEvent{
+		SubjectType:      "job",
+		SubjectName:      "nightly-report-29836288",
+		SubjectOwner:     "nightly-report",
+		SubjectOwnerKind: "cronjob", // agent events lowercase it
+	})
+
+	assert.Equal(t, "nightly-report-29836288", got)
+}
+
+func TestGetEventWorkload_OwnerStillWinsForPods(t *testing.T) {
+	// The reason the owner is preferred at all: a pod name carries a ReplicaSet
+	// hash that no storage column holds.
+	got := getEventWorkload(playbooks.PlaybookEvent{
+		SubjectType:      "pod",
+		SubjectName:      "checkout-66cbdd8d5-w6kxc",
+		SubjectOwner:     "checkout",
+		SubjectOwnerKind: "Deployment",
+	})
+
+	assert.Equal(t, "checkout", got)
+}
+
+// A pod event's logs and metrics come from that pod. The owner path returned
+// every replica's lines, `kubectl logs daemonset/<owner>` read one arbitrary
+// replica, and the utilisation query summed all of them — an OOMKilled
+// DaemonSet pod was captioned with another node's logs and the fleet's memory.
+func TestPodEventEvidenceTargetsThePod(t *testing.T) {
+	pod := playbooks.PlaybookEvent{
+		SubjectType:      "pod",
+		SubjectName:      "log-shipper-x7k2p",
+		SubjectOwner:     "log-shipper",
+		SubjectOwnerKind: "DaemonSet",
+		SubjectNamespace: "logging",
+	}
+
+	assert.Equal(t, "log-shipper-x7k2p", eventPodSubject(pod))
+	assert.Equal(t, "pod", relayLogKind(pod, eventPodSubject(pod)),
+		"kubectl logs daemonset/<owner> reads one arbitrary replica")
+	name, kind := workloadMetricTarget(pod)
+	assert.Equal(t, "log-shipper-x7k2p", name)
+	assert.Equal(t, "pod", kind, "any workload kind prefix-matches and sums the owner's pods")
+
+	where := buildPodLogWhereClause("log-shipper-x7k2p", "logging")
+	require.Len(t, where.And, 2)
+	assert.Equal(t, "log-shipper-x7k2p", where.And[0].Binary["pod"][query.Eq])
+	assert.Equal(t, "logging", where.And[1].Binary["namespace"][query.Eq])
+
+	// Non-pod subjects keep the owner path unchanged.
+	job := playbooks.PlaybookEvent{SubjectType: "job", SubjectName: "nightly-report-29836288",
+		SubjectOwner: "nightly-report", SubjectOwnerKind: "cronjob"}
+	assert.Equal(t, "", eventPodSubject(job))
+	name, kind = workloadMetricTarget(job)
+	assert.Equal(t, getEventWorkload(job), name)
+	assert.Equal(t, workloadKindFromEvent(job), kind)
+
+	deploy := playbooks.PlaybookEvent{SubjectType: "deployment", SubjectName: "checkout",
+		SubjectOwner: "checkout", SubjectOwnerKind: "Deployment"}
+	assert.Equal(t, "Deployment", relayLogKind(deploy, getEventWorkload(deploy)))
+
+	// No pod subject and no name must not read as "pod".
+	assert.Equal(t, "", relayLogKind(playbooks.PlaybookEvent{}, ""))
+}
+
+func TestGetEventWorkload_JobOwnedByItselfIsUnchanged(t *testing.T) {
+	// A standalone Job owns itself; both branches agree, and must keep agreeing.
+	got := getEventWorkload(playbooks.PlaybookEvent{
+		SubjectType:      "job",
+		SubjectName:      "thumbnail-backfill",
+		SubjectOwner:     "thumbnail-backfill",
+		SubjectOwnerKind: "Job",
+	})
+
+	assert.Equal(t, "thumbnail-backfill", got)
+}
+
+// The window a log card covers has to be on the card, or a reader cannot tell a
+// card holding the incident from one holding the last eight quiet minutes.
+func TestBuildLogsActionResponse_StampsTheWindowItCovers(t *testing.T) {
+	logs := []OutputLog{
+		{Timestamp: "2026-09-23T15:21:10.116953175Z", Message: "recovery-path test: failing on purpose", Severity: "error"},
+		{Timestamp: "2026-09-23T15:26:01.281073849Z", Message: "nightly-report: generating report", Severity: "info"},
+	}
+
+	resp := buildLogsActionResponse(logs, "", map[string]any{}, 3, nil, nil, nil)
+
+	assert.NotNil(t, resp)
+	assert.Equal(t, "2026-09-23T15:21:10.116953175Z", resp.AdditionalInfo["log_window_start"])
+	assert.Equal(t, "2026-09-23T15:26:01.281073849Z", resp.AdditionalInfo["log_window_end"])
+}
+
+// Provider rows arrive newest-first, so the stamp must order by time, not arrival.
+func TestBuildLogsActionResponse_WindowIsOrderedByTimeNotArrival(t *testing.T) {
+	logs := []OutputLog{
+		{Timestamp: "2026-09-23T15:26:01Z", Message: "later line", Severity: "info"},
+		{Timestamp: "2026-09-23T15:21:10Z", Message: "earlier line", Severity: "info"},
+	}
+
+	resp := buildLogsActionResponse(logs, "", map[string]any{}, 3, nil, nil, nil)
+
+	assert.Equal(t, "2026-09-23T15:21:10Z", resp.AdditionalInfo["log_window_start"])
+	assert.Equal(t, "2026-09-23T15:26:01Z", resp.AdditionalInfo["log_window_end"])
+}
+
+// Lines with no timestamp at all must not invent a window.
+func TestBuildLogsActionResponse_NoWindowWhenLinesAreUndated(t *testing.T) {
+	resp := buildLogsActionResponse([]OutputLog{{Message: "boom"}}, "", map[string]any{}, 3, nil, nil, nil)
+
+	assert.NotContains(t, resp.AdditionalInfo, "log_window_start")
 }

@@ -41,11 +41,28 @@ const (
 )
 
 // circuitBreakerEntry is the per-pod in-memory breaker state for one provider+model.
+// TripCause records WHY the breaker opened. Without it the circuit-open fail-fast
+// path defaults every trip to "network or timeout", so a user throttled by a 429 is
+// told to check the network and an operator goes looking for an outage that isn't
+// there — the same mislabelling fallbackCause already guards against downstream.
 type circuitBreakerEntry struct {
 	State         circuitBreakerState
 	OpenedAt      time.Time
 	CooldownUntil time.Time
 	FailureCount  int
+	TripCause     fallbackCause
+	// TripDetail is which limit a quota trip exhausted, so every fail-fast during
+	// the cooldown reports the same reason as the 429 that opened the circuit.
+	// Most failures in a throttling incident are these, not fresh 429s.
+	TripDetail common.RateLimitDetail
+}
+
+// circuitStatus is the breaker's answer about one provider+model: whether to skip
+// it, and everything needed to explain why.
+type circuitStatus struct {
+	Open   bool
+	Cause  fallbackCause
+	Detail common.RateLimitDetail
 }
 
 var (
@@ -72,31 +89,52 @@ func getCircuitBreakerCooldownSeconds() int {
 // reserve a single probe (half-open); concurrent callers re-read the extended cooldown
 // and keep failing fast, so a recovering endpoint isn't stampeded.
 func IsModelCircuitOpen(provider, model string) bool {
+	return modelCircuitStatus(provider, model).Open
+}
+
+// logAttrs renders the reason the breaker is open as slog key/value pairs, with
+// the rate-limit detail included only when the provider actually gave one.
+func (s circuitStatus) logAttrs() []any {
+	attrs := []any{"cause", s.Cause.reason()}
+	if s.Detail.Known() {
+		attrs = append(attrs, "rate_limit_scope", string(s.Detail.Scope), "rate_limit_window", string(s.Detail.Window))
+	}
+	return attrs
+}
+
+// modelCircuitStatus is IsModelCircuitOpen plus the reason the breaker opened,
+// read under the same lock acquisition so the caller can't race the reason
+// against the open/closed decision. Callers needing only the boolean use
+// IsModelCircuitOpen.
+func modelCircuitStatus(provider, model string) circuitStatus {
 	key := getCircuitBreakerKey(provider, model)
+	closed := circuitStatus{Cause: fallbackCauseUnavailable, Detail: common.UnknownRateLimitDetail()}
 
 	circuitBreakerMutex.RLock()
 	entry, ok := circuitBreakerMap[key]
 	if !ok || entry.State == circuitBreakerStateClosed {
 		circuitBreakerMutex.RUnlock()
-		return false
+		return closed
 	}
 	stillCoolingDown := time.Now().Before(entry.CooldownUntil)
+	open := circuitStatus{Open: true, Cause: entry.TripCause, Detail: entry.TripDetail}
 	circuitBreakerMutex.RUnlock()
 	if stillCoolingDown {
-		return true
+		return open
 	}
 
 	circuitBreakerMutex.Lock()
 	defer circuitBreakerMutex.Unlock()
 	entry, ok = circuitBreakerMap[key]
 	if !ok || entry.State == circuitBreakerStateClosed {
-		return false
+		return closed
 	}
 	if time.Now().After(entry.CooldownUntil) {
 		entry.CooldownUntil = time.Now().Add(circuitBreakerProbeExtension) // reserve the probe
-		return false
+		return circuitStatus{Cause: entry.TripCause, Detail: entry.TripDetail}
 	}
-	return true // another caller already took the probe
+	// Another caller already took the probe.
+	return circuitStatus{Open: true, Cause: entry.TripCause, Detail: entry.TripDetail}
 }
 
 // RecordModelFailure opens the circuit for a provider+model after a trip-worthy
@@ -104,6 +142,10 @@ func IsModelCircuitOpen(provider, model string) bool {
 // base doubled per consecutive failure, capped at max. The whole read-modify-write is
 // done under the write lock so concurrent failures can't lose an increment.
 func RecordModelFailure(provider, model string) {
+	recordModelFailure(provider, model, fallbackCauseUnavailable, common.UnknownRateLimitDetail())
+}
+
+func recordModelFailure(provider, model string, cause fallbackCause, detail common.RateLimitDetail) {
 	key := getCircuitBreakerKey(provider, model)
 	baseCooldown := getCircuitBreakerCooldownSeconds()
 	now := time.Now()
@@ -117,6 +159,8 @@ func RecordModelFailure(provider, model string) {
 	entry.FailureCount++
 	entry.State = circuitBreakerStateOpen
 	entry.OpenedAt = now
+	entry.TripCause = cause
+	entry.TripDetail = detail
 
 	cooldownSeconds := baseCooldown
 	for i := 1; i < entry.FailureCount; i++ {
@@ -130,16 +174,23 @@ func RecordModelFailure(provider, model string) {
 	failureCount, cooldownUntil := entry.FailureCount, entry.CooldownUntil
 	circuitBreakerMutex.Unlock()
 
-	slog.Warn("Circuit breaker opened for model",
-		"provider", provider, "model", model,
+	logAttrs := []any{
+		"provider", provider, "model", model, "cause", cause.reason(),
 		"failureCount", failureCount, "cooldownSeconds", cooldownSeconds,
-		"cooldownUntil", cooldownUntil.Format(time.RFC3339))
+		"cooldownUntil", cooldownUntil.Format(time.RFC3339),
+	}
+	if detail.Known() {
+		logAttrs = append(logAttrs, "rate_limit_scope", string(detail.Scope), "rate_limit_window", string(detail.Window))
+	}
+	slog.Warn("Circuit breaker opened for model", logAttrs...)
 	common.MetricsLLMCircuitBreakerTripped(provider, model)
 }
 
 // RecordModelRateLimitHit is the 429 entry point — a rate limit is one trip cause.
-func RecordModelRateLimitHit(provider, model string) {
-	RecordModelFailure(provider, model)
+// cause is the provider error that returned the 429; the limit it names is kept on
+// the breaker so fail-fast responses during the cooldown can repeat the reason.
+func RecordModelRateLimitHit(provider, model string, err error) {
+	recordModelFailure(provider, model, fallbackCauseQuota, common.RateLimitDetailFromError(err))
 }
 
 // RecordModelSuccess closes the circuit after a successful request (absent = closed).

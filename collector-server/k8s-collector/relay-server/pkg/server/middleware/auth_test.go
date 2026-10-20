@@ -17,10 +17,10 @@ import (
 // left unimplemented (they would panic if called, which they are not).
 type fakeAgentStore struct {
 	db.AgentStore
-	validate func(ctx context.Context, accessKey, secret string) (bool, string, string, error)
+	validate func(ctx context.Context, accessKey, secret string) (bool, string, string, string, error)
 }
 
-func (f *fakeAgentStore) ValidateAgent(ctx context.Context, accessKey, secret string) (bool, string, string, error) {
+func (f *fakeAgentStore) ValidateAgent(ctx context.Context, accessKey, secret string) (bool, string, string, string, error) {
 	return f.validate(ctx, accessKey, secret)
 }
 
@@ -34,11 +34,11 @@ func TestAgentAuthMiddleware(t *testing.T) {
 
 	// Store accepts only "goodkey:goodsecret".
 	store := &fakeAgentStore{
-		validate: func(_ context.Context, accessKey, secret string) (bool, string, string, error) {
+		validate: func(_ context.Context, accessKey, secret string) (bool, string, string, string, error) {
 			if accessKey == "goodkey" && secret == "goodsecret" {
-				return true, "acct-1", "k8s", nil
+				return true, "acct-1", "k8s", "agent-1", nil
 			}
-			return false, "", "", nil
+			return false, "", "", "", nil
 		},
 	}
 
@@ -65,6 +65,12 @@ func TestAgentAuthMiddleware(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := gin.New()
 			r.GET("/register", AgentAuthMiddleware(store), func(c *gin.Context) {
+				// The register session scopes its queue and datasource
+				// ownership by agent id, so it must be on the context.
+				if c.GetString(CtxAccountID) != "acct-1" || c.GetString(CtxAgentID) != "agent-1" {
+					c.Status(http.StatusTeapot)
+					return
+				}
 				c.Status(http.StatusOK)
 			})
 

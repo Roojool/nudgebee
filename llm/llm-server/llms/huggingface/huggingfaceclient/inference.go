@@ -125,7 +125,7 @@ func (c *Client) runInference(ctx context.Context, payload *inferencePayload) (i
 			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
 
-		return nil, &StatusCodeError{StatusCode: r.StatusCode, Body: string(b)}
+		return nil, common.WithRateLimitHeaders(&StatusCodeError{StatusCode: r.StatusCode, Body: string(b)}, r.StatusCode, r.Header)
 	}
 
 	// debug print the http response with httputil:
@@ -217,7 +217,7 @@ func (c *Client) runInferenceOpenAI(ctx context.Context, payload *inferencePaylo
 	}()
 	if r.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(r.Body)
-		return nil, &StatusCodeError{StatusCode: r.StatusCode, Body: string(b)}
+		return nil, common.WithRateLimitHeaders(&StatusCodeError{StatusCode: r.StatusCode, Body: string(b)}, r.StatusCode, r.Header)
 	}
 	var resp openAIChatResponse
 	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {

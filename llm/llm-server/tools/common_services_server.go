@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"nudgebee/llm/common"
 	"nudgebee/llm/config"
+	"nudgebee/llm/relay"
 	"nudgebee/llm/security"
 	"nudgebee/llm/services_server"
 	"nudgebee/llm/tools/core"
@@ -201,6 +202,14 @@ func executeFetchLogs(ctx core.NbToolContext, logProvider services_server.Observ
 	return logs, nil
 }
 
+// ExecuteNativeLogQuery sends an already-authored provider query to
+// services-server without translating it through the canonical where-clause
+// path. The caller resolves the account's provider; services-server validates
+// the provider-native syntax during execution.
+func ExecuteNativeLogQuery(ctx core.NbToolContext, logProvider services_server.ObservabilityProvider, query string, configs map[string]any) (core.ObservabilityLogResponse, error) {
+	return executeFetchLogs(ctx, logProvider, query, configs)
+}
+
 // executeFetchLogsCanonical sends a provider-independent canonical `where` clause
 // to services-server with an EMPTY Query, so FetchLogs resolves canonical→provider
 // labels and builds the native query server-side (the same path the UI query
@@ -211,7 +220,7 @@ func executeFetchLogs(ctx core.NbToolContext, logProvider services_server.Observ
 // LogProvider/LogProviderSource ARE forwarded from the caller's already-resolved
 // logProvider (mirroring the legacy path) — services-server falls back to its own
 // account-default lookup when they're empty, so this is a no-op for the common
-// case FetchLogsAgentV2 relies on (a well-formed account with exactly one default
+// case FetchLogsAgent relies on (a well-formed account with exactly one default
 // log provider: services-server would resolve the same provider either way). It
 // stops being a no-op for a per-request provider override (e.g.
 // ai_generate_log_query honoring the user's "Log Provider:" dropdown selection on
@@ -662,29 +671,20 @@ func cloudProviderToObservabilityFallback(cloudProvider string) string {
 // connected-agent probe in tools/core/tool_config.go. Fails closed (treats a DB
 // error as "agent present") so a transient error never silently enables the
 // hijack this guard exists to prevent.
-type queryGetter interface {
-	Get(dest any, query string, args ...any) error
-}
-
+//
+// Delegates to relay.AgentConnected for the lookup rather than running its own
+// query: that is the same lookup gating relay calls, so two copies could drift
+// into answering differently about the same account. It also adds the per-account
+// cache this had none of — every call used to hit the metastore.
 func hasConnectedK8sAgent(accountId string) bool {
+	// This caller's own precondition, not the relay gate's: an account id that
+	// is not a uuid cannot name a cloud account, and for the hijack guard the
+	// safe answer is "no k8s agent". relay.AgentConnected deliberately lets a
+	// malformed id fall through and fail open, which is the wrong default here.
 	if _, err := uuid.Parse(accountId); err != nil {
 		return false
 	}
-	dbms, err := common.GetDatabaseManager(common.Metastore)
-	if err != nil {
-		slog.Warn("observability: could not check k8s agent presence; assuming present", "error", err, "accountId", accountId)
-		return true
-	}
-	return hasConnectedK8sAgentInDb(dbms.Db, accountId)
-}
-
-func hasConnectedK8sAgentInDb(db queryGetter, accountId string) bool {
-	var connectedCount int
-	if err := db.Get(&connectedCount, "select count(*) from agent where status = 'CONNECTED' and lower(type) = 'k8s' and cloud_account_id = $1", accountId); err != nil {
-		slog.Warn("observability: k8s agent presence query failed; assuming present", "error", err, "accountId", accountId)
-		return true
-	}
-	return connectedCount > 0
+	return relay.AgentConnected(accountId)
 }
 
 // logProviderCacheNS caches the resolved observability log provider per account.

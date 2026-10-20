@@ -5,11 +5,17 @@ import logging
 from datetime import datetime
 
 from flask import request
+from kombu.exceptions import OperationalError
 from werkzeug.exceptions import HTTPException
 
 from config import Configs
 from db import clickhouse
-from exception.collector_exceptions import BadRequestError, InternalServerError, UnauthorizedError
+from exception.collector_exceptions import (
+    BadRequestError,
+    InternalServerError,
+    ServiceUnavailableError,
+    UnauthorizedError,
+)
 from controllers.base import BaseController, CredCache
 from middleware.utils import validate_key
 
@@ -78,7 +84,13 @@ class AuditLogger(BaseController):
             # Logging every one at ERROR with a full traceback made agent auth
             # failures 99.8% of this service's ERROR volume (404k lines / 7d)
             # while saying nothing about who was calling. 5xx keeps the traceback.
-            if e.code and e.code < 500:
+            #
+            # 503 is grouped with them: it only comes from ErrorCatcher when a
+            # dependency is unreachable, which is already logged there with the
+            # underlying error. A traceback of our own middleware frames adds
+            # nothing, and this fires once per in-flight request for as long as
+            # the dependency is down.
+            if e.code and (e.code < 500 or e.code == 503):
                 logging.warning(
                     "%s %s from %s -> %s",
                     request.method,
@@ -242,6 +254,14 @@ class ErrorCatcher(BaseController):
         except HTTPException as exc:
             print(exc)
             raise exc
+        except OperationalError as e:
+            # Every ingestion endpoint publishes to RabbitMQ inline, so a broker
+            # that is down or mid-reschedule surfaces here. Answering 500
+            # "Something went wrong" pointed the on-call at this service and
+            # told the agent nothing; 503 says "not me, come back". The agent
+            # retries this with backoff -- a 500 it just drops.
+            logging.warning("message broker unavailable: %s", e)
+            raise ServiceUnavailableError("Message broker unavailable, retry later")
         except Exception as e:
             logging.exception(e)
             raise InternalServerError("Something went wrong")

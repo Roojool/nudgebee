@@ -314,7 +314,7 @@ export interface CheckTriggerMatchRequest {
 
 export interface CheckTriggerMatchResponse {
   matched: boolean;
-  /** Which stage decided it: 'event_type' | 'lifecycle_phase' | 'filter'. */
+  /** Which stage decided it: 'account' | 'event_type' | 'lifecycle_phase' | 'filter'. */
   gate?: string;
   reason?: string;
   /** Set when the filter could not be evaluated at all — distinct from a filter that returned false. */

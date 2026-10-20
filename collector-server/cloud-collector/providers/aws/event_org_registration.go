@@ -380,8 +380,10 @@ func handleOrgAccountCreate(
 	if existingAccountId != "" {
 		// Update existing account with CUR data and org role
 		logger.Info("aws: updating existing account with org membership", "accountNumber", accountNumber, "existingId", existingAccountId)
+		// Merged, not replaced — see the same note on the single-account path: a
+		// wholesale write would drop a configured region allowlist.
 		_, err = dbms.Exec(
-			`UPDATE cloud_accounts SET data = $1, assume_role = $2, updated_at = NOW() WHERE id = $3`,
+			`UPDATE cloud_accounts SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, assume_role = $2, updated_at = NOW() WHERE id = $3`,
 			string(curDataJSON), props.RoleArn, existingAccountId,
 		)
 		if err != nil {
@@ -441,6 +443,7 @@ func handleOrgAccountCreate(
 
 	// Step 4: Upsert cloud_account_attrs for aws_org_type = member
 	upsertOrgTypeAttr(dbms, newAccountId, "member", logger)
+	attachTenantDefaultLLMProvider(dbms, tenant.TenantID, newAccountId, logger)
 
 	// Step 5: Trigger initial data load (async, same as CreateAccount flow)
 	triggerStoreUsageReport(newAccountId, tenant.TenantID, true, logger)
@@ -560,6 +563,38 @@ func upsertOrgTypeAttr(dbms *common.DatabaseManager, accountId string, orgType s
 	)
 	if err != nil {
 		logger.Error("aws: failed to upsert aws_org_type attr", "error", err, "accountId", accountId)
+	}
+}
+
+// attachTenantDefaultLLMProvider links the tenant's default LLM provider
+// (the LLM integration whose default_llm_provider config value is 'true') to a
+// newly registered account and flags it as
+// that account's default. No-op when the tenant has no single enabled default.
+// Copy of llm.AttachTenantDefaultLLMProviderSQL in api-server
+// (api-server/services/llm/tenant_default.go) — keep the two in sync.
+func attachTenantDefaultLLMProvider(dbms *common.DatabaseManager, tenantId string, accountId string, logger *slog.Logger) {
+	_, err := dbms.Exec(
+		`INSERT INTO integrations_cloud_accounts (
+			integration_id, cloud_account_id, tenant_id, link_role, default_llm_provider
+		)
+		SELECT i.id, $2, $1, 'own', true
+		FROM integrations i
+		JOIN integration_config_values icv
+		  ON icv.integration_id = i.id AND icv.name = 'default_llm_provider' AND icv.value = 'true'
+		WHERE i.tenant_id = $1
+		  AND i.type = 'llm'
+		  AND i.status = 'enabled'
+		  AND (
+			SELECT count(*) FROM integrations d
+			JOIN integration_config_values dv
+			  ON dv.integration_id = d.id AND dv.name = 'default_llm_provider' AND dv.value = 'true'
+			WHERE d.tenant_id = $1 AND d.type = 'llm' AND d.status = 'enabled'
+		  ) = 1
+		ON CONFLICT (integration_id, cloud_account_id, tenant_id, link_role) DO NOTHING`,
+		tenantId, accountId,
+	)
+	if err != nil {
+		logger.Error("aws: failed to attach the default LLM provider", "error", err, "accountId", accountId)
 	}
 }
 
@@ -756,9 +791,13 @@ func handleSingleAccountCreate(
 
 	if existingAccountId != "" {
 		logger.Info("aws: updating existing account via single-account auto-registration", "accountNumber", accountNumber, "existingId", existingAccountId)
+		// Merge rather than replace: the CUR keys are all this callback knows about,
+		// and a wholesale write would drop the region allowlist an operator set on
+		// the account, silently returning it to the all-regions discovery a
+		// region-scoped IAM role forbids.
 		_, err = dbms.Exec(
 			`UPDATE cloud_accounts SET
-				data = $1, assume_role = $2, status = 'active',
+				data = COALESCE(data, '{}'::jsonb) || $1::jsonb, assume_role = $2, status = 'active',
 				external_id = $4,
 				account_name = CASE
 					WHEN NOT EXISTS (
@@ -818,6 +857,8 @@ func handleSingleAccountCreate(
 	}
 
 	logger.Info("aws: created single-account via auto-registration", "accountId", newAccountId, "accountNumber", accountNumber, "externalId", props.ExternalId)
+
+	attachTenantDefaultLLMProvider(dbms, tenant.TenantID, newAccountId, logger)
 
 	// Trigger initial data load
 	triggerStoreUsageReport(newAccountId, tenant.TenantID, true, logger)
@@ -899,9 +940,12 @@ func handleSingleAccountUpdate(
 	}
 
 	// Update only role ARN, CUR data, and status. Preserve existing account_access.
+	// The data write merges so a configured region allowlist survives a stack
+	// update — replacing it would quietly revert the account to all-regions
+	// discovery, which a region-scoped IAM role denies.
 	_, err = dbms.Exec(
 		`UPDATE cloud_accounts SET
-			data = $1, assume_role = $2, status = 'active', updated_at = NOW()
+			data = COALESCE(data, '{}'::jsonb) || $1::jsonb, assume_role = $2, status = 'active', updated_at = NOW()
 		WHERE id = $3`,
 		string(curDataJSON), props.RoleArn, existingAccountId,
 	)

@@ -28,12 +28,13 @@ func ResolveManualKnowledge(ctx *security.RequestContext, accountID string, docs
 		ID       string `db:"id"`
 		Name     string `db:"name"`
 		Data     string `db:"data"`
+		Format   string `db:"data_format"`
 		Category string `db:"note_category"`
 	}
 	var rows []manual
 	db, err := knowledgeDatabase(common.Metastore)
 	if err == nil {
-		err = db.Db.SelectContext(ctx.GetContext(), &rows, `SELECT id, name, LEFT(data, 4097) AS data, COALESCE(note_category, '') AS note_category FROM llm_knowledgebases WHERE account_id = $1 AND id::text = ANY($2::text[]) AND status = 'active' AND enabled AND COALESCE(kb_type, 'manual') = 'manual'`, accountID, pq.Array(ids))
+		err = db.Db.SelectContext(ctx.GetContext(), &rows, `SELECT id, name, CASE WHEN data_format = 'pdf' THEN '' ELSE LEFT(data, 4097) END AS data, COALESCE(data_format, '') AS data_format, COALESCE(note_category, '') AS note_category FROM llm_knowledgebases WHERE account_id = $1 AND id::text = ANY($2::text[]) AND status = 'active' AND enabled AND COALESCE(kb_type, 'manual') = 'manual'`, accountID, pq.Array(ids))
 	}
 	if err != nil {
 		ctx.GetLogger().Warn("knowledge: unable to resolve manual identities", "error", err)
@@ -49,7 +50,33 @@ func ResolveManualKnowledge(ctx *security.RequestContext, accountID string, docs
 		if strings.HasPrefix(collection, "kb_") {
 			id := strings.TrimPrefix(collection, "kb_")
 			row, ok := byID[id]
-			if !ok || seen[id] {
+			if !ok {
+				continue
+			}
+			if row.Format == string(KBFormatPDF) {
+				// A PDF's data column is base64 of the document, not a body. Its
+				// hits are page and figure chunks, so each one is kept as the
+				// indexed document it is and read back through its exact handle.
+				// kb_id is deliberately not set: that would route the hit into
+				// the manual path, which serves the data column. The PDF marker
+				// carries the identity instead, so the note type still decides
+				// whether the chunk is presented as a procedure.
+				if strings.TrimSpace(doc.Document) == "" {
+					doc.Document = PDFKnowledgePointer
+				}
+				metadata := make(map[string]any, len(doc.Metadata)+5)
+				for k, v := range doc.Metadata {
+					metadata[k] = v
+				}
+				delete(metadata, "kb_id")
+				metadata[pdfKnowledgeIDKey] = id
+				metadata["kb_name"], metadata["title"] = row.Name, row.Name
+				metadata["source"], metadata["note_category"] = "manual", row.Category
+				doc.Metadata = metadata
+				out = append(out, doc)
+				continue
+			}
+			if seen[id] {
 				continue
 			}
 			seen[id] = true

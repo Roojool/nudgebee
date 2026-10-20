@@ -5,6 +5,7 @@ import { FormField } from '@shared/NewReusabeFormComponents';
 import CustomTooltip from '@shared/CustomTooltip';
 import TemplateTextField from './TemplateTextField';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
+import { ds } from '@utils/colors';
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
@@ -271,7 +272,7 @@ const ResolutionHint: React.FC<ResolutionHintProps> = ({ value, options, workflo
             display: 'inline-block',
             mt: 0.75,
             fontSize: 'var(--ds-text-caption)',
-            fontFamily: 'monospace',
+            fontFamily: ds.font.mono,
             color: 'var(--ds-brand-400)',
             cursor: 'default',
           }}
@@ -299,7 +300,7 @@ const ResolutionHint: React.FC<ResolutionHintProps> = ({ value, options, workflo
           display: 'inline-block',
           mt: 0.75,
           fontSize: 'var(--ds-text-caption)',
-          fontFamily: resolved ? 'monospace' : 'inherit',
+          fontFamily: resolved ? ds.font.mono : 'inherit',
           color: 'var(--ds-gray-400)',
           cursor: 'default',
         }}

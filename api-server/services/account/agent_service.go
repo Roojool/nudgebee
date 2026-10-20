@@ -180,6 +180,18 @@ func InvalidateAgentCache(accountId string) error {
 	return common.CacheDelete(agentCacheNamespace, accountId)
 }
 
+// ErrAgentNotConnected matches (via errors.Is) the GetAgentConnectionDetails
+// failures that mean the account simply has no live agent — an expected state,
+// unlike a missing accountId or a database error.
+var ErrAgentNotConnected = errors.New("agent not connected")
+
+// agentNotConnectedError keeps each message byte-identical to what it was, since
+// callers elsewhere still match on the "agent not connected" substring.
+type agentNotConnectedError struct{ msg string }
+
+func (e agentNotConnectedError) Error() string        { return e.msg }
+func (e agentNotConnectedError) Is(target error) bool { return target == ErrAgentNotConnected }
+
 func GetAgentConnectionDetails(accountId string) (AgentDetails, error) {
 	if accountId == "" {
 		return AgentDetails{}, fmt.Errorf("accountId is required")
@@ -204,13 +216,13 @@ func GetAgentConnectionDetails(accountId string) (AgentDetails, error) {
 			k8s_version, connection_status, k8s_provider, access_secret_v2
 		FROM agent WHERE cloud_account_id = $1 AND type != 'proxy'`, accountId); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return AgentDetails{}, fmt.Errorf("no agent connected for account %s", accountId)
+			return AgentDetails{}, agentNotConnectedError{msg: fmt.Sprintf("no agent connected for account %s", accountId)}
 		}
 		return AgentDetails{}, err
 	}
 
 	if agent.ConnectionStatus == nil {
-		return AgentDetails{}, fmt.Errorf("agent not connected")
+		return AgentDetails{}, agentNotConnectedError{msg: "agent not connected"}
 	}
 
 	var cloudProvider string

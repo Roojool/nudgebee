@@ -82,7 +82,7 @@ test("API testing Cloud Account -> Azure -> Services -> Cost Trend tab", { tag: 
   );
 });
 
-test("API testing Cloud Account -> Azure -> Services -> Resources -> Details tab", { tag: ["@dev", "@test", "@oss", "@smoke", "@functional", "@quarantine"] }, async ({
+test("Cloud Account Azure Services - open Services, expand the first service, expand a resource row, verify the Details panel opens", { tag: ["@dev", "@test", "@oss", "@smoke", "@functional"] }, async ({
   page,
 }) => {
   test.setTimeout(120000);
@@ -96,7 +96,8 @@ test("API testing Cloud Account -> Azure -> Services -> Resources -> Details tab
 
   // ListCloudResources has known GQL errors (acceptable backend issue), plain assertions used
   await locators.getResourceRowExpandButton().click();
-  await expect(page.getByRole("tab", { name: "Details" })).toBeVisible();
+  await expect(locators.getResourceRowCollapseButton()).toBeVisible();
+  await expect(locators.getResourceDetailsPanel()).toBeVisible();
   await page.waitForLoadState("networkidle");
 });
 

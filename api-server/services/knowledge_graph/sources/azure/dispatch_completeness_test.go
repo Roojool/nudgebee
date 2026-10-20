@@ -1,8 +1,9 @@
 package azure
 
-// Azure dispatch-completeness (Tier A): every entry in the Azure resource-type
-// registry must map to the NodeType it declares. Moved here from package sources
-// because it reads the unexported azure registry maps + determineNodeType.
+// Azure dispatch-completeness (Tier A): every resource kind declared by an
+// Azure resource file must resolve to the node type it declares, through the
+// same lookup the node builder uses — probed both with the bare row type and
+// with the provider-qualified form the collectors also write.
 
 import (
 	"testing"
@@ -18,21 +19,32 @@ func TestE2E_AzureDispatchCompleteness(t *testing.T) {
 		t.Fatalf("NewAzureSource: %v", err)
 	}
 
-	// Primary registry is flat: resourceType -> NodeType (serviceName irrelevant).
-	for resourceType, want := range azureTypeToNodeType {
-		if got := s.determineNodeType(resourceType, ""); got != want {
-			t.Errorf("azure primary [%s]: want %s, got %s", resourceType, want, got)
+	checked := 0
+	for _, kind := range kinds.Kinds() {
+		key := kind.KindKey()
+		if len(key.Types) == 0 {
+			service := key.Service + "/somekind"
+			if got := s.determineNodeType(sentinelUnknownType, service); got != kind.NodeType {
+				t.Errorf("azure provider [%s]: want %s, got %s", service, kind.NodeType, got)
+			}
+			checked++
+			continue
+		}
+		for _, rowType := range key.Types {
+			for _, probe := range []string{rowType, "Microsoft.Something/" + rowType} {
+				if got := s.determineNodeType(probe, "microsoft.notaprovider"); got != kind.NodeType {
+					t.Errorf("azure [%s]: want %s, got %s", probe, kind.NodeType, got)
+				}
+				checked++
+			}
 		}
 	}
-
-	// Service-prefix fallback: serviceName-prefix -> NodeType (unknown type forces it).
-	for prefix, want := range azureServicePrefixToNodeType {
-		if got := s.determineNodeType(sentinelUnknownType, prefix); got != want {
-			t.Errorf("azure prefix fallback [%s]: want %s, got %s", prefix, want, got)
-		}
+	if checked == 0 {
+		t.Fatal("no Azure resource kinds registered")
 	}
+	t.Logf("checked %d probes across %d kinds", checked, len(kinds.Kinds()))
 
-	if got := s.determineNodeType(sentinelUnknownType, "__e2e_nonexistent_service__"); got != core.NodeTypeCloudResource {
+	if got := s.determineNodeType(sentinelUnknownType, "microsoft.notaprovider"); got != core.NodeTypeCloudResource {
 		t.Errorf("azure unknown fallthrough: want %s, got %s", core.NodeTypeCloudResource, got)
 	}
 }

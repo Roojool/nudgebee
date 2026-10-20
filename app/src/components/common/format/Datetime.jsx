@@ -10,7 +10,7 @@ const ONE_DAY = 24 * ONE_HOUR;
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const pad2 = (n) => String(n).padStart(2, '0');
 
-function parseDateValue(value) {
+export function parseDateValue(value) {
   if (value instanceof Date) return value;
   if (typeof value === 'string') {
     const timezoneRegex = /([Zz]|[+-]\d{2}:?\d{2})$/;
@@ -34,7 +34,7 @@ function formatDateShort(date, refDate, alwaysShowYear = false) {
   return !alwaysShowYear && date.getFullYear() === refDate.getFullYear() ? base : `${base}-${date.getFullYear()}`;
 }
 
-function formatTooltip(date) {
+export function formatTooltip(date) {
   const hh = pad2(date.getHours());
   const mm = pad2(date.getMinutes());
   const dd = pad2(date.getDate());
@@ -42,6 +42,30 @@ function formatTooltip(date) {
   const tzPart = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(date).find((p) => p.type === 'timeZoneName');
   const tz = tzPart ? tzPart.value : '';
   return `${hh}:${mm} ${tz}, ${dd}-${mmm}-${date.getFullYear()}`;
+}
+
+// formatTooltip for a raw server value, guarded. The component below falls back
+// to its empty value on an unparseable date; callers using the formatter on its
+// own had no such guard and would render "NaN:NaN , NaN-undefined-NaN".
+export function formatClock(value, emptyValue = '') {
+  // parseDateValue(null) is the epoch, not an invalid date — check first.
+  if (value === null || value === undefined || value === '') return emptyValue;
+  const parsed = parseDateValue(value);
+  if (!parsed || Number.isNaN(parsed.getTime())) return emptyValue;
+  return formatTooltip(parsed);
+}
+
+// The same moment, short enough to sit inline next to the relative time:
+// "17 Sep 07:32", with the year only when it isn't the current one. Viewer's own
+// timezone; the zone name and full date belong in the hover, not in a sidebar
+// row that has to wrap to fit them.
+export function formatClockCompact(value, emptyValue = '') {
+  if (value === null || value === undefined || value === '') return emptyValue;
+  const parsed = parseDateValue(value);
+  if (!parsed || Number.isNaN(parsed.getTime())) return emptyValue;
+  const day = `${pad2(parsed.getDate())} ${MONTH_ABBR[parsed.getMonth()]}`;
+  const year = parsed.getFullYear() === new Date().getFullYear() ? '' : ` ${parsed.getFullYear()}`;
+  return `${day}${year} ${pad2(parsed.getHours())}:${pad2(parsed.getMinutes())}`;
 }
 
 // Buckets per redesign:

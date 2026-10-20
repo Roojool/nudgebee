@@ -53,6 +53,13 @@ export function OverviewView({
   const current = totalsToKpi(metrics?.totals);
   const previous = totalsToKpi(prevTotals ?? undefined);
 
+  // Cache storage is scoped by account + model only (see KpiRow's Cache storage
+  // tooltip) — it can't be attributed to a source/agent/status/user, so folding
+  // its full-account figure into a filtered "Total AI cost" overstates it and
+  // stops reconciling with Runs × Avg cost/run (#37832). Models/Providers are
+  // excluded from this check because the storage query does honor those two.
+  const hasIncompatibleFilters = filters.sources.length > 0 || filters.agents.length > 0 || filters.statuses.length > 0 || !!filters.userId;
+
   const byModel = groupRowsToModelSlices(metrics?.breakdowns?.model, 7);
   const bySource = groupRowsToSlices(metrics?.breakdowns?.source);
 
@@ -60,7 +67,7 @@ export function OverviewView({
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-5)' }}>
-      <KpiRow current={current} previous={previous} storageCost={metrics?.storage?.total_usd ?? 0} />
+      <KpiRow current={current} previous={previous} storageCost={metrics?.storage?.total_usd ?? 0} hasIncompatibleFilters={hasIncompatibleFilters} />
 
       <CostOverTime
         timeSeries={metrics?.time_series ?? null}

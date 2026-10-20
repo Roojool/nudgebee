@@ -279,7 +279,7 @@ func buildNewRelicWorkloadQueries(meta RequestMetadata, metrics []string) map[st
 			queries[metricKey] = fmt.Sprintf(
 				"SELECT percentile(duration, 95) FROM Transaction WHERE %s %s",
 				whereClause, facetClause)
-		case "http_latency_p99":
+		case "http_latency_p99", "workload_http_latency_p99":
 			queries[metricKey] = fmt.Sprintf(
 				"SELECT percentile(duration, 99) FROM Transaction WHERE %s %s",
 				whereClause, facetClause)

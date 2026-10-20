@@ -29,6 +29,10 @@ class Settings(BaseSettings):
 
     RABBIT_MQ_KG_UPDATE_EXCHANGE: str = "kg_update_exchange"
     RABBIT_MQ_KG_UPDATE_QUEUE: str = "kg_update"
+    # Gates every knowledge-graph update this collector publishes: workload and
+    # node deletions, and any per-resource refs. Off unless an environment turns
+    # it on, so the graph falls back to its scheduled build.
+    KG_UPDATE_NOTIFICATIONS_ENABLED: bool = False
 
     RABBIT_MQ_EVENT_POST_PROCESS_EXCHANGE: str = "event_post_process_exchange"
     RABBIT_MQ_EVENT_POST_PROCESS_QUEUE: str = "event_post_process"
@@ -52,30 +56,31 @@ class Settings(BaseSettings):
     # again. Off = the agent's findings (crashloop, OOM, ...) have no resolve path
     # at all and stay open until their resource is deleted.
     #
-    # DEFAULT ON by product decision, with a known false-close rate. Read this
-    # before changing it back or relying on it.
+    # DEFAULT ON. It used to carry a known false-close rate; the history is kept here
+    # because it explains the shape of the checks in close_events_for_recovered_workloads
+    # and why none of them may be dropped.
     #
-    # The readiness signal is a single sample and is NOT sound. Discovery is
-    # change-driven, so a snapshot lands precisely on the moment a crashlooping pod
-    # flips Ready for the few seconds its container runs before dying, and
-    # ready_pods == total_pods is therefore observed on nearly every crash cycle.
-    # Measured on dev across the 43 events this actually closed while it was on:
-    # 39 of them (91%) were closed within ten minutes of being raised, average
-    # lifetime 173 seconds, and 17 (40%) had the same alert fire again for the same
-    # workload within two hours -- i.e. the workload was still broken when we closed
-    # its alert. That is the #36550 failure mode ("alerts close themselves while the
-    # problem is still happening") in a narrower form.
+    # Readiness alone is a single sample and is NOT sound. Discovery is change-driven,
+    # so a snapshot lands precisely on the moment a crashlooping pod flips Ready for
+    # the few seconds its container runs before dying, and ready_pods == total_pods is
+    # therefore observed on nearly every crash cycle. Measured on dev across the 43
+    # events this closed while readiness was the only check: 39 of them (91%) were
+    # closed within ten minutes of being raised, average lifetime 173 seconds, and 17
+    # (40%) had the same alert fire again for the same workload within two hours --
+    # i.e. the workload was still broken when we closed its alert. That is the #36550
+    # failure mode ("alerts close themselves while the problem is still happening") in
+    # a narrower form.
     #
-    # It is on regardless because the alternative is worse for the operator: with it
-    # off, the agent's own findings (crashloop, OOM, ...) have NO resolve path at all
-    # and stay open until their resource is deleted, so a workload that genuinely
-    # recovered keeps a red alert indefinitely. A too-eager close re-fires on the
-    # next occurrence; a missing close never corrects itself.
+    # It stayed on through that because the alternative is worse for the operator:
+    # with it off, the agent's own findings (crashloop, OOM, ...) have NO resolve path
+    # at all and stay open until their resource is deleted, so a workload that
+    # genuinely recovered keeps a red alert indefinitely. A too-eager close re-fires
+    # on the next occurrence; a missing close never corrects itself.
     #
-    # The sound version is recovery as evidence over time -- all pods ready AND no
-    # pod restart since the previous snapshot (k8s_pods.restart_count is already
-    # collected). Landing that is what makes this flag safe rather than a trade;
-    # until then, expect crashloop alerts to close and re-open on each cycle.
+    # Recovery is now evidence over time: all pods ready AND every container running
+    # for at least RECOVERY_STABLE_WINDOW (an hour after an OOM kill), read from the
+    # stored pod rows. A restart-count delta between snapshots was tried first and did
+    # not hold: the Deployment's 1/1 arrives in a request with no pods to compare.
     EVENT_CLOSE_ON_WORKLOAD_RECOVERY: bool = True
     K8S_COLLECTOR_CONSUMER_MAX_WORKERS: int = 2
     K8S_COLLECTOR_CONSUMER_HEARTBEAT: int = 120

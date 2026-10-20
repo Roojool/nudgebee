@@ -73,10 +73,13 @@ const cardKey = (cardId) => (typeof cardId === 'string' ? cardId.replace(/_\d+$/
 //
 // Only the card actions are classified here — Nubi's carry a server-assigned kind of their own.
 // Anything not listed shows no chip: an unlabelled action is honest, a wrongly labelled one is not.
+//
+// A rollback is deliberately not classified. It removes the cause only when the change caused the
+// problem, and nothing here knows that: the chip rode on every alert whose workload had changed in
+// the past week — a Slack rate-limit spike, an OOM three weeks after an env edit — and it stayed on
+// after "Recurred 5 times since — this did not stop it". The row states when the change landed and
+// what it touched instead, which is the evidence the operator actually needs.
 const ACTION_KIND_BY_CARD = {
-  // Putting the workload back on the spec that was running before the change removes the change
-  // itself, so if the change caused the problem, the cause is gone.
-  LastDeploymentCard: 'fix',
   // Raising the limit stops this class of OOM rather than papering over it — the workload genuinely
   // needed the headroom. It is a fix in the sense that matters here: the condition does not return.
   MemoryAllocationCard: 'fix',
@@ -109,7 +112,9 @@ export const describeActionKind = (cardId) => {
 // Kept deliberately non-numeric: replica counts and field counts vary per event, and a wrong number
 // here is worse than no number.
 const ACTION_EFFECT_BY_CARD = {
-  LastDeploymentCard: 'Puts the workload back on the spec it ran before the change · rolling restart · reversible',
+  // Only the changed fields are written back, not the whole spec — and whatever deploys the workload
+  // (Helm, Argo CD, an operator) may put them back again, which the dialog says when it can tell.
+  LastDeploymentCard: 'Writes back the values this change replaced · restarts the pods',
   MemoryAllocationCard: 'Changes the container resource requests and limits · rolling restart · reversible',
   AskAiCard: 'Opens a pull request against the mapped source repository · nothing changes in the cluster until it is merged and deployed',
 };
@@ -130,9 +135,13 @@ export const describeUndo = (resolution, cardId, card) => {
   if (!resolution || resolution.status !== 'Success') return null;
 
   if (cardKey(cardId) === 'LastDeploymentCard') {
+    // Undo the change the revert acted on. Without its id the server falls back to the alert's own
+    // evidence, which refuses (or, before that guard, merged) an alert carrying several changes.
+    const recorded = typeof resolution.data === 'string' ? safeJSONParse(resolution.data) : resolution.data;
+    const changeEventId = recorded?.data?.change_event_id;
     return {
-      label: 'Undo revert',
-      payload: { revert: true, undo: true, card_id: cardId },
+      label: 'Undo rollback',
+      payload: { revert: true, undo: true, card_id: cardId, ...(changeEventId && { change_event_id: changeEventId }) },
       preview: describeRevertUndoPreview(card),
     };
   }
@@ -197,7 +206,7 @@ export const describeBeforeStatePreview = (before) => {
 };
 
 /**
- * The change an "Undo revert" re-applies. The event's diff holds the deployment that preceded the
+ * The change an "Undo rollback" re-applies. The event's diff holds the deployment that preceded the
  * problem: the revert applied its `old` side, so undoing it re-applies the `new` side — which is
  * what is running now versus what undo will put back.
  * @param {{diff?: {data?: {old?: string, new?: string}}, deploymentHistory?: object}} card
@@ -226,7 +235,7 @@ export const describeRevertUndoPreview = (card) => {
 // state is attached to it: "Last Deployment Change · Done" says the deployment change is done, not
 // that it was reverted. Rows are named by the action so the state has something to attach to.
 const ACTION_TITLE_BY_CARD = {
-  LastDeploymentCard: 'Revert the last deployment change',
+  LastDeploymentCard: 'Roll back the last deployment change',
   MemoryAllocationCard: 'Adjust resource requests and limits',
   AskAiCard: 'Raise a pull request with the proposed code fix',
 };
@@ -246,6 +255,19 @@ export const describeActionTitle = (cardId, fallback, subject) => {
   // which change it acts on, say so.
   return subject ? `${title.replace(/ the last deployment change$/, '')} the change deployed ${subject}`.trim() : title;
 };
+
+// The row's name when the operator picks which change the action applies to, rather than the row
+// naming one change itself.
+const CHOICE_TITLE_BY_CARD = {
+  LastDeploymentCard: 'Roll back a deployment change',
+};
+
+/**
+ * Name an action whose target is chosen in the row. Falls back to describeActionTitle.
+ * @param {string} cardId
+ * @param {string} fallback
+ */
+export const describeChoiceTitle = (cardId, fallback) => CHOICE_TITLE_BY_CARD[cardKey(cardId)] || describeActionTitle(cardId, fallback);
 
 /**
  * Whether a card is offering a way to act on the event right now.

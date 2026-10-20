@@ -32,9 +32,8 @@ func TestNginxRoutesEveryPublicWebhook(t *testing.T) {
 	}
 	require.NotEmpty(t, paths, "no /api/webhooks routes registered")
 
-	// Only the compose nginx routes webhooks by regex here; the Helm chart lists
-	// each webhook path in the app Ingress instead.
 	for _, file := range []string{
+		"deploy/kubernetes/app/templates/nginx-config.yaml",
 		"deploy/compose/nginx.conf",
 	} {
 		t.Run(file, func(t *testing.T) {

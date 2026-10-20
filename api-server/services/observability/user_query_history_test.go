@@ -23,12 +23,12 @@ var (
 	logSourceProviders = []string{
 		"loki", "signoz", "datadog", "observe", "loggly", "azure_app_insights",
 		"aws_cloudwatch", "ES", "newrelic", "splunk_observability_platform",
-		"dynatrace", "solarwinds", "pinot", "hive",
+		"cubeapm", "splunk_enterprise", "dynatrace", "solarwinds", "pinot", "hive",
 	}
 	metricsSourceProviders = []string{
 		"datadog", "prometheus", "chronosphere", "aws_cloudwatch",
 		"azure_app_insights", "newrelic", "splunk_observability_platform", "ES",
-		"dynatrace", "solarwinds",
+		"cubeapm", "splunk_enterprise", "dynatrace", "solarwinds",
 	}
 )
 
@@ -54,7 +54,7 @@ func TestUserHistoryModulesCoverAllProviders(t *testing.T) {
 // the silent-rejection failure the mirror exists to prevent.
 func TestUserHistoryModulesMatchMigration(t *testing.T) {
 	matches, err := filepath.Glob(filepath.Join(
-		"..", "..", "migrations", "migrations", "app", "*_user_history_module_check_and_binary_purge.up.sql"))
+		"..", "..", "migrations", "migrations", "app", "*_add_forward_port_query_history_modules.up.sql"))
 	require.NoError(t, err)
 	require.Len(t, matches, 1, "expected exactly one user_history module_check migration")
 

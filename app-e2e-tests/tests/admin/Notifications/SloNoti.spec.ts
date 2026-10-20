@@ -12,7 +12,7 @@ test("Add SLO Notification Rule", { tag: ["@dev", "@test", "@oss", "@regression"
 
   const locators = await navigateToNewNotificationRule(page);
 
-  await locators.sloTab.click();
+  await locators.selectOnlyType(locators.sloTab);
 
   await selectCluster(locators, page);
 

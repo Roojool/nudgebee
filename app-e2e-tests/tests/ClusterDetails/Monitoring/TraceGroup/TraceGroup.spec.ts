@@ -49,16 +49,15 @@ test(
 );
 
 test(
-  "Trace Group sanity - open the Trace Group tab, verify the listing renders the Total Request, Error Count, Source, Span, Target, Resource, Duration, P99, P95 and Max columns",
+  "Trace Group sanity - open the Trace Group tab, verify the listing renders the Total Request, Error Count, Source, Span, Target, Resource, Avg Duration, P99, P95 and Max columns",
   { tag: ["@dev", "@test", "@sanity", "@functional"] },
   async ({ page }) => {
     test.setTimeout(240000);
 
     const tg = await openTraceGroup(page);
 
-    // Status Code is deliberately absent from this list: LISTING_HEADER drops that column
-    // for an ES trace provider, so it is the one header that legitimately varies by env.
-    for (const column of ["Total Request", "Error Count", "Source", "Span", "Target", "Resource", "Duration", "P99", "P95", "Max"]) {
+    // Status Code is left out because ES trace providers drop that column.
+    for (const column of ["Total Request", "Error Count", "Source", "Span", "Target", "Resource", "Avg Duration", "P99", "P95", "Max"]) {
       await expect(tg.columnHeader(column), `column "${column}" is missing from the trace group listing`).toBeVisible();
     }
   }
@@ -141,7 +140,7 @@ test(
 );
 
 test(
-  "Trace Group - sort the listing by Duration, verify the trace grouping request is re-issued ordered by duration_ns instead of the default error_count",
+  "Trace Group - sort the listing by Avg Duration, verify the trace grouping request is re-issued ordered by duration_ns instead of the default error_count",
   { tag: ["@dev", "@test", "@regression", "@functional"] },
   async ({ page }) => {
     test.setTimeout(240000);
@@ -150,7 +149,7 @@ test(
 
     // Armed before the click so the request cannot land before the listener attaches.
     const sorted = orderedByRequest(page, "duration_ns");
-    await tg.columnHeader("Duration").click();
+    await tg.columnHeader("Avg Duration").click();
     await sorted;
 
     await expect(tg.ResultSummary).toBeVisible({ timeout: 60000 });

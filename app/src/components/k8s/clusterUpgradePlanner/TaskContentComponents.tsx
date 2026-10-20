@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Typography, Alert } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { Skeleton } from '@ui/Skeleton';
 import { Chip as DsChip, type ChipTone } from '@ui/Chip';
 import Pdb from '@components/k8s/cluster-upgrade/cards/Pdb';
@@ -10,7 +11,7 @@ import apiKubernetes1 from '@api1/kubernetes1';
 import CustomTable2 from '@shared/tables/CustomTable2';
 import { Label } from '@ui/Label';
 import { Button as DsButton } from '@ui/Button';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
 import { hasWriteAccess } from '@lib/auth';
 import { convertToLocalTime } from '@lib/datetime';
@@ -36,7 +37,7 @@ const healthLabelToTone: Record<string, ChipTone> = {
 };
 const toHealthTone = (label: string): ChipTone => healthLabelToTone[label] || 'neutral';
 
-const statCardSx = { flex: 1, minWidth: 0, mt: 0, padding: 'var(--ds-space-3) var(--ds-space-4)' };
+const statCardSx = { flex: 1, minWidth: 0 };
 const statRowSx = {
   display: 'grid',
   gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
@@ -175,7 +176,7 @@ export const HelmContent: React.FC<{ accountId?: string; onInsightsChange?: (ins
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -212,7 +213,7 @@ export const HelmContent: React.FC<{ accountId?: string; onInsightsChange?: (ins
     {
       text: release.chart_version,
       component: (
-        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
           {release.chart_version}
         </Typography>
       ),
@@ -220,7 +221,7 @@ export const HelmContent: React.FC<{ accountId?: string; onInsightsChange?: (ins
     {
       text: release.kube_version || '-',
       component: (
-        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
           {release.kube_version || '-'}
         </Typography>
       ),
@@ -461,7 +462,7 @@ export const ClusterHealthWorkloadsContent: React.FC<{ accountId?: string }> = (
           {
             text: `${workload.available}/${workload.replicas}`,
             component: (
-              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
                 {workload.available}/{workload.replicas}
               </Typography>
             ),
@@ -494,7 +495,7 @@ export const ClusterHealthWorkloadsContent: React.FC<{ accountId?: string }> = (
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -741,7 +742,7 @@ export const ClusterHealthNodesContent: React.FC<{ accountId?: string }> = ({ ac
           {
             text: node.version,
             component: (
-              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>{node.version}</Typography>
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>{node.version}</Typography>
             ),
           },
           {
@@ -780,7 +781,7 @@ export const ClusterHealthNodesContent: React.FC<{ accountId?: string }> = ({ ac
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -885,7 +886,7 @@ export const ClusterHealthLoadBalancerContent: React.FC<{ accountId?: string }> 
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -939,7 +940,7 @@ export const ClusterHealthLoadBalancerContent: React.FC<{ accountId?: string }> 
       {
         text: `${health_counts.InService}/${lb.instances?.total_instances ?? 0}`,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {health_counts.InService}/{lb.instances?.total_instances ?? 0}
           </Typography>
         ),
@@ -987,7 +988,7 @@ export const ClusterHealthLoadBalancerContent: React.FC<{ accountId?: string }> 
           <Typography
             sx={{
               fontSize: 'var(--ds-text-small)',
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               color: 'var(--ds-gray-700)',
               fontWeight: 'var(--ds-font-weight-medium)',
             }}
@@ -1050,7 +1051,7 @@ export const ClusterHealthLoadBalancerContent: React.FC<{ accountId?: string }> 
           </Typography>
           <Typography
             variant='body2'
-            sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)', wordBreak: 'break-all' }}
+            sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)', wordBreak: 'break-all' }}
           >
             {loadBalancer.hostname}
           </Typography>
@@ -1188,7 +1189,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -1254,7 +1255,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
       {
         text: node.kubelet_version,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {node.kubelet_version}
           </Typography>
         ),
@@ -1311,7 +1312,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
       {
         text: `${ng.min_size}/${ng.desired_size}/${ng.max_size}`,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {ng.min_size}/{ng.desired_size}/{ng.max_size}
           </Typography>
         ),
@@ -1319,7 +1320,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
       {
         text: ng.kubernetes_version,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {ng.kubernetes_version}
           </Typography>
         ),
@@ -1327,7 +1328,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
       {
         text: `${readyNodes}/${totalNodes}`,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {readyNodes}/{totalNodes}
           </Typography>
         ),
@@ -1434,7 +1435,7 @@ export const ClusterHealthPvContent: React.FC<{ accountId?: string }> = ({ accou
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -1643,33 +1644,33 @@ export const PreFlightCheckContent: React.FC<PreFlightCheckContentProps> = ({ ac
         </Box>
 
         <Box sx={statRowSx}>
-          <WidgetCard sx={statCardSx}>
+          <Card size='sm' sx={statCardSx}>
             <Stat size='md' label='Nodes' value={nodesCount} sub={healthySub(`${metrics.healthyNodes}/${metrics.totalNodes} healthy`)} />
-          </WidgetCard>
-          <WidgetCard sx={statCardSx}>
+          </Card>
+          <Card size='sm' sx={statCardSx}>
             <Stat
               size='md'
               label='Workloads'
               value={workloadsCount}
               sub={healthySub(`${metrics.healthyWorkloads}/${metrics.totalWorkloads} healthy`)}
             />
-          </WidgetCard>
-          <WidgetCard sx={statCardSx}>
+          </Card>
+          <Card size='sm' sx={statCardSx}>
             <Stat size='md' label='Services' value={servicesCount} />
-          </WidgetCard>
-          <WidgetCard sx={statCardSx}>
+          </Card>
+          <Card size='sm' sx={statCardSx}>
             <Stat
               size='md'
               label='Persistent Volumes'
               value={persistentVolumesCount}
               sub={healthySub(`${metrics.boundPVs}/${metrics.totalPVs} bound`)}
             />
-          </WidgetCard>
+          </Card>
         </Box>
 
-        <Alert severity='success' sx={{ mb: ds.space[4] }}>
-          Pre-flight check snapshot captured successfully
-        </Alert>
+        <Box sx={{ mb: ds.space[4] }}>
+          <Banner tone='success' message='Pre-flight check snapshot captured successfully' />
+        </Box>
 
         {checkData.created_at && (
           <Box sx={{ mt: ds.space[4] }}>
@@ -1695,9 +1696,9 @@ export const PreFlightCheckContent: React.FC<PreFlightCheckContentProps> = ({ ac
       </Box>
 
       {error && (
-        <Alert severity='error' sx={{ mb: ds.space[4] }}>
-          {error}
-        </Alert>
+        <Box sx={{ mb: ds.space[4] }}>
+          <Banner tone='critical' message={error} />
+        </Box>
       )}
 
       {loading && (
@@ -1995,18 +1996,18 @@ export const PostFlightCheckContent: React.FC<PostFlightCheckProps> = ({ account
             </Typography>
 
             <Box sx={statRowSx}>
-              <WidgetCard sx={statCardSx}>
+              <Card size='sm' sx={statCardSx}>
                 <Stat size='md' label='Nodes' value={pre.nodes_count} />
-              </WidgetCard>
-              <WidgetCard sx={statCardSx}>
+              </Card>
+              <Card size='sm' sx={statCardSx}>
                 <Stat size='md' label='Workloads' value={pre.workloads_count} />
-              </WidgetCard>
-              <WidgetCard sx={statCardSx}>
+              </Card>
+              <Card size='sm' sx={statCardSx}>
                 <Stat size='md' label='Services' value={pre.services_count} />
-              </WidgetCard>
-              <WidgetCard sx={statCardSx}>
+              </Card>
+              <Card size='sm' sx={statCardSx}>
                 <Stat size='md' label='Persistent Volumes' value={pre.persistent_volumes_count} />
-              </WidgetCard>
+              </Card>
             </Box>
           </Box>
         )}
@@ -2029,38 +2030,38 @@ export const PostFlightCheckContent: React.FC<PostFlightCheckProps> = ({ account
             </DsChip>
           </Box>
 
-          <Alert severity='success' sx={{ mb: ds.space[4] }}>
-            Post-flight check snapshot captured successfully
-          </Alert>
+          <Box sx={{ mb: ds.space[4] }}>
+            <Banner tone='success' message='Post-flight check snapshot captured successfully' />
+          </Box>
 
           <Box sx={statRowSx}>
-            <WidgetCard sx={statCardSx}>
+            <Card size='sm' sx={statCardSx}>
               <Stat
                 size='md'
                 label='Nodes'
                 value={recommendation.nodes?.length || 0}
                 sub={healthySub(`${metrics.healthyNodes}/${metrics.totalNodes} healthy`)}
               />
-            </WidgetCard>
-            <WidgetCard sx={statCardSx}>
+            </Card>
+            <Card size='sm' sx={statCardSx}>
               <Stat
                 size='md'
                 label='Workloads'
                 value={recommendation.workloads?.length || 0}
                 sub={healthySub(`${metrics.healthyWorkloads}/${metrics.totalWorkloads} healthy`)}
               />
-            </WidgetCard>
-            <WidgetCard sx={statCardSx}>
+            </Card>
+            <Card size='sm' sx={statCardSx}>
               <Stat size='md' label='Services' value={recommendation.services?.length || 0} />
-            </WidgetCard>
-            <WidgetCard sx={statCardSx}>
+            </Card>
+            <Card size='sm' sx={statCardSx}>
               <Stat
                 size='md'
                 label='Persistent Volumes'
                 value={recommendation.persistentVolumes?.length || 0}
                 sub={healthySub(`${metrics.boundPVs}/${metrics.totalPVs} bound`)}
               />
-            </WidgetCard>
+            </Card>
           </Box>
           {check.created_at && (
             <Typography
@@ -2093,9 +2094,9 @@ export const PostFlightCheckContent: React.FC<PostFlightCheckProps> = ({ account
       </Box>
 
       {error && (
-        <Alert severity='error' sx={{ mb: ds.space[4] }}>
-          {error}
-        </Alert>
+        <Box sx={{ mb: ds.space[4] }}>
+          <Banner tone='critical' message={error} />
+        </Box>
       )}
 
       {loading && (

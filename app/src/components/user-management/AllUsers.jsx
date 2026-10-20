@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import PropTypes from 'prop-types';
 import { Box } from '@mui/material';
-import { writeIcon } from '@assets';
+import { EditIcon } from '@assets';
 import { TourLauncher } from '@components/common/tour';
 import apiUserManagement from '@api1/user';
 import { useSession } from 'next-auth/react';
 import { canManage, isTenantWideRole, hasPermission, canReadCustomRoles } from '@lib/auth';
+import useAdminAction from './useAdminAction';
 import { listCustomRoles } from '@api1/roles';
 import UserModal from './modal/UserModal';
 import { Label } from '@ui/Label';
@@ -172,6 +173,13 @@ const AllUsers = () => {
     }
   };
 
+  // Admin Overview "Invite new users" quick-link lands here with
+  // ?action=invite-user and opens the Add User modal (permission-gated, same as
+  // the toolbar button).
+  useAdminAction('invite-user', () => {
+    if (canManage('users', 'Write')) setAddUserModalVisible(true);
+  });
+
   const onPageChange = (page, limit) => {
     setCurrentPage(page - 1);
     setPerPage(limit);
@@ -315,7 +323,7 @@ const AllUsers = () => {
                   tone='ghost'
                   composition='icon-only'
                   size='sm'
-                  icon={<SafeIcon src={writeIcon} alt='edit' width={16} height={16} />}
+                  icon={<SafeIcon src={EditIcon} alt='edit' width={16} height={16} />}
                   aria-label='Edit user'
                   id='edit-user-button'
                   onClick={(e) => {

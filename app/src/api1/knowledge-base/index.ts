@@ -727,6 +727,7 @@ const apiKnowledgeBase = {
               note_category
             }
             next_offset
+            indexed
           }
           errors {
             message
@@ -746,7 +747,10 @@ const apiKnowledgeBase = {
         return { data: null, errors: result.errors };
       }
       if (result?.data) {
-        return { data: { items: result.data.items || [], nextOffset: result.data.next_offset || null }, errors: [] };
+        return {
+          data: { items: result.data.items || [], nextOffset: result.data.next_offset || null, indexed: result.data.indexed ?? null },
+          errors: [],
+        };
       }
       return { data: null, errors: [{ message: extractErrorMessage(response, 'Failed to fetch documents') }] };
     } catch (error) {
@@ -766,9 +770,9 @@ const apiKnowledgeBase = {
             id
             title
             url
-            document_key
-            note_category
             content
+            content_source
+            content_type
           }
           errors {
             message

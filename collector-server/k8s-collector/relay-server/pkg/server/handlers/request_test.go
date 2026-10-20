@@ -33,6 +33,11 @@ type fakeStore struct {
 	prometheuClusterLabel string
 	err                   error
 	touched               atomic.Int64
+	metadataNotFound      []string
+	metadataChanged       bool
+	datasourceOwners      map[string]string // datasource key → owning agent id
+	ownerErr              error
+	upsertAgentID         string
 }
 
 func (f *fakeStore) IsWSEnabled(ctx context.Context, acct, agentType string) (bool, string, error) {
@@ -46,8 +51,8 @@ func (f *fakeStore) IsAgentConnected(ctx context.Context, acct, agentType string
 func (f *fakeStore) ValidateAgent(
 	ctx context.Context,
 	accessKey, secret string,
-) (bool, string, string, error) {
-	return f.allowed, f.fallback, "k8s", f.err
+) (bool, string, string, string, error) {
+	return f.allowed, f.fallback, "k8s", "", f.err
 }
 
 func (f *fakeStore) GetAgentStatus(ctx context.Context, accountID, agentType string) (connected bool, wsEnabled bool, fallbackURL string, prometheusClusterLabel string, err error) {
@@ -71,16 +76,21 @@ func (f *fakeStore) UpdateDatasourceHealth(ctx context.Context, accountID, agent
 	return f.err
 }
 
-func (f *fakeStore) UpsertAgentDatasources(ctx context.Context, accountID, agentType string, datasources []db.AgentDatasource) error {
+func (f *fakeStore) UpsertAgentDatasources(ctx context.Context, accountID, agentType, agentID string, datasources []db.AgentDatasource) error {
+	f.upsertAgentID = agentID
 	return f.err
+}
+
+func (f *fakeStore) GetDatasourceAgentID(ctx context.Context, accountID, datasourceKey string) (string, error) {
+	return f.datasourceOwners[datasourceKey], f.ownerErr
 }
 
 func (f *fakeStore) GetWorkspaceToolConfig(ctx context.Context, accountID, integrationType, configName string) ([]db.WorkspaceConfigValue, error) {
 	return nil, f.err
 }
 
-func (f *fakeStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) error {
-	return f.err
+func (f *fakeStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) ([]string, bool, error) {
+	return f.metadataNotFound, f.metadataChanged, f.err
 }
 
 func (f *fakeStore) QueryProxyDatasources(ctx context.Context, accountID string) ([]db.ProxyDatasource, error) {
@@ -147,7 +157,7 @@ func setupRouter(store db.AgentStore, rpcClient fakeRPCClient) *gin.Engine {
 	if err := metrics.Init(meter); err != nil {
 		logger.Error("metrics init failed", "error", err)
 	}
-	r.POST("/request", NewRequestHandler(store, rpcClient, fakeTopo, cfg, nil, &tracer, &meter, logger))
+	r.POST("/request", NewRequestHandler(store, rpcClient, fakeTopo, nil, cfg, nil, &tracer, &meter, logger))
 	return r
 }
 

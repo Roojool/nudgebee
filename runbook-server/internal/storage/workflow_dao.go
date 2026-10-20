@@ -215,13 +215,11 @@ func (s *WorkflowDao) List(ctx context.Context, tenantID string, accountIDs []st
 			if key == "" {
 				continue
 			}
-			// Sanitize the key to prevent SQL injection
-			quotedKey := pq.QuoteIdentifier(key)
-			// Use ->> to extract value as text for comparison, matching the string input from query params
-			whereClause += fmt.Sprintf(" AND tags->>%s = $%d", quotedKey, argId)
-			whereClauseWithAlias += fmt.Sprintf(" AND w.tags->>%s = $%d", quotedKey, argId)
-			baseArgs = append(baseArgs, value)
-			argId++
+			// Bind the key as a text parameter: a quoted identifier (`tags->>"team"`) is read as a column.
+			whereClause += fmt.Sprintf(" AND tags->>$%d = $%d", argId, argId+1)
+			whereClauseWithAlias += fmt.Sprintf(" AND w.tags->>$%d = $%d", argId, argId+1)
+			baseArgs = append(baseArgs, key, value)
+			argId += 2
 		}
 	}
 
@@ -820,13 +818,18 @@ func (s *WorkflowDao) FindByName(ctx context.Context, tenantID, accountID, name 
 }
 
 func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEventTriggerRule, error) {
+	// The tenant/account check runs on the expanded rules, behind a MATERIALIZED CTE.
+	// Inside each branch the planner joined workflows to their tenant's accounts
+	// first and re-read every definition once per account.
 	query := `
+		WITH rules AS MATERIALIZED (
 		SELECT
 			id, tenant_id, account_id,
 			COALESCE(event_type_item, '') as event_type,
 			COALESCE(trigger->'params'->>'filter', '') as filter,
 			'event' as trigger_type,
-			COALESCE(trigger->'params'->>'on', 'event.created') as lifecycle_phase
+			COALESCE(trigger->'params'->>'on', 'event.created') as lifecycle_phase,
+			listen_account
 		FROM workflows,
 			 jsonb_array_elements(
 				CASE
@@ -844,7 +847,15 @@ func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEv
 						THEN jsonb_build_array(trigger->'params'->>'event_type')
 					ELSE '[null]'::jsonb
 				END
-			 ) as event_type_item
+			 ) as event_type_item,
+			 LATERAL jsonb_array_elements_text(
+				CASE
+					WHEN jsonb_typeof(trigger->'params'->'accounts') = 'array'
+						 AND jsonb_array_length(trigger->'params'->'accounts') > 0
+						THEN trigger->'params'->'accounts'
+					ELSE jsonb_build_array(account_id::text)
+				END
+			 ) as listen_account
 		WHERE status = 'ACTIVE'
 		  AND trigger->>'type' = 'event'
 
@@ -855,16 +866,33 @@ func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEv
 			'optimization.recommendation' as event_type,
 			COALESCE((trigger->'params')::text, '') as filter,
 			'optimization' as trigger_type,
-			'event.created' as lifecycle_phase
+			'event.created' as lifecycle_phase,
+			listen_account
 		FROM workflows,
 			 jsonb_array_elements(
 				CASE
 					WHEN jsonb_typeof(definition->'triggers') = 'array' THEN definition->'triggers'
 					ELSE '[]'::jsonb
 				END
-			 ) as trigger
+			 ) as trigger,
+			 LATERAL jsonb_array_elements_text(
+				CASE
+					WHEN jsonb_typeof(trigger->'params'->'clusters') = 'array'
+						 AND jsonb_array_length(trigger->'params'->'clusters') > 0
+						THEN trigger->'params'->'clusters'
+					ELSE jsonb_build_array(account_id::text)
+				END
+			 ) as listen_account
 		WHERE status = 'ACTIVE'
 		  AND trigger->>'type' = 'optimization'
+		)
+		SELECT DISTINCT
+			id, tenant_id, account_id, event_type, filter, trigger_type, lifecycle_phase, listen_account
+		FROM rules
+		WHERE EXISTS (
+			SELECT 1 FROM cloud_accounts ca
+			WHERE ca.id::text = rules.listen_account AND ca.tenant::text = rules.tenant_id::text
+		)
 	`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
@@ -879,7 +907,7 @@ func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEv
 	var rules []model.WorkflowEventTriggerRule
 	for rows.Next() {
 		var rule model.WorkflowEventTriggerRule
-		if err := rows.Scan(&rule.WorkflowID, &rule.TenantID, &rule.AccountID, &rule.EventType, &rule.Filter, &rule.TriggerType, &rule.LifecyclePhase); err != nil {
+		if err := rows.Scan(&rule.WorkflowID, &rule.TenantID, &rule.AccountID, &rule.EventType, &rule.Filter, &rule.TriggerType, &rule.LifecyclePhase, &rule.ListenAccountID); err != nil {
 			return nil, fmt.Errorf("failed to scan event trigger rule: %w", err)
 		}
 		// For optimization triggers, build Jinja filter from structured params.

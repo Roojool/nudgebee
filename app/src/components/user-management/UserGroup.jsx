@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import apiUserManagement from '@api1/user';
 import CustomTable from '@shared/tables/CustomTable2';
 import { Box, Typography, List, ListItem, ListItemText } from '@mui/material';
-import { writeIcon } from '@assets';
+import { EditIcon } from '@assets';
 import GroupModal from './modal/GroupModal';
 import { canManage, canReadCustomRoles } from '@lib/auth';
+import useAdminAction from './useAdminAction';
 import { listCustomRoles } from '@api1/roles';
 import UserGroupUsers from './UserGroupUsers';
 import Datetime from '@shared/format/Datetime';
@@ -46,6 +47,13 @@ function UserGroup({ groupNames = [], onUserUpdate }) {
     setActiveGroupData(null);
     setGroupModalVisible(true);
   };
+
+  // Admin Overview "Create a group" quick-link lands here with
+  // ?action=create-group and opens the Add Group modal (permission-gated, same
+  // as the toolbar button).
+  useAdminAction('create-group', () => {
+    if (canManage('usergroups', 'Write')) handleAddGroupModal();
+  });
 
   const handleGroupModalClose = (shouldUpdate) => {
     setGroupModalVisible(false);
@@ -151,7 +159,7 @@ function UserGroup({ groupNames = [], onUserUpdate }) {
                       tone='ghost'
                       composition='icon-only'
                       size='sm'
-                      icon={<SafeIcon src={writeIcon} alt='edit' width={16} height={16} />}
+                      icon={<SafeIcon src={EditIcon} alt='edit' width={16} height={16} />}
                       aria-label='Edit group'
                       onClick={(e) => {
                         handleEditGroupModal(e, item);

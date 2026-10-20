@@ -1,6 +1,7 @@
 import { LogsIcon } from '@assets';
 import SignozDatadogLogs from '@components/k8s/details/SignozDatadogLogs';
 import ExecutedQueryInfo from '@shared/ExecutedQueryInfo';
+import LogGroupsView from './LogGroupsView';
 import { base64Converter, unzipData } from './util';
 import { safeJSONParse } from 'src/utils/common';
 
@@ -120,7 +121,11 @@ class SignozDatadogLogCard {
     return (
       <>
         <ExecutedQueryInfo query={this.logs?.additional_info?.executed_query} provider={this.logs?.additional_info?.provider} />
-        <SignozDatadogLogs logData={this.logsData} />
+        <LogGroupsView
+          additionalInfo={this.logs?.additional_info}
+          rawView={<SignozDatadogLogs logData={this.logsData} />}
+          idPrefix={`${this.id}-log-groups`}
+        />
       </>
     );
   };

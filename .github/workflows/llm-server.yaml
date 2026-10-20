@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        image: ghcr.io/nudgebee/postgres:16.10-alpine-nb2
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: appdb
@@ -129,6 +129,11 @@ jobs:
       # its request/limit lines, with no error. It can only be asserted against a
       # real planner, so it runs here.
       #
+      # recommendation carries the departed-image archive, a destructive UPDATE
+      # driven by a three-way UNION over jsonb, a text extraction and a guarded
+      # timestamp cast. Go cannot check any of that, and the failure mode is
+      # retiring findings that still apply.
+      #
       # event carries the enrichment merge, a hand-written statement over jsonb
       # and NOT NULL columns. Each defect it has had was invisible to Go tests and
       # only surfaced against a real Postgres: a uuid column compared with text, a
@@ -140,6 +145,17 @@ jobs:
       # unchanged-row guard lets an unmoved score through, are both decided in
       # SQL over jsonb; the failure modes are a daily rewrite of the whole Open
       # set and a stale score that is never corrected, neither visible to Go.
+      #
+      # query carries the notification-rule account scope, a predicate over a
+      # child table that decides which rules an account-scoped reader sees. The
+      # wrong form shows a rule to someone who cannot see all of its accounts,
+      # and only a real planner runs it.
+      #
+      # account carries what removing an account does to notification rules that
+      # cover it: an UPDATE ... FROM that moves each rule's mirror account before
+      # foreign-key cascades run. A mirror left NULL reads as every account to
+      # older code. Only its NotificationRule test: account's other _DB test needs
+      # a migrated database.
       - name: Run PR-lifecycle DB tests
         working-directory: ./api-server/services
         env:
@@ -147,4 +163,10 @@ jobs:
           # Turns an unreachable database into a failure in THIS job only, so the
           # suite cannot quietly stop running here.
           REQUIRE_DB_TESTS: "true"
-        run: go test ./account/adapter/ ./observability/ ./event/ ./recommendation/ -run '_DB$' -v
+        # triage/eventrule: which suppression rows a mute owns is decided in SQL over
+        # jsonb tags and nullable match columns (alert-rule mute, epic #38553). Only
+        # the Mute tests: triage's other _DB test needs a migrated database.
+        run: |
+          go test ./account/adapter/ ./observability/ ./event/ ./recommendation/ ./query/ ./reports/ -run '_DB$' -v
+          go test ./triage/ ./eventrule/ -run 'Mute.*_DB$' -v
+          go test ./account/ -run 'NotificationRule.*_DB$' -v

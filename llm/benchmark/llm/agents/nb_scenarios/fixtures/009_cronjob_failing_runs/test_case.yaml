@@ -1,0 +1,5 @@
+user_prompt: "is the nightly-report cronjob in benchmark-scenarios healthy? if not, why do its runs fail?"
+expected_output:
+  - The response must state that the CronJob's jobs are failing (every run exits non-zero, exit code 2).
+  - The response must give the reason from the job pod logs — report generation failed because it cannot write /data/report.csv (permission denied).
+tags: [kubernetes, rca, scenario, medium]

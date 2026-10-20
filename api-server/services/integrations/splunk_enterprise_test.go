@@ -2,10 +2,16 @@ package integrations
 
 import (
 	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"nudgebee/services/integrations/core"
 
@@ -343,7 +349,7 @@ func TestSplunkEnterpriseConfig_SearchEndpoint(t *testing.T) {
 
 func TestSplunkEnterprise_TestConnection_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, SplunkEnterpriseServerInfoPath, r.URL.Path)
+		assert.Contains(t, []string{SplunkEnterpriseServerInfoPath, SplunkEnterpriseIndexesPath}, r.URL.Path)
 		assert.Equal(t, "Bearer a-token", r.Header.Get("Authorization"))
 		assert.Equal(t, "json", r.URL.Query().Get("output_mode"))
 		w.WriteHeader(http.StatusOK)
@@ -403,4 +409,244 @@ func TestSplunkEnterprise_TestConnection_StatusMapping(t *testing.T) {
 
 		server.Close()
 	}
+}
+
+// ----- TestConnection: index check ------------------------------------------
+
+// splunkIndexEntry renders one /services/data/indexes entry.
+func splunkIndexEntry(name, datatype string, disabled bool) string {
+	return fmt.Sprintf(`{"name":%q,"content":{"datatype":%q,"disabled":%t}}`, name, datatype, disabled)
+}
+
+// splunkIndexServer answers server/info with 200 and data/indexes with the given
+// status and listing entries.
+func splunkIndexServer(t *testing.T, status int, entries ...string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == SplunkEnterpriseServerInfoPath {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		assert.Equal(t, SplunkEnterpriseIndexesPath, r.URL.Path)
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, `{"entry":[%s]}`, strings.Join(entries, ","))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// splunkIndexCfg is a valid config pointed at server with the given index fields set.
+func splunkIndexCfg(server *httptest.Server, indexes map[string]string) []core.IntegrationConfigValue {
+	cfg := validSplunkEnterpriseCfg()
+	cfg[SplunkEnterpriseConfigURL] = server.URL
+	for k, v := range indexes {
+		cfg[k] = v
+	}
+	return splunkEnterpriseCfg(cfg)
+}
+
+// One request covers every configured index, authenticated exactly like server/info,
+// and it must ask for metric indexes too: without datatype=all Splunk omits them, and a
+// correctly configured metric index would look absent.
+func TestSplunkEnterprise_TestConnection_IndexListingRequest(t *testing.T) {
+	var listings atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer a-token", r.Header.Get("Authorization"))
+		if r.URL.Path == SplunkEnterpriseServerInfoPath {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		listings.Add(1)
+		q := r.URL.Query()
+		assert.Equal(t, SplunkEnterpriseIndexesPath, r.URL.Path)
+		assert.Equal(t, "json", q.Get("output_mode"))
+		assert.Equal(t, "all", q.Get("datatype"))
+		assert.Equal(t, "0", q.Get("count"))
+		assert.Equal(t, "name=otel_logs OR name=otel_metrics OR name=otel_traces", q.Get("search"))
+		_, _ = w.Write([]byte(`{"entry":[` + strings.Join([]string{
+			splunkIndexEntry("otel_logs", "event", false),
+			splunkIndexEntry("otel_metrics", "metric", false),
+			splunkIndexEntry("otel_traces", "event", false),
+		}, ",") + `]}`))
+	}))
+	defer server.Close()
+
+	err := SplunkEnterprise{}.TestConnection(nil, splunkIndexCfg(server, map[string]string{
+		SplunkEnterpriseConfigLogIndex:    "otel_logs",
+		SplunkEnterpriseConfigMetricIndex: "otel_metrics",
+		SplunkEnterpriseConfigTraceIndex:  "otel_traces",
+	}), "acct")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(1), listings.Load(), "all indexes are checked in a single request")
+}
+
+// A listing that positively names a configured index with the wrong datatype, or as
+// disabled, is a definite misconfiguration: every query on that signal would fail. The
+// message leads with "configuration:" and names the field, so the form and nubi's
+// diagnosis both point at the setting to change.
+func TestSplunkEnterprise_TestConnection_IndexContradictionsFail(t *testing.T) {
+	cases := []struct {
+		name    string
+		indexes map[string]string
+		entries []string
+		want    []string
+	}{
+		{
+			name:    "event index as the metric index",
+			indexes: map[string]string{SplunkEnterpriseConfigMetricIndex: "otel_logs"},
+			entries: []string{splunkIndexEntry("main", "event", false), splunkIndexEntry("otel_logs", "event", false)},
+			want:    []string{SplunkEnterpriseConfigMetricIndex, `"otel_logs"`, "event index", "datatype=metric"},
+		},
+		{
+			name:    "metric index as the log index",
+			indexes: map[string]string{SplunkEnterpriseConfigLogIndex: "otel_metrics"},
+			entries: []string{splunkIndexEntry("otel_metrics", "metric", false)},
+			want:    []string{SplunkEnterpriseConfigLogIndex, `"otel_metrics"`, "metrics index", "logs need an event index"},
+		},
+		{
+			name:    "metric index as the trace index",
+			indexes: map[string]string{SplunkEnterpriseConfigTraceIndex: "otel_metrics"},
+			entries: []string{splunkIndexEntry("main", "event", false), splunkIndexEntry("otel_metrics", "metric", false)},
+			want:    []string{SplunkEnterpriseConfigTraceIndex, `"otel_metrics"`, "traces need an event index"},
+		},
+		{
+			name:    "disabled index",
+			indexes: map[string]string{SplunkEnterpriseConfigLogIndex: "otel_logs"},
+			entries: []string{splunkIndexEntry("otel_logs", "event", true)},
+			want:    []string{SplunkEnterpriseConfigLogIndex, `"otel_logs"`, "disabled"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := splunkIndexServer(t, http.StatusOK, tc.entries...)
+			err := SplunkEnterprise{}.TestConnection(nil, splunkIndexCfg(server, tc.indexes), "acct")
+			require.Error(t, err)
+			assert.True(t, strings.HasPrefix(err.Error(), "configuration: "), "got %q", err.Error())
+			for _, want := range tc.want {
+				assert.Contains(t, err.Error(), want)
+			}
+		})
+	}
+}
+
+// Everything short of a definite contradiction passes. data/indexes reports only the
+// answering node's own indexes, so on a distributed Splunk a working index can be
+// absent from it, and a search-only role may get 403 or 404 for it outright. Failing
+// on those would reject connections whose searches work.
+func TestSplunkEnterprise_TestConnection_IndexCheckInertWhenUnsure(t *testing.T) {
+	metricOnly := map[string]string{SplunkEnterpriseConfigMetricIndex: "otel"}
+	cases := []struct {
+		name    string
+		status  int
+		indexes map[string]string
+		entries []string
+	}{
+		{"index absent from listing", http.StatusOK, map[string]string{SplunkEnterpriseConfigMetricIndex: "nosuch"}, nil},
+		{
+			// search=name=otel matches substrings, so Splunk returns otel_logs for it;
+			// that is a different index and says nothing about "otel".
+			"only a longer sibling name, opposite datatype", http.StatusOK, metricOnly,
+			[]string{splunkIndexEntry("otel_logs", "event", false)},
+		},
+		{"listing forbidden", http.StatusForbidden, metricOnly, nil},
+		{"listing not found", http.StatusNotFound, metricOnly, nil},
+		{"datatype not reported", http.StatusOK, metricOnly, []string{splunkIndexEntry("otel", "", false)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := splunkIndexServer(t, tc.status, tc.entries...)
+			err := SplunkEnterprise{}.TestConnection(nil, splunkIndexCfg(server, tc.indexes), "acct")
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestSplunkEnterprise_TestConnection_IndexCheckUndecodableListingPasses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Path == SplunkEnterpriseIndexesPath {
+			_, _ = w.Write([]byte(`<html>not json</html>`))
+		}
+	}))
+	defer server.Close()
+
+	err := SplunkEnterprise{}.TestConnection(nil, splunkIndexCfg(server, nil), "acct")
+	assert.NoError(t, err)
+}
+
+// The listing has its own fixed timeout. A slow listing passes rather than failing the
+// test, and it cannot stretch the probe past that budget.
+func TestSplunkEnterprise_TestConnection_IndexCheckTimeoutPassesAndIsBounded(t *testing.T) {
+	previous := splunkEnterpriseIndexCheckTimeout
+	splunkEnterpriseIndexCheckTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { splunkEnterpriseIndexCheckTimeout = previous })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == SplunkEnterpriseIndexesPath {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	start := time.Now()
+	err := SplunkEnterprise{}.TestConnection(nil, splunkIndexCfg(server, map[string]string{
+		SplunkEnterpriseConfigMetricIndex: "otel_logs",
+	}), "acct")
+	assert.NoError(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second)
+}
+
+// ----- TestConnection: missing-port hint ------------------------------------
+
+func TestSplunkEnterpriseMissingPortHint(t *testing.T) {
+	refused := errors.New(`Get "https://splunk.example.com/services/server/info": dial tcp 10.0.0.1:443: connect: connection refused`)
+	clientTimeout := errors.New(`Get "https://splunk.example.com/services/server/info": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`)
+	ioTimeout := errors.New(`Get "https://splunk.example.com/services/server/info": dial tcp 10.0.0.1:443: i/o timeout`)
+	eof := fmt.Errorf(`Get "https://splunk.example.com/services/server/info": %w`, io.EOF)
+
+	t.Run("https refused names 443 and suggests 8089", func(t *testing.T) {
+		hint := splunkEnterpriseMissingPortHint("https://splunk.example.com", refused)
+		assert.Contains(t, hint, "port 443 was used")
+		assert.Contains(t, hint, "https://splunk.example.com:8089")
+	})
+	t.Run("http refused names 80", func(t *testing.T) {
+		hint := splunkEnterpriseMissingPortHint("http://splunk.example.com", refused)
+		assert.Contains(t, hint, "port 80 was used")
+		assert.Contains(t, hint, "http://splunk.example.com:8089")
+	})
+	t.Run("timeouts get the hint", func(t *testing.T) {
+		assert.Contains(t, splunkEnterpriseMissingPortHint("https://splunk.example.com", clientTimeout), "8089")
+		assert.Contains(t, splunkEnterpriseMissingPortHint("https://splunk.example.com", ioTimeout), "8089")
+	})
+	// EOF means something did answer on the default port (typically a proxy or the
+	// web UI), so the port is not the likely mistake.
+	t.Run("EOF gets no hint", func(t *testing.T) {
+		assert.Empty(t, splunkEnterpriseMissingPortHint("https://splunk.example.com", eof))
+	})
+	t.Run("explicit port gets no hint", func(t *testing.T) {
+		assert.Empty(t, splunkEnterpriseMissingPortHint("https://splunk.example.com:8000", refused))
+		assert.Empty(t, splunkEnterpriseMissingPortHint("https://splunk.example.com:8089", clientTimeout))
+	})
+}
+
+// A refused connection on an explicit port keeps today's message: the port is there,
+// so the hint would be wrong.
+func TestSplunkEnterprise_TestConnection_RefusedWithPortHasNoHint(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().String()
+	require.NoError(t, listener.Close())
+
+	cfg := validSplunkEnterpriseCfg()
+	cfg[SplunkEnterpriseConfigURL] = "http://" + addr
+
+	err = SplunkEnterprise{}.TestConnection(nil, splunkEnterpriseCfg(cfg), "acct")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the server may be down")
+	assert.NotContains(t, err.Error(), "has no port")
 }

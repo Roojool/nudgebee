@@ -13,6 +13,7 @@ import (
 	"nudgebee/runbook/services/security"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,13 +62,17 @@ func ExecuteRelayJob(requestContext *security.RequestContext, accountId string, 
 
 	// Route SSH commands to proxy agent for vm_agent integrations
 	if module == RelayJobSSH && isVMAgentModeIntegration(integrationConfigs) {
-		return executeSSHViaProxyAgentRunbook(integrationConfig, query, accountId)
+		return executeSSHViaProxyAgentRunbook(integrationConfig, query, accountId, configs)
 	}
 
 	explainQuery := false
 	switch module {
 	case RelayJobSSH:
-		query = fmt.Sprintf(`mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $SSH_USER@$SSH_HOST '%s'`, escapeSingleQuotes(query))
+		var err error
+		query, err = buildK8sSSHCommand(query, configs)
+		if err != nil {
+			return nil, err
+		}
 	case RelayJobPostgres:
 		if (strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "explain ")) || (strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "explain analyze")) {
 			query = fmt.Sprintf(`psql -c '%s'`, escapeSingleQuotes(query))
@@ -879,14 +884,150 @@ func escapeSingleQuotes(str string) string {
 // oracleServiceNameSanitizer strips characters unsafe for shell interpolation in Oracle service names.
 var oracleServiceNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9._\-$]`)
 
-// executeSSHViaProxyAgentRunbook sends an ssh_command request to the forager agent via the relay.
-func executeSSHViaProxyAgentRunbook(integration integrations.IntegrationConfig, command string, accountId string) (any, error) {
+// sshHostRegex matches an RFC 1123 hostname or an IPv4 address. It gates a
+// task-supplied host before it is interpolated into the k8s workspace-pod ssh
+// command. Mirrors sshHostPattern in api-server/services/integrations/ssh.go
+// and llm/llm-server/tools/common_relay.go; keep them in sync.
+var sshHostRegex = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
+
+// buildK8sSSHCommand builds the workspace-pod ssh command for k8s-mode ssh
+// integrations. Credentials and the default host come from the mounted secret
+// ($SSH_USER / $SSH_HOST); configs["host"] / configs["port"] (the task's
+// optional target override) replace $SSH_HOST and add -p. The host is
+// regex-validated before interpolation; the port is an int.
+func buildK8sSSHCommand(command string, configs map[string]any) (string, error) {
+	host := "$SSH_HOST"
+	if v, ok := configs["host"].(string); ok && strings.TrimSpace(v) != "" {
+		v = strings.TrimSpace(v)
+		if !sshHostRegex.MatchString(v) {
+			return "", fmt.Errorf("invalid ssh host %q: must be a hostname or IPv4 address", v)
+		}
+		host = v
+	}
+	port, err := ParseSSHPort(configs["port"])
+	if err != nil {
+		return "", err
+	}
+	portFlag := ""
+	if port > 0 {
+		portFlag = fmt.Sprintf(" -p %d", port)
+	}
+	return fmt.Sprintf(`mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR%s $SSH_USER@%s '%s'`, portFlag, host, escapeSingleQuotes(command)), nil
+}
+
+// executeRelayFn and sshProxyModeLookup are indirections so unit tests can
+// assert the relay payload without a relay server or a database.
+var (
+	executeRelayFn     = ExecuteRelay
+	sshProxyModeLookup = lookupSSHProxyMode
+)
+
+// lookupSSHProxyMode returns the forager ssh-proxy mode ("static" / "dynamic")
+// that relay copies from the datasource metadata into integrations.labels.
+// Returns "" when unknown (no labels yet, not an agent integration, DB error).
+func lookupSSHProxyMode(integrationID string) string {
+	if _, err := uuid.Parse(integrationID); err != nil {
+		return ""
+	}
+	dbms, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		slog.Warn("ssh proxy mode lookup: database unavailable", "integration_id", integrationID, "error", err)
+		return ""
+	}
+	var mode string
+	if err := dbms.Db.Get(&mode, `SELECT COALESCE(labels->>'mode', '') FROM integrations WHERE id = $1`, integrationID); err != nil {
+		return ""
+	}
+	return mode
+}
+
+// resolveProxySSHTarget picks the target host (and optional port) for a
+// vm_agent ssh_command. Precedence: task input > integration `host` config.
+//
+// A dynamic-mode forager ssh-proxy (no configured host) rejects requests
+// without params.host, so fail here with a clear error instead of making the
+// relay round-trip. A static-mode proxy ignores params.host and dials its
+// configured host, so an empty host is left to the agent — agent-registered
+// static integrations carry no `host` config value and must keep working.
+func resolveProxySSHTarget(integration integrations.IntegrationConfig, configs map[string]any, mode string) (string, int, error) {
+	host := ""
+	if v, ok := configs["host"].(string); ok {
+		host = strings.TrimSpace(v)
+	}
+	if host == "" {
+		host = strings.TrimSpace(getIntegrationConfigValue(integration.Values, "host"))
+	}
+	if host != "" && strings.ContainsAny(host, " \t\r\n/@") {
+		return "", 0, fmt.Errorf("invalid ssh host %q", host)
+	}
+
+	port, err := ParseSSHPort(configs["port"])
+	if err != nil {
+		return "", 0, err
+	}
+
+	if host == "" && mode == "dynamic" {
+		name := integration.Name
+		if name == "" {
+			name = integration.Id
+		}
+		return "", 0, fmt.Errorf("no target host for dynamic ssh integration %s: set the task's host input", name)
+	}
+	return host, port, nil
+}
+
+// ParseSSHPort parses an ssh port given as a JSON number or numeric string; 0 means unset.
+func ParseSSHPort(v any) (int, error) {
+	var port int
+	switch p := v.(type) {
+	case nil:
+		return 0, nil
+	case int:
+		port = p
+	case int64:
+		port = int(p)
+	case float64:
+		if p != float64(int(p)) {
+			return 0, fmt.Errorf("invalid ssh port %v", p)
+		}
+		port = int(p)
+	case json.Number:
+		n, err := p.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("invalid ssh port %q", p.String())
+		}
+		port = int(n)
+	case string:
+		s := strings.TrimSpace(p)
+		if s == "" {
+			return 0, nil
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return 0, fmt.Errorf("invalid ssh port %q", p)
+		}
+		port = n
+	default:
+		return 0, fmt.Errorf("invalid ssh port %v", v)
+	}
+	if port == 0 {
+		return 0, nil
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid ssh port %d: must be 1-65535", port)
+	}
+	return port, nil
+}
+
+// buildProxySSHActionBody builds the relay request for a vm_agent ssh_command.
+// configs may carry the per-task "host" / "port" overrides.
+func buildProxySSHActionBody(integration integrations.IntegrationConfig, command string, accountId string, configs map[string]any) (ActionExecuteBody, error) {
 	datasourceKey := getIntegrationConfigValue(integration.Values, "datasource_key")
 	if datasourceKey == "" {
 		if integration.Id != "" {
 			datasourceKey = integration.Id
 		} else {
-			return nil, errors.New("vm_agent integration missing datasource_key config value")
+			return ActionExecuteBody{}, errors.New("vm_agent integration missing datasource_key config value")
 		}
 	}
 
@@ -900,21 +1041,40 @@ func executeSSHViaProxyAgentRunbook(integration integrations.IntegrationConfig, 
 		}
 	}
 
+	host, port, err := resolveProxySSHTarget(integration, configs, sshProxyModeLookup(integration.Id))
+	if err != nil {
+		return ActionExecuteBody{}, err
+	}
+
 	params := map[string]any{
 		"datasource_id": datasourceKey,
 		"command":       command,
 		"timeout_ms":    float64(config.Config.RunbookServerRelayPodExecutionTimeoutSeconds * 1000),
 	}
+	if host != "" {
+		params["host"] = host
+	}
+	if port > 0 {
+		params["port"] = float64(port)
+	}
 
-	actionParam := ActionExecuteBody{
+	return ActionExecuteBody{
 		AccountID:    accountId,
 		ActionName:   "ssh_command",
 		ActionParams: params,
 		AgentType:    agentType,
 		Timeout:      time.Second * time.Duration(config.Config.RunbookServerRelayPodExecutionTimeoutSeconds),
+	}, nil
+}
+
+// executeSSHViaProxyAgentRunbook sends an ssh_command request to the forager agent via the relay.
+func executeSSHViaProxyAgentRunbook(integration integrations.IntegrationConfig, command string, accountId string, configs map[string]any) (any, error) {
+	actionParam, err := buildProxySSHActionBody(integration, command, accountId, configs)
+	if err != nil {
+		return nil, err
 	}
 
-	response, err := ExecuteRelay(actionParam)
+	response, err := executeRelayFn(actionParam)
 	if err != nil {
 		return nil, fmt.Errorf("proxy agent ssh_command failed: %w", err)
 	}

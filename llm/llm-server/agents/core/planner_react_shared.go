@@ -31,7 +31,7 @@ func generateToolId(tool string, input string) string {
 // It exists as a shared seam, rather than a call in each planner, because being
 // ReAct3-only is exactly what caused the incident it fixes (#39201). ReAct3 expanded
 // on every tool input; ReAct4 did not, and ReAct4 is the default engine
-// (llm_server_react4_enabled defaults true, and every provider we ship except
+// (llm_server_planner_engine defaults "auto", and every provider we ship except
 // sagemaker/huggingface routes to it). So nothing expanded them: `[[Time:-24h]]`
 // reached tools verbatim, and in an Elasticsearch range filter it matches nothing
 // while still returning HTTP 200 — an empty result the caller reads as "no data in

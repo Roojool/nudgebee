@@ -92,8 +92,8 @@ class TestJobLastSeen(unittest.TestCase):
 
         with mock.patch.object(dh.database, "insert_data", side_effect=capture), mock.patch.object(
             dh.database, "run_query", return_value=[]
-        ), mock.patch.object(dh, "stage_batch_and_should_reconcile", return_value=(False, None)), mock.patch.object(
-            dh, "publish_kg_update"
+        ), mock.patch.object(dh, "stage_batch_and_should_reconcile", return_value=(False, None)), mock.patch(
+            "handlers.kg_update.publish_message"
         ):
             dh.run_job_discovery([payload], TENANT, ACCOUNT, is_last_batch=True, is_first_batch=True)
         return captured

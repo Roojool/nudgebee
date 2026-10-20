@@ -148,6 +148,7 @@ func main() {
 	}
 	common.InitMetrics()
 	core.InitMetrics()
+	egressfilter.PlatformEntropyEnabled = config.Config.LlmServerEgressFilterEntropyEnabled
 	prompts.InitializeGlobalLoader()
 	// Every registered prompt must resolve against the embedded FS. Prompts ship
 	// inside the binary, so a miss is a build defect, not a runtime condition —

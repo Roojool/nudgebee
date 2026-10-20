@@ -348,6 +348,7 @@ export default function MsTeamsWebhookTargets() {
         title='Delete webhook target?'
         subtitle={toDelete ? toDelete.name : ''}
         confirmText='Delete'
+        confirmTone='danger'
         cancelText='Cancel'
         loader={!!busyId}
         onConfirm={handleDelete}

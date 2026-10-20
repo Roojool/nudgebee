@@ -175,9 +175,9 @@
         {% set link_hash = 'optimize/right-sizing' %}
       {% elif rule == 'pv_rightsize' %}
         {% set link_hash = 'optimize/pv-rightsizing' %}
-      {% elif rule == 'replica-rightsizing' %}
+      {% elif rule == 'replica_right_sizing' %}
         {% set link_hash = 'optimize/replica-rightsizing' %}
-      {% elif rule == 'abandoned-resources' %}
+      {% elif rule == 'abandoned_resource' %}
         {% set link_hash = 'optimize/abandoned-resources' %}
       {% else %}
         {% set link_hash = 'optimize/summary' %}
@@ -203,8 +203,11 @@
 
     {#- HIGHLIGHTS -#}
     {% if total_highlights > 0 %}
-    <div style="font-family:'DM Sans',Arial,sans-serif; font-size:11px; font-weight:600; color:#6B7280; letter-spacing:0.8px; text-transform:uppercase; margin:12px 0 6px;">
+    <div style="font-family:'DM Sans',Arial,sans-serif; font-size:11px; font-weight:600; color:#6B7280; letter-spacing:0.8px; text-transform:uppercase; margin:12px 0 0;">
       HIGHLIGHTS
+    </div>
+    <div style="font-family:'DM Sans',Arial,sans-serif; font-size:11.5px; font-weight:400; color:#4B5563; margin:2px 0 6px;">
+      vs. previous 24 hours
     </div>
       {% if current_app_events > 0 %}
       <p style="font-family:'DM Sans',Arial,sans-serif; font-size:13.5px; color:#3D3D3D; line-height:1.6; margin:0 0 4px; padding-left:16px;">

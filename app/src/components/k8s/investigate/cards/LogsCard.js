@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import ConsoleLogOutput from '@shared/viewers/ConsoleLogOutput';
+import LogGroupsView from './LogGroupsView';
 import { base64Converter, unzipData } from './util';
 import LogsIcon from '@assets/investigation/logs-blue.svg';
 import { redLogsErrorCodes as keywords, libraryErrors } from 'src/utils/common';
@@ -21,17 +21,23 @@ class LogsCard {
     this.renderContent = false;
   }
 
+  // A profile is evidence of a profile, not a log file. It arrives as a .gz
+  // the same way logs do, in whatever shape its tool produced - .pprof.gz for
+  // Go, .svg.gz and .html.gz for flamegraphs, .txt.gz for a heap histogram -
+  // so the action name is the only signal that covers all of them. Matching on
+  // the extension instead let every profile but Go's render here as a binary
+  // blob.
+  isProfileEvidence = (item) => item?.additional_info?.actual_action_name === 'pod_profiler';
+
   canRenderContent = async (evidenceData, _event) => {
     const isValidLogEvidence = evidenceData.some((item) => {
       const isGz = (item.type === 'gz' && item.filename?.endsWith('log.gz')) || item.filename?.endsWith('.gz');
 
-      const isExcluded = item.filename?.endsWith('pprof.gz') && item.additional_info?.actual_action_name === 'pod_profiler';
-
-      return isGz && !isExcluded && item?.additional_info?.actual_action_name != 'datadog_logs';
+      return isGz && !this.isProfileEvidence(item) && item?.additional_info?.actual_action_name != 'datadog_logs';
     });
     if (isValidLogEvidence) {
       this.renderContent = true;
-      let logObject = evidenceData.filter((item) => item.type === 'gz' || item.filename?.endsWith('.gz'));
+      let logObject = evidenceData.filter((item) => (item.type === 'gz' || item.filename?.endsWith('.gz')) && !this.isProfileEvidence(item));
       const getInsights = logObject
         .filter((p) => p && p.insight && p.insight.length > 0)
         .map((g) => g.insight)
@@ -139,7 +145,7 @@ class LogsCard {
         {/* Render non-tabbed logs */}
         {logsWithoutTabs.map((log, index) => (
           <div key={log.fileName}>
-            <ConsoleLogOutput data={log.logs} />
+            <LogGroupsView logs={log.logs} additionalInfo={log.additionalInfo} idPrefix={`log-groups-${index}`} />
             {index < logsWithoutTabs.length - 1 && <br />}
           </div>
         ))}
@@ -236,7 +242,14 @@ const LogsTabs = ({ logs, getTabLabel }) => {
 
       {/* Tab Content */}
       <div role='tabpanel' id={`tabpanel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} style={tabContentStyle}>
-        {logs[activeTab] && <ConsoleLogOutput data={logs[activeTab].logs} />}
+        {logs[activeTab] && (
+          <LogGroupsView
+            key={activeTab}
+            logs={logs[activeTab].logs}
+            additionalInfo={logs[activeTab].additionalInfo}
+            idPrefix={`log-groups-tab-${activeTab}`}
+          />
+        )}
       </div>
     </div>
   );

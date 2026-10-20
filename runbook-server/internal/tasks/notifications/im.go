@@ -47,6 +47,7 @@ func (t *ImSendTask) Execute(taskCtx types.TaskContext, params map[string]any) (
 		Channel:   channel,
 		AccountID: taskCtx.GetAccountID(),
 		Platform:  params["provider"].(string),
+		EventType: notification.EventTaskProgress,
 	}
 
 	// Attach workflow metadata for tracing in notification footers
@@ -75,12 +76,16 @@ func (t *ImSendTask) Execute(taskCtx types.TaskContext, params map[string]any) (
 	}
 
 	resp, err := notification.SendNotification(requestContext, request)
+	if err == nil && resp.Status == notification.StatusSuppressed {
+		taskCtx.GetLogger().Info("IM notification suppressed by a notification rule", "channel", channel, "reason", resp.Reason)
+	}
 
 	return map[string]any{
 		"channel":    resp.ChannelId,
 		"message_id": resp.MessageTs,
 		"team":       resp.TeamId,
 		"provider":   resp.Platform,
+		"status":     resp.Status,
 	}, err
 }
 
@@ -145,6 +150,11 @@ func (t *ImSendTask) OutputSchema() *types.Schema {
 				Type:        "string",
 				Description: "IM Platform.",
 				Required:    true,
+			},
+			"status": {
+				Type:        "string",
+				Description: "Delivery status: sent, or suppressed when a notification rule dropped the message.",
+				Required:    false,
 			},
 		},
 	}

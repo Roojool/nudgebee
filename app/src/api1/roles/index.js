@@ -170,6 +170,15 @@ export async function getPermissionCatalog() {
   return { catalog: body?.catalog ?? [], systemRoles: body?.systemRoles ?? [] };
 }
 
+// The scopes an API key can be limited to (Settings → API Tokens). Readable by any
+// signed-in user, unlike getPermissionCatalog, which is for role administration.
+export async function getTokenScopeCatalog() {
+  const res = await fetch('/api/permissions/token-catalog', { headers: { 'Content-Type': 'application/json' } });
+  if (!res.ok) return [];
+  const body = await res.json();
+  return body?.catalog ?? [];
+}
+
 // Active cloud accounts (id + name) for the role editor's account-scope picker.
 // Reads the accounts catalog (accounts:Read / any tenant role), so a tenant admin
 // editing roles can always list them. Shaped as { value, label } for @ui/Select.

@@ -33,6 +33,20 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template
   name: ''
 
+# Egress policy for Jobs created by the workflow scripting executor. The
+# template excludes link-local, RFC1918, CGNAT, and loopback IPv4 by default.
+# Add internalCIDRs if the cluster has internal addresses outside those ranges
+# or its CNI evaluates Service VIPs before translation to Pod IPs. Confirm
+# enforcement and internal-Service denial with a live Job on each cluster.
+scriptPodNetworkPolicy:
+  enabled: true
+  annotations: {}
+  internalCIDRs: []
+  dnsNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns
+
 podAnnotations: {}
 
 podSecurityContext:
@@ -67,10 +81,16 @@ ingress:
 
 secretName: 'nudgebee'
 
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Flat across every measured deployment: 31-94Mi average, 63-133Mi peak, CPU p95
+# 2-46m. The chart previously shipped no memory limit.
 resources:
-  requests:
-    cpu: 250m
+  limits:
+    cpu: 500m
     memory: 500Mi
+  requests:
+    cpu: 50m
+    memory: 250Mi
 
 autoscaling:
   enabled: false

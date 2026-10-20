@@ -26,15 +26,16 @@ func TestQueryModelDownshift_BothEngines(t *testing.T) {
 	setEnvKey(t, "llm_tier_model_reasoning", "gemini-3.1-pro-preview")
 	setEnvKey(t, "llm_tier_provider_summary", "googleai")
 	setEnvKey(t, "llm_tier_model_summary", "gemini-3-flash-preview")
-	previous := config.Config.LlmServerReAct4Enabled
-	t.Cleanup(func() { config.Config.LlmServerReAct4Enabled = previous })
+	previous := config.Config.LlmServerPlannerEngine
+	t.Cleanup(func() { config.Config.LlmServerPlannerEngine = previous })
 	agent := catTestCategorisedAgent{category: ModelTierReasoning}
 	for _, engine := range []struct {
 		name   string
-		native bool
-	}{{"react3", false}, {"react4", true}} {
+		engine string
+		react4 bool
+	}{{"react3", PlannerEngineReAct3, false}, {"react4", PlannerEngineReAct4, true}} {
 		t.Run(engine.name, func(t *testing.T) {
-			config.Config.LlmServerReAct4Enabled = engine.native
+			config.Config.LlmServerPlannerEngine = engine.engine
 			for _, tc := range []struct {
 				name    string
 				enabled bool
@@ -52,7 +53,7 @@ func TestQueryModelDownshift_BothEngines(t *testing.T) {
 					ctx := applyAgentModelTier(security.NewRequestContextForSuperAdmin(), agent, tc.request)
 					require.Equal(t, tc.want, modelTierFromContext(ctx))
 					require.Equal(t, tc.model, GetLLMModelName(ctx, "", "googleai", agent.GetName(), true, ""))
-					require.Equal(t, engine.native, useReAct4Engine(ctx, agent, tc.request))
+					require.Equal(t, engine.react4, useReAct4Engine(ctx, agent, tc.request))
 				})
 			}
 		})

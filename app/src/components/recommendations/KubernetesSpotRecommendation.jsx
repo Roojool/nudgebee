@@ -21,7 +21,7 @@ import { Modal } from '@ui/Modal';
 import TicketLink from '@shared/links/TicketLink';
 import { Link as CustomLink } from '@ui/Link';
 
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Stat } from '@ui/Stat';
 import { CostCallout } from '@ui/CostCallout';
@@ -546,7 +546,7 @@ const KubernetesSpotRecommendation = ({ enabledSummary = true, enabledFilters = 
           mt={2}
           mb={2}
         >
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Recommendations'
@@ -555,8 +555,8 @@ const KubernetesSpotRecommendation = ({ enabledSummary = true, enabledFilters = 
                 Number.isFinite(totalSpotRecommendationCount) ? totalSpotRecommendationCount.toLocaleString() : totalSpotRecommendationCount ?? '—'
               }
             />
-          </WidgetCard>
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          </Card>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Cost'
@@ -569,8 +569,8 @@ const KubernetesSpotRecommendation = ({ enabledSummary = true, enabledFilters = 
                 )
               }
             />
-          </WidgetCard>
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          </Card>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Savings Potential'
@@ -583,7 +583,7 @@ const KubernetesSpotRecommendation = ({ enabledSummary = true, enabledFilters = 
                 )
               }
             />
-          </WidgetCard>
+          </Card>
         </Box>
       )}
 

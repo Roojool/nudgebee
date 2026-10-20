@@ -1,400 +1,262 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 const mockCanManage = jest.fn();
-jest.mock('@lib/auth', () => ({
-  canManage: (...args: any[]) => mockCanManage(...args),
-}));
+jest.mock('@lib/auth', () => ({ canManage: (...args: any[]) => mockCanManage(...args) }));
 
+const mockListRules = jest.fn();
+const mockGetDefaultPolicies = jest.fn();
+const mockUpsertRule = jest.fn();
 jest.mock('@api1/notification', () => ({
   __esModule: true,
-  default: { getNotificationRules: jest.fn() },
+  default: {
+    listRules: (...a: any[]) => mockListRules(...a),
+    getDefaultPolicies: (...a: any[]) => mockGetDefaultPolicies(...a),
+    upsertRule: (...a: any[]) => mockUpsertRule(...a),
+    deleteNotificationRule: jest.fn(),
+  },
 }));
-
 jest.mock('@api1/home', () => ({
   __esModule: true,
-  default: { getCloudAccounts: jest.fn() },
-}));
-
-jest.mock('@api1/kubernetes', () => ({
-  __esModule: true,
-  default: { getAllK8sNamespaces: jest.fn(), getAllK8sWorkload: jest.fn() },
-}));
-
-jest.mock('@api1/user', () => ({
-  __esModule: true,
-  default: { getUserPreferencesTablePageSize: jest.fn(() => 10) },
-}));
-
-jest.mock('@assets', () => ({
-  DeleteIconRed: '/delete.svg',
-  writeIconLight: '/edit.svg',
-}));
-
-jest.mock('@utils/colors');
-
-jest.mock('src/utils/actionStyles', () => ({
-  action: { primary: {}, delete: {} },
-}));
-
-jest.mock('src/utils/common', () => ({
-  safeJSONParse: (val: any) => {
-    if (typeof val !== 'string') return val;
-    try {
-      return JSON.parse(val);
-    } catch {
-      return null;
-    }
+  default: {
+    getCloudAccounts: jest.fn(async () => [
+      { id: 'a1', account_name: 'k8s-prod', cloud_provider: 'K8s' },
+      { id: 'a2', account_name: 'k8s-dev', cloud_provider: 'K8s' },
+    ]),
   },
-  snakeToTitleCase: (s: string) => s,
 }));
-
-jest.mock('@shared/format/Text', () => ({
-  __esModule: true,
-  default: ({ value }: any) => <span>{value}</span>,
+jest.mock('@api1/user', () => ({ __esModule: true, default: { getUserPreferencesTablePageSize: () => 10 } }));
+jest.mock('@components/user-management/useAdminAction', () => ({ __esModule: true, default: jest.fn() }));
+jest.mock('@components/notifications/rules/destinations', () => ({
+  ...jest.requireActual('@components/notifications/rules/destinations'),
+  useDestinations: () => [],
 }));
-
-jest.mock('@shared/format/Datetime', () => ({
-  __esModule: true,
-  default: ({ value }: any) => <span data-testid='datetime'>{value || '-'}</span>,
-}));
-
-jest.mock('@shared/icons/SafeIcon', () => ({
-  __esModule: true,
-  default: ({ alt }: any) => <span data-testid={`icon-${alt}`}>icon</span>,
-}));
-
+jest.mock('@assets', () => ({ DeleteIconRed: 'delete.svg', EditIcon: 'edit.svg' }));
+jest.mock('@shared/icons/SafeIcon', () => ({ __esModule: true, default: () => null }));
 jest.mock('@shared/icons/IconTextBadge', () => ({
   PlatformChannelBadge: ({ platform, channelName }: any) => <span data-testid={`badge-${platform}`}>{channelName}</span>,
 }));
-
-jest.mock('@ui/Label', () => {
-  const TONE_TO_COLOR: Record<string, string> = { success: 'green', critical: 'red', warning: 'yellow', neutral: 'grey' };
-  return {
-    Label: ({ text, children, tone, variant }: any) => {
-      const color = variant || TONE_TO_COLOR[tone] || 'plain';
-      return <span data-testid={`label-${color}`}>{children || text}</span>;
-    },
-  };
-});
-
-// DS Button with icon prop (no children for icon-only buttons). Render icon inside
-// button body so SafeIcon's testid is still queryable and .closest('button') works.
+jest.mock('@ui/Label', () => ({ Label: ({ text }: any) => <span data-testid='label'>{text}</span> }));
+jest.mock('@ui/Tooltip', () => ({ __esModule: true, default: ({ children }: any) => <>{children}</> }));
+jest.mock('@ui/Callout', () => ({
+  Callout: ({ message, action }: any) => (
+    <div data-testid='callout'>
+      {message}
+      {action && (
+        <button data-testid={action.id} onClick={action.onClick}>
+          {action.label}
+        </button>
+      )}
+    </div>
+  ),
+}));
 jest.mock('@ui/Button', () => ({
-  Button: ({ children, onClick, id, disabled, icon, ['aria-label']: ariaLabel }: any) => (
-    <button data-testid={id || `btn-${typeof children === 'string' ? children : ariaLabel || 'icon'}`} onClick={onClick} disabled={disabled}>
-      {icon}
+  Button: ({ children, onClick, id, ['aria-label']: ariaLabel }: any) => (
+    <button data-testid={id} aria-label={ariaLabel} onClick={onClick}>
       {children}
     </button>
   ),
 }));
-
+jest.mock('@ui/Chip', () => ({
+  Chip: ({ children, onClick, id, count, pressed }: any) => (
+    <button data-testid={id} aria-pressed={pressed} onClick={onClick}>
+      {children} {count}
+    </button>
+  ),
+}));
+jest.mock('@ui/Input', () => ({
+  Input: ({ id, value, onChange, placeholder }: any) => (
+    <input data-testid={id} placeholder={placeholder} value={value} onChange={(e) => onChange(e.target.value)} />
+  ),
+}));
+jest.mock('@ui/DropdownMenu', () => ({
+  DropdownMenu: ({ trigger, items }: any) => (
+    <div>
+      {trigger}
+      {items.map((item: any) => (
+        <button key={item.id} data-testid={item.id} onClick={item.onSelect}>
+          {item.label}
+        </button>
+      ))}
+    </div>
+  ),
+}));
 jest.mock('@ui/ListingLayout', () => {
-  const ListingLayout = ({ children, id }: any) => (
-    <div data-testid='listing-layout' id={id}>
-      {children}
-    </div>
-  );
+  const ListingLayout = ({ children }: any) => <div>{children}</div>;
   ListingLayout.Toolbar = ({ children, actions }: any) => (
-    <div data-testid='toolbar'>
-      <div data-testid='toolbar-actions'>{actions}</div>
+    <div>
       {children}
+      {actions}
     </div>
   );
-  ListingLayout.Body = ({ children }: any) => <div data-testid='body'>{children}</div>;
-  return { __esModule: true, ListingLayout, default: ListingLayout };
+  ListingLayout.Body = ({ children }: any) => <div>{children}</div>;
+  return { ListingLayout };
 });
-
-jest.mock('@ui/FilterDropdown', () => ({
-  __esModule: true,
-  default: ({ label, options = [], value, onSelect, disabled }: any) => {
-    if (disabled) {
-      return (
-        <select data-testid={`filter-disabled-${label}`} disabled>
-          <option>{label} (disabled)</option>
-        </select>
-      );
-    }
-    const currentValue = typeof value === 'object' && value !== null ? value.value : value;
-    return (
-      <select
-        data-testid={`filter-${label}`}
-        value={currentValue || ''}
-        onChange={(e) => onSelect?.({ target: { value: e.target.value } }, { value: e.target.value, label: e.target.value })}
-      >
-        <option value=''>--</option>
-        {(options || []).map((opt: any, idx: number) => {
-          const v = typeof opt === 'string' ? opt : opt.value;
-          const l = typeof opt === 'string' ? opt : opt.label;
-          return (
-            <option key={(v || '_') + '-' + idx} value={v}>
-              {l}
-            </option>
-          );
-        })}
-      </select>
-    );
-  },
-}));
-
-jest.mock('@shared/buttons/DownloadButton', () => ({
-  __esModule: true,
-  default: ({ onClick }: any) => (
-    <button data-testid='download-btn' onClick={onClick}>
-      DL
-    </button>
-  ),
-}));
-
 jest.mock('@shared/tables/CustomTable', () => ({
   __esModule: true,
-  default: ({ id, tableData, totalRows, loading, pageNumber, onPageChange }: any) => (
-    <div data-testid='custom-table' id={id}>
-      {loading && <div data-testid='loading'>loading</div>}
-      <div data-testid='total'>{totalRows}</div>
-      <div data-testid='page'>{pageNumber}</div>
+  default: ({ tableData, loading }: any) => (
+    <div data-testid='table'>
+      {loading && <div data-testid='loading' />}
       {(tableData || []).map((row: any, i: number) => (
-        <div key={i} data-testid={`row-${i}`}>
+        <div key={i} data-testid='row'>
           {row.map((cell: any, j: number) => (
-            <span key={j} data-testid={`cell-${i}-${j}`}>
-              {cell.component || cell.text}
-            </span>
+            <span key={j}>{cell.component}</span>
           ))}
         </div>
       ))}
-      <button data-testid='next-page' onClick={() => onPageChange(2, 10)}>
-        Next
-      </button>
     </div>
   ),
 }));
-
-jest.mock('@components/notifications/NotificationRuleModal', () => ({
+jest.mock('@components/notifications/rules/RuleEditorModal', () => ({
   __esModule: true,
-  default: ({ open, handleClose, notificationRuleObject }: any) =>
-    open ? (
-      <div data-testid='notification-rule-modal'>
-        <span data-testid='modal-rule-id'>{notificationRuleObject?.id || '—'}</span>
-        <button data-testid='close-rule-modal' onClick={handleClose}>
-          Close
-        </button>
+  default: ({ request }: any) =>
+    request ? (
+      <div data-testid='editor'>
+        <span data-testid='editor-new'>{String(request.isNew)}</span>
+        <span data-testid='editor-rule'>{JSON.stringify(request.rule)}</span>
+        <span data-testid='editor-pause'>{request.pauseFor || ''}</span>
       </div>
     ) : null,
 }));
+jest.mock('@components/notifications/rules/FallbackModal', () => ({ __esModule: true, default: () => null }));
+jest.mock('@components/notifications/rules/TestNotificationModal', () => ({ __esModule: true, default: () => null }));
+jest.mock('@components/notifications/rules/OnlySomeAccountsModal', () => ({ __esModule: true, default: () => null }));
+jest.mock('@components/notifications/DeleteNotificationRuleModal', () => ({ __esModule: true, default: () => null }));
 
-jest.mock('@components/notifications/DeleteNotificationRuleModal', () => ({
-  __esModule: true,
-  default: ({ open, handleClose, ruleData }: any) =>
-    open ? (
-      <div data-testid='delete-rule-modal'>
-        <span data-testid='delete-rule-id'>{ruleData?.id || '—'}</span>
-        <button data-testid='close-delete-modal' onClick={handleClose}>
-          Close
-        </button>
-      </div>
-    ) : null,
-}));
+import Notifications from '@components/notifications';
 
-import Notifications from '@components/notifications/index';
-
-const apiNotifications = require('@api1/notification').default;
-const apiDashboard = require('@api1/home').default;
-const apiKubernetes = require('@api1/kubernetes').default;
-
-const sampleAccounts = [
-  { id: 'acc-1', account_name: 'AWS Prod' },
-  { id: 'acc-2', account_name: 'GCP Dev' },
-];
-
-const sampleNamespaces = [
-  { cloud_account_id: 'acc-1', namespace_name: 'default' },
-  { cloud_account_id: 'acc-1', namespace_name: 'kube-system' },
-  { cloud_account_id: 'acc-2', namespace_name: 'apps' },
-];
-
-const sampleWorkloads = [{ name: 'web' }, { name: 'api' }];
-
-const sampleRules = [
-  {
-    id: 'rule-1',
-    name: 'Slack on Critical',
-    source: 'alertmanager',
-    account_id: 'acc-1',
-    namespace: 'default',
-    workload: 'web',
-    is_suppressed: false,
-    created_by_display_name: 'Alice',
-    created_at: '2026-05-15T10:00:00Z',
-    notification_rule_mappings: JSON.stringify([{ platform: 'slack', channels: { name: '#alerts' } }]),
-  },
-  {
-    id: 'rule-2',
-    name: 'Email Suppressed',
-    source: 'pagerduty',
-    account_id: 'acc-2',
-    is_suppressed: true,
-    created_by_display_name: 'Bob',
-    created_at: '2026-05-14T10:00:00Z',
-    notification_rule_mappings: JSON.stringify([{ platform: 'email', channels: { emails: ['ops@example.com'] } }]),
-  },
-];
-
-const mockRulesResponse = (rows = sampleRules, count?: number) => ({
-  data: {
-    // Source reads `notifications_list_rules.rows` + `notifications_aggregate_rules.rows[0].count`
-    // (older keys `admin_get_notification_rules_v2` / `_grouping_v2` were renamed).
-    notifications_list_rules: { rows },
-    notifications_aggregate_rules: { rows: [{ count: count ?? rows.length }] },
-  },
+const row = (patch: Record<string, any>) => ({
+  source: 'troubleshoot',
+  source_mode: 'list',
+  sources: JSON.stringify([patch.source || 'troubleshoot']),
+  scope_mode: 'all',
+  account_ids: '[]',
+  exceptions: '[]',
+  is_suppressed: false,
+  is_active: true,
+  notification_rule_mappings: '[]',
+  ...patch,
 });
 
-describe('Notifications (integration)', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockCanManage.mockReturnValue(true);
-    apiDashboard.getCloudAccounts.mockResolvedValue(sampleAccounts);
-    apiKubernetes.getAllK8sNamespaces.mockResolvedValue({ data: sampleNamespaces });
-    apiKubernetes.getAllK8sWorkload.mockResolvedValue({ data: sampleWorkloads });
-    apiNotifications.getNotificationRules.mockResolvedValue(mockRulesResponse());
-  });
+const RULES = [
+  row({
+    id: 'r1',
+    name: 'Silence all troubleshooting',
+    is_suppressed: true,
+    exceptions: '[{"account_ids":["a1"]}]',
+    created_by_display_name: 'Priya Rao',
+    created_at: '2026-09-01T10:00:00',
+  }),
+  row({
+    id: 'r2',
+    name: 'Dev alerts',
+    scope_mode: 'accounts',
+    account_ids: '["a2"]',
+    notification_rule_mappings: '[{"platform":"slack","channels":{"id":"C2","name":"dev-alerts"}}]',
+  }),
+  row({ id: 'r3', name: 'Quiet QA', source_mode: 'all', is_suppressed: true, scope_mode: 'accounts', account_ids: '["a2"]' }),
+  row({ id: 'r4', name: 'Old optimize', source: 'optimize', sources: '["optimize"]', is_active: false }),
+];
 
-  afterEach(async () => {
-    for (let i = 0; i < 5; i++) {
-      await act(async () => {
-        await new Promise((r) => setTimeout(r, 0));
-      });
-    }
-  });
+const rowsText = () => screen.getAllByTestId('row').map((r) => r.textContent || '');
 
-  it('fetches clusters + namespaces on mount, then notification rules', async () => {
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockCanManage.mockReturnValue(true);
+  mockListRules.mockResolvedValue({ rows: RULES });
+  mockGetDefaultPolicies.mockResolvedValue({ policies: [{ source: 'cloud', action: 'drop', mappings: [] }] });
+  mockUpsertRule.mockResolvedValue({ id: 'r1' });
+});
+
+describe('Notification rules page', () => {
+  it('reads each rule as a sentence, with "When no rule matches" above the table', async () => {
     render(<Notifications />);
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
+    const text = rowsText();
+    expect(text[0]).toContain('Troubleshooting alerts from all accounts except k8s-prod are never sent');
+    expect(text[1]).toContain('Troubleshooting alerts from k8s-dev go to #dev-alerts');
+    expect(text[2]).toContain('All notifications from k8s-dev are never sent');
+    expect(text[3]).toContain('Off');
+    const fallback = document.getElementById('fallback')!;
+    expect(fallback).toHaveTextContent('When no rule matches: Notifications go to each app’s default channel.');
+    expect(fallback).toHaveTextContent('Cloud spend summaries are not sent instead');
+    // The line comes before the table, not as one of its rows.
+    expect(fallback.compareDocumentPosition(screen.getByTestId('table')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(text.some((t) => t.includes('When no rule matches'))).toBe(false);
+    expect(screen.getByTestId('filter-all')).toHaveTextContent('All 4');
+    // The all-types rule counts under every type it covers.
+    expect(screen.getByTestId('filter-slo')).toHaveTextContent('SLO 1');
+  });
 
-    await waitFor(() => {
-      expect(apiDashboard.getCloudAccounts).toHaveBeenCalledTimes(1);
-      expect(apiKubernetes.getAllK8sNamespaces).toHaveBeenCalledTimes(1);
+  it('filters by type and shows that type’s fallback', async () => {
+    render(<Notifications />);
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
+    fireEvent.click(screen.getByTestId('filter-cloud'));
+    const text = rowsText();
+    expect(text).toHaveLength(1);
+    expect(text[0]).toContain('Quiet QA');
+    expect(document.getElementById('fallback')).toHaveTextContent('When no rule matches: Cloud spend summaries are not sent.');
+  });
+
+  it('searches rule names and sentences', async () => {
+    render(<Notifications />);
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
+    fireEvent.change(screen.getByTestId('search-rules'), { target: { value: 'dev-alerts' } });
+    expect(rowsText()).toHaveLength(1);
+    fireEvent.change(screen.getByTestId('search-rules'), { target: { value: 'k8s-dev' } });
+    expect(rowsText()[0]).toContain('Dev alerts');
+  });
+
+  it('flags a Send rule that a Don’t send stops, and lets the account through in one click', async () => {
+    render(<Notifications />);
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
+    const devRow = screen.getAllByTestId('row')[1];
+    expect(within(devRow).getByTestId('callout')).toHaveTextContent('Never sends: “Silence all troubleshooting” stops everything this rule covers.');
+    fireEvent.click(within(devRow).getByTestId('fix-r2'));
+    await waitFor(() => expect(mockUpsertRule).toHaveBeenCalled());
+    expect(mockUpsertRule.mock.calls[0][0]).toMatchObject({ id: 'r1', exceptions: [{ account_ids: ['a1', 'a2'] }], is_suppressed: true });
+  });
+
+  it('opens the editor from the Add rule menu with the chosen starting point', async () => {
+    render(<Notifications />);
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
+    fireEvent.click(screen.getByTestId('add-rule-pause'));
+    expect(screen.getByTestId('editor-new')).toHaveTextContent('true');
+    expect(screen.getByTestId('editor-pause')).toHaveTextContent('24h');
+    expect(JSON.parse(screen.getByTestId('editor-rule').textContent || '{}')).toMatchObject({
+      types: ['troubleshoot', 'slo'],
+      action: 'drop',
+      scope: 'some',
     });
-    await waitFor(() => expect(apiNotifications.getNotificationRules).toHaveBeenCalled());
-    const [query, limit, offset] = apiNotifications.getNotificationRules.mock.calls[0];
-    expect(query).toEqual({});
-    expect(limit).toBe(10);
-    expect(offset).toBe(0);
   });
 
-  it('renders notification rule rows with source + cluster + status', async () => {
+  it('turns an off rule on from its menu', async () => {
     render(<Notifications />);
-
-    await waitFor(() => expect(screen.getByText('Slack on Critical')).toBeInTheDocument());
-    expect(screen.getByText('Email Suppressed')).toBeInTheDocument();
-    expect(screen.getAllByText('AWS Prod').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('GCP Dev').length).toBeGreaterThan(0);
-    // Active = tone='success' → label-green; Suppressed = tone='neutral' → label-grey
-    expect(screen.getByTestId('label-green')).toHaveTextContent('Active');
-    expect(screen.getByTestId('label-grey')).toHaveTextContent('Suppressed');
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
+    fireEvent.click(screen.getByTestId('Old optimize-turn-on'));
+    await waitFor(() => expect(mockUpsertRule).toHaveBeenCalled());
+    expect(mockUpsertRule.mock.calls[0][0]).toMatchObject({ id: 'r4', is_active: true });
   });
 
-  it('renders platform-specific channel badges', async () => {
+  it('says who added each rule, and finds rules by who added them', async () => {
     render(<Notifications />);
-
-    await waitFor(() => expect(screen.getByTestId('badge-slack')).toHaveTextContent('#alerts'));
-    expect(screen.getByTestId('badge-email')).toHaveTextContent('ops@example.com');
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
+    expect(document.getElementById('created-by-r1')).toHaveTextContent('Priya Rao');
+    // A rule without a recorded creator shows a dash.
+    expect(document.getElementById('created-by-r2')).toHaveTextContent('-');
+    fireEvent.change(screen.getByTestId('search-rules'), { target: { value: 'priya' } });
+    expect(rowsText()).toHaveLength(1);
+    expect(rowsText()[0]).toContain('Silence all troubleshooting');
   });
 
-  it('shows Create Rule button only with write access', async () => {
+  it('shows no edit controls without write access', async () => {
     mockCanManage.mockReturnValue(false);
     render(<Notifications />);
-    await waitFor(() => expect(apiNotifications.getNotificationRules).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
     expect(screen.queryByTestId('notification-rule')).not.toBeInTheDocument();
-  });
-
-  it('opens NotificationRuleModal on Create Rule click', async () => {
-    render(<Notifications />);
-    await waitFor(() => expect(screen.getByTestId('notification-rule')).toBeInTheDocument());
-
-    fireEvent.click(screen.getByTestId('notification-rule'));
-
-    expect(screen.getByTestId('notification-rule-modal')).toBeInTheDocument();
-    expect(screen.getByTestId('modal-rule-id')).toHaveTextContent('—');
-  });
-
-  it('opens edit modal on row edit button click with rule data', async () => {
-    render(<Notifications />);
-
-    await waitFor(() => expect(screen.getAllByTestId(/icon-edit/).length).toBeGreaterThan(0));
-
-    fireEvent.click(screen.getAllByTestId(/icon-edit/)[0].closest('button')!);
-
-    expect(screen.getByTestId('notification-rule-modal')).toBeInTheDocument();
-    expect(screen.getByTestId('modal-rule-id')).toHaveTextContent('rule-1');
-  });
-
-  it('opens delete modal on row delete button click', async () => {
-    render(<Notifications />);
-
-    await waitFor(() => expect(screen.getByTestId('Slack on Critical-delete')).toBeInTheDocument());
-
-    fireEvent.click(screen.getByTestId('Slack on Critical-delete'));
-
-    expect(screen.getByTestId('delete-rule-modal')).toBeInTheDocument();
-    expect(screen.getByTestId('delete-rule-id')).toHaveTextContent('rule-1');
-  });
-
-  it('refetches rules when cluster filter changes', async () => {
-    render(<Notifications />);
-    await waitFor(() => expect(apiNotifications.getNotificationRules).toHaveBeenCalled());
-    apiNotifications.getNotificationRules.mockClear();
-
-    fireEvent.change(screen.getByTestId('filter-Cluster'), { target: { value: 'AWS Prod' } });
-
-    await waitFor(() => expect(apiNotifications.getNotificationRules).toHaveBeenCalled());
-    expect(apiNotifications.getNotificationRules.mock.calls[0][0].accountId).toBe('acc-1');
-  });
-
-  it('disables Namespace + Application filters until cluster selected', async () => {
-    render(<Notifications />);
-
-    await waitFor(() => expect(screen.getByTestId('filter-Cluster')).toBeInTheDocument());
-    expect(screen.getByTestId('filter-disabled-Namespace')).toBeInTheDocument();
-    expect(screen.getByTestId('filter-disabled-Application')).toBeInTheDocument();
-  });
-
-  it('paginates and adjusts offset on next page', async () => {
-    render(<Notifications />);
-    await waitFor(() => expect(apiNotifications.getNotificationRules).toHaveBeenCalled());
-    apiNotifications.getNotificationRules.mockClear();
-
-    fireEvent.click(screen.getByTestId('next-page'));
-
-    await waitFor(() => expect(apiNotifications.getNotificationRules).toHaveBeenCalled());
-    const [, , offset] = apiNotifications.getNotificationRules.mock.calls[0];
-    expect(offset).toBe(10);
-  });
-
-  it('shows loading state during rules fetch', async () => {
-    let resolveFn: any;
-    apiNotifications.getNotificationRules.mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveFn = resolve;
-      })
-    );
-
-    render(<Notifications />);
-
-    await waitFor(() => expect(screen.getByTestId('loading')).toBeInTheDocument());
-
-    await act(async () => {
-      resolveFn(mockRulesResponse([]));
-    });
-
-    await waitFor(() => expect(screen.queryByTestId('loading')).not.toBeInTheDocument());
-  });
-
-  it('handles empty rules list gracefully', async () => {
-    apiNotifications.getNotificationRules.mockResolvedValue(mockRulesResponse([], 0));
-
-    render(<Notifications />);
-
-    await waitFor(() => expect(screen.getByTestId('total')).toHaveTextContent('0'));
-    expect(screen.queryByTestId('row-0')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('edit-fallback')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('fix-r2')).not.toBeInTheDocument();
+    expect(screen.getByTestId('test-notification')).toBeInTheDocument();
   });
 });

@@ -1,10 +1,7 @@
 from typing import Dict, Any, List
 
 from notifications_server.configs.settings import public_ip, settings
-from notifications_server.message_templates.slack.recommendation_proactive_nudge import (
-    ProactiveNudgeParams,
-    build_ask_nubi_url,
-)
+from notifications_server.message_templates.slack.recommendation_proactive_nudge import ProactiveNudgeParams
 from notifications_server.message_templates.slack.recommendation_nudge_digest import (
     format_rule_name,
     format_savings,
@@ -97,11 +94,6 @@ def get_teams_recommendation_proactive_nudge_template(
                 "type": "Action.OpenUrl",
                 "title": "View All Recommendations",
                 "url": f"{base_url}/optimise?utm=teams#cost",
-            },
-            {
-                "type": "Action.OpenUrl",
-                "title": "Ask Nubi",
-                "url": build_ask_nubi_url(params, base_url, "teams"),
             },
         ],
     }

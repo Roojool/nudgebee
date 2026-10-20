@@ -20,6 +20,7 @@ import Loader from '@shared/Loader';
 import { Button } from '@ui/Button';
 import { Checkbox } from '@ui/Checkbox';
 import Tabs from '@shared/navigation/Tabs';
+import useAdminAction from '@components/user-management/useAdminAction';
 import { Card } from '@ui/Card';
 import { Switch } from '@ui/Switch';
 import { Banner } from '@ui/Banner';
@@ -105,6 +106,25 @@ const SectionHeader = ({ title, description }) => (
   <Box>
     {title && <Typography sx={{ fontSize: ds.text.title, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>{title}</Typography>}
     {description && <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], mt: ds.space[0] }}>{description}</Typography>}
+  </Box>
+);
+
+// pr clears the fixed Nubi chat launcher (56px, 32px off the corner), which otherwise overlaps
+// the Save on a short tab like Traces.
+const SaveFooter = ({ onSave, loading, disabled }) => (
+  <Box
+    sx={{
+      display: 'flex',
+      justifyContent: 'flex-end',
+      mt: ds.space[5],
+      pt: ds.space[4],
+      pr: ds.space.mul(0, 28),
+      borderTop: `1px solid ${ds.gray[200]}`,
+    }}
+  >
+    <Button size='md' onClick={onSave} loading={loading} disabled={disabled} sx={{ minWidth: ds.space.mul(0, 70) }}>
+      Save
+    </Button>
   </Box>
 );
 
@@ -331,7 +351,7 @@ const FeatureWhyCell = ({ text }) => {
   );
 };
 
-const FeatureToggleCell = ({ feature, choice, canEdit, onChange }) => {
+const FeatureToggleCell = ({ feature, choice, canEdit, saving, onChange }) => {
   // Plain on/off switch: with no override it shows the flag's shipped polarity instead of an unselected state.
   const effectiveChoice = effectiveFeatureChoice(feature, choice);
   return (
@@ -339,7 +359,7 @@ const FeatureToggleCell = ({ feature, choice, canEdit, onChange }) => {
       size='md'
       checked={effectiveChoice === 'on'}
       onChange={(_, checked) => onChange(checked ? 'on' : 'off')}
-      disabled={!canEdit}
+      disabled={!canEdit || saving}
       aria-label={feature.display_name || feature.value}
     />
   );
@@ -389,10 +409,19 @@ const TenantSettings = () => {
   const [activeTab, setActiveTab] = useState('general');
   const [activeLabelTab, setActiveLabelTab] = useState('log');
   const [activeFeatureGroup, setActiveFeatureGroup] = useState(ALL_FEATURES_GROUP_ID);
+
+  // Admin Overview quick-links land here with ?action=settings-<tab> and select
+  // the matching inner tab (identity/self-onboarding → General, labels → Label
+  // Mapping, features → Features).
+  useAdminAction(['settings-general', 'settings-labels', 'settings-features'], (action) => {
+    const tab = { 'settings-general': 'general', 'settings-labels': 'labels', 'settings-features': 'features' }[action];
+    if (tab) setActiveTab(tab);
+  });
   const [showFlagIds, setShowFlagIds] = useState(false);
   // Each flag is on/off/default, since "default" (no explicit row) and "off" are distinct states for a default-on flag.
   const [featureChoices, setFeatureChoices] = useState({});
-  const [initialChoices, setInitialChoices] = useState({});
+  // feature_id -> true while its toggle write is in flight, so the Switch is disabled and can't double-fire.
+  const [savingFeatures, setSavingFeatures] = useState({});
   const [featureOptions, setFeatureOptions] = useState([]);
   const [tenantName, setTenantName] = useState(session?.tenant?.name);
   const [checkboxEnabled, setCheckboxEnabled] = useState(false);
@@ -406,16 +435,48 @@ const TenantSettings = () => {
   });
   const [webhookMappingSaved, setWebhookMappingSaved] = useState(false);
   const [webhookMappingModified, setWebhookMappingModified] = useState(false);
+  const [savedSnapshot, setSavedSnapshot] = useState(null);
 
   // Read-only for anyone but a tenant admin, super admin, or `tenants:Write` holder -- mirrors the backend CanManage gate every write goes through.
   const canEdit = canEditTenantSettings();
+
+  // Must mirror every field handleSaveSettings writes; drives the Save button's dirty state.
+  const currentSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        tenantName,
+        checkboxEnabled,
+        allowDomainValue,
+        defaultAuthRole,
+        selectedObservabilityPlatform,
+        logSettings,
+        traceSettings,
+        webhookLabelMapping,
+      }),
+    [tenantName, checkboxEnabled, allowDomainValue, defaultAuthRole, selectedObservabilityPlatform, logSettings, traceSettings, webhookLabelMapping]
+  );
+  const isDirty = savedSnapshot !== null && currentSnapshot !== savedSnapshot;
+
+  useEffect(() => {
+    if (!initialLoading && savedSnapshot === null) {
+      setSavedSnapshot(currentSnapshot);
+    }
+  }, [initialLoading, savedSnapshot, currentSnapshot]);
 
   useEffect(() => {
     let cancelled = false;
     const fetchTenantAttributes = async () => {
       try {
         setLoading(true);
-        const [tenantAttributes, features] = await Promise.all([getTenantAttributes(), getFeatures()]);
+        // listUserTenants rides along here (not a separate parallel call) so tenantName is set
+        // before initialLoading flips -- otherwise the dirty-check baseline is captured without it
+        // and a late tenantName update starts the form out dirty. `.catch` keeps a tenant-list
+        // failure from failing the whole settings load.
+        const [tenantAttributes, features, tenantsRes] = await Promise.all([
+          getTenantAttributes(),
+          getFeatures(),
+          apiUserManagement.listUserTenants(session?.user?.email).catch(() => null),
+        ]);
         if (cancelled) {
           return;
         }
@@ -492,7 +553,12 @@ const TenantSettings = () => {
             }
           });
           setFeatureChoices(choices);
-          setInitialChoices(choices);
+        }
+
+        const tenants = tenantsRes?.data ?? [];
+        if (tenants.length > 0) {
+          // Falls back to the session name (not blank) to guard against a momentarily stale session after a rename. See issue #32696.
+          setTenantName(tenants.find((t) => t.name === session?.tenant?.name)?.name || session?.tenant?.name || '');
         }
       } catch (error) {
         if (!cancelled) {
@@ -506,27 +572,7 @@ const TenantSettings = () => {
       }
     };
 
-    const fetchTenant = async () => {
-      try {
-        apiUserManagement.listUserTenants(session?.user?.email).then((res) => {
-          if (cancelled) {
-            return;
-          }
-          const tenants = res.data ?? [];
-          if (tenants.length > 0) {
-            // Falls back to the session name (not blank) to guard against a momentarily stale session after a rename. See issue #32696.
-            setTenantName(tenants.find((t) => t.name === session?.tenant?.name)?.name || session?.tenant?.name || '');
-          }
-        });
-      } catch {
-        if (!cancelled) {
-          setTenantName('');
-        }
-      }
-    };
-
     fetchTenantAttributes();
-    fetchTenant();
     return () => {
       cancelled = true;
     };
@@ -583,23 +629,7 @@ const TenantSettings = () => {
         return;
       }
 
-      // 'default' is sent through to the API, which deletes the row rather than storing that word.
-      const updatePayload = featureOptions
-        .filter((f) => (featureChoices[f.value] || 'default') !== (initialChoices[f.value] || 'default'))
-        .map((f) => ({
-          feature_id: f.value,
-          status: storedFromDisplayed(featureChoices[f.value] || 'default', f.stored_value_inverted),
-        }));
-
-      if (updatePayload.length > 0) {
-        const updateFeatureFlagResponse = await updateTenantFeatureFlag(updatePayload);
-        if (updateFeatureFlagResponse?.data?.errors) {
-          snackbar.error(`Failed to save feature configuration - ${parseHttpResponseBodyMessage(updateFeatureFlagResponse.data)}`);
-          return;
-        }
-        snackbar.success('Feature configuration saved.');
-        fetchFeatureFlagsForTenant(true); // refresh cache
-      }
+      // Feature flags aren't saved here -- each toggle persists on change via handleFeatureChoice.
       if (checkboxEnabled) {
         const updateAllowedLoginDomainResponse = await upsertTenantAttributes([
           {
@@ -653,12 +683,40 @@ const TenantSettings = () => {
     }
 
     if (saveSucceeded) {
+      setSavedSnapshot(currentSnapshot);
       snackbar.success('Tenant Settings saved successfully');
     }
   };
 
-  const handleFeatureChoice = (featureValue, choice) => {
+  // Feature toggles apply immediately -- optimistically flip the Switch, persist the one flag,
+  // and roll back to the pre-toggle value if the write fails so the UI never shows a change that isn't live.
+  const handleFeatureChoice = async (featureValue, choice) => {
+    if (!canEdit) return;
+    const feature = featureOptions.find((f) => f.value === featureValue);
+    const prevChoice = featureChoices[featureValue] || 'default';
     setFeatureChoices((prev) => ({ ...prev, [featureValue]: choice }));
+    setSavingFeatures((prev) => ({ ...prev, [featureValue]: true }));
+    try {
+      const response = await updateTenantFeatureFlag([
+        { feature_id: featureValue, status: storedFromDisplayed(choice, feature?.stored_value_inverted) },
+      ]);
+      if (response?.data?.errors) {
+        setFeatureChoices((prev) => ({ ...prev, [featureValue]: prevChoice }));
+        snackbar.error(`Failed to update feature - ${parseHttpResponseBodyMessage(response.data)}`);
+        return;
+      }
+      fetchFeatureFlagsForTenant(true).catch((err) => console.error('Failed to refresh feature flags cache:', err)); // refresh cache
+      snackbar.success(`${feature?.display_name || featureValue} ${choice === 'on' ? 'enabled' : 'disabled'}.`);
+    } catch (error) {
+      setFeatureChoices((prev) => ({ ...prev, [featureValue]: prevChoice }));
+      snackbar.error(`Failed to update feature - ${parseHttpResponseBodyMessage(error)}`);
+    } finally {
+      setSavingFeatures((prev) => {
+        const next = { ...prev };
+        delete next[featureValue];
+        return next;
+      });
+    }
   };
 
   const buildFeatureRow = (f) => {
@@ -684,6 +742,7 @@ const TenantSettings = () => {
             feature={f}
             choice={featureChoices[f.value] || 'default'}
             canEdit={canEdit}
+            saving={!!savingFeatures[f.value]}
             onChange={(choice) => handleFeatureChoice(f.value, choice)}
           />
         ),
@@ -798,21 +857,7 @@ const TenantSettings = () => {
 
             {/* handleSaveSettings commits pending changes from all tabs at once, not just
                 General's -- each tab/subtab just carries its own Save button to this one handler. */}
-            {canEdit && (
-              <Box
-                sx={{
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  mt: ds.space[5],
-                  pt: ds.space[4],
-                  borderTop: `1px solid ${ds.gray[200]}`,
-                }}
-              >
-                <Button size='md' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                  Save
-                </Button>
-              </Box>
-            )}
+            {canEdit && <SaveFooter onSave={handleSaveSettings} loading={loading} disabled={!isDirty} />}
           </Card>
         )}
 
@@ -834,20 +879,7 @@ const TenantSettings = () => {
               ariaLabel='Label mapping'
             />
             {activeLabelTab === 'log' && (
-              <Card
-                variant='outlined'
-                elevation='flat'
-                header={
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: ds.space[3] }}>
-                    <SectionHeader description='Map Logs label keys to product concepts.' />
-                    {canEdit && (
-                      <Button size='sm' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                        Save
-                      </Button>
-                    )}
-                  </Box>
-                }
-              >
+              <Card variant='outlined' elevation='flat' header={<SectionHeader description='Map Logs label keys to product concepts.' />}>
                 <Box display='flex' flexDirection='column' gap={ds.space[3]}>
                   <TenantAccountCommonSettings idPrefix='log-label' settings={logSettings} setSettings={setLogSettings} disabled={!canEdit} />
                   {/* This card maps label names only. Two boxes used to sit below the grid and
@@ -860,6 +892,7 @@ const TenantSettings = () => {
                     integration &rarr; Advanced Settings &rarr; Default Log Filters.
                   </Typography>
                 </Box>
+                {canEdit && <SaveFooter onSave={handleSaveSettings} loading={loading} disabled={!isDirty} />}
               </Card>
             )}
 
@@ -868,14 +901,7 @@ const TenantSettings = () => {
                 variant='outlined'
                 elevation='flat'
                 header={
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: ds.space[3] }}>
-                    <SectionHeader description="Map your trace backend's field names onto the canonical trace fields. Leave a field blank to use the provider default." />
-                    {canEdit && (
-                      <Button size='sm' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                        Save
-                      </Button>
-                    )}
-                  </Box>
+                  <SectionHeader description="Map your trace backend's field names onto the canonical trace fields. Leave a field blank to use the provider default." />
                 }
               >
                 <TenantAccountCommonSettings
@@ -888,6 +914,7 @@ const TenantSettings = () => {
                   setSettings={setTraceSettings}
                   disabled={!canEdit}
                 />
+                {canEdit && <SaveFooter onSave={handleSaveSettings} loading={loading} disabled={!isDirty} />}
               </Card>
             )}
 
@@ -895,16 +922,7 @@ const TenantSettings = () => {
               <Card
                 variant='outlined'
                 elevation='flat'
-                header={
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: ds.space[3] }}>
-                    <SectionHeader description='Map alert label keys to event fields. Order matters — first non-empty value is used.' />
-                    {canEdit && (
-                      <Button size='sm' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                        Save
-                      </Button>
-                    )}
-                  </Box>
-                }
+                header={<SectionHeader description='Map alert label keys to event fields. Order matters — first non-empty value is used.' />}
               >
                 <Box display='flex' flexDirection='column' gap={ds.space[3]}>
                   <Typography sx={{ color: ds.gray[600], fontSize: ds.text.body, lineHeight: ds.space.mul(0, 10) }}>
@@ -951,6 +969,7 @@ const TenantSettings = () => {
                     disabled={!canEdit}
                   />
                 </Box>
+                {canEdit && <SaveFooter onSave={handleSaveSettings} loading={loading} disabled={!isDirty} />}
               </Card>
             )}
           </Box>
@@ -970,11 +989,6 @@ const TenantSettings = () => {
                     )} capabilities are active for your tenant. Toggle a feature on or off, changes apply immediately.`}
                   />
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[3] }}>
-                    {canEdit && (
-                      <Button size='sm' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                        Save
-                      </Button>
-                    )}
                     <Button
                       composition='icon-only'
                       tone='ghost'
@@ -982,6 +996,9 @@ const TenantSettings = () => {
                       icon={showFlagIds ? <VisibilityOffOutlinedIcon sx={{ fontSize: 16 }} /> : <VisibilityOutlinedIcon sx={{ fontSize: 16 }} />}
                       aria-label={showFlagIds ? 'Hide flag ids' : 'Show flag ids'}
                       tooltip={showFlagIds ? 'Hide flag ids' : 'Show flag ids'}
+                      // Flip off so swapping the label on click can't re-flip the tooltip and flicker.
+                      tooltipPlacement='top'
+                      tooltipDisableFlip
                       onClick={() => setShowFlagIds((v) => !v)}
                     />
                   </Box>
@@ -1017,8 +1034,8 @@ const TenantSettings = () => {
           page tab, not a modal. Switching to another Admin tab remounts this one
           fresh (ErrorBoundary's key in user-management/index.jsx), so navigating
           away already discards unsaved edits the same way Cancel used to.
-          Every tab (General, Labels' three subtabs, Features) carries its own Save
-          in its card header/footer now -- no shared bottom bar. */}
+          General and the three Labels subtabs each carry their own Save; Features has
+          no Save because its toggles apply immediately on change -- no shared bottom bar. */}
     </>
   );
 };

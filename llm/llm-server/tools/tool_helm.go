@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"nudgebee/llm/common"
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
@@ -10,6 +11,10 @@ import (
 
 const ToolExecuteHelmCommand = "helm_execute"
 
+// InferHelmRequestType is shared by the tool and workspace proxy so target
+// authorization uses the same command classification on both sides.
+func InferHelmRequestType(command string) core.ToolRequestType { return inferHelmRequestType(command) }
+
 func init() {
 	core.RegisterNBToolFactory(ToolExecuteHelmCommand, func(accountId string) (core.NBTool, error) {
 		return HelmExecuteTool{}, nil
@@ -17,6 +22,24 @@ func init() {
 }
 
 type HelmExecuteTool struct {
+}
+
+func (m HelmExecuteTool) ConfirmationKey(toolInput string) string {
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	requested, err := RequestedHelmCluster(req.Command, req.Arguments)
+	if err != nil {
+		return m.Name() + "@" + toolInput
+	}
+	return targetConfirmationKey(m.Name(), requested)
+}
+
+func (m HelmExecuteTool) RequestedTarget(toolInput string) (string, error) {
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	return RequestedHelmCluster(req.Command, req.Arguments)
+}
+
+func RequestedHelmCluster(command string, args map[string]any) (string, error) {
+	return requestedTarget(command, args, "cluster", "--kube-context", "cluster")
 }
 
 func (m HelmExecuteTool) Name() string {
@@ -34,13 +57,14 @@ func (m HelmExecuteTool) GetType() core.NBToolType {
 func (m HelmExecuteTool) ShellCommandPrefixes() []string { return []string{"helm"} }
 
 func (m HelmExecuteTool) Description() string {
-	return `Executes 'helm' commands against the user's Kubernetes cluster. This tool allows you to gather information about the cluster's resources and configuration, enabling you to provide informed assistance and suggestions.
+	return `Executes 'helm' commands against a connected Kubernetes cluster. This tool allows you to gather information about the cluster's resources and configuration, enabling you to provide informed assistance and suggestions.
 
 		**Usage:**
 
 		* **Prioritize this tool:** Whenever you require information about the user's cluster to make decisions or provide accurate responses, use this tool. 
 		* **Input:** Provide a valid, 'helm' command as input.
 		* **Output:** The tool will return the output of the executed command.
+		* **Cluster:** Pass the connected cluster name in 'cluster' to target another authorized cluster. Results from another cluster identify that cluster.
 
 		**Examples:**
 
@@ -62,6 +86,7 @@ func (m HelmExecuteTool) Description() string {
 func (m HelmExecuteTool) ToolPrompt() []string {
 	return []string{
 		"**Kubernetes Interaction:** Always use `helm` to interact with the cluster. Avoid other shell commands unless essential for formatting or context and explicitly requested by the user.",
+		"**Cluster selection:** If the task names another connected cluster, pass its exact name in the `cluster` argument on each `helm_execute` call. `helm --kube-context <name>` also selects that cluster. Never infer a cluster from a release name.",
 		"**Namespace Awareness:** Never assume a namespace. Always specify it using `-n <namespace>` or use `--all-namespaces` for cluster-wide queries. If the user doesn't provide a namespace, ask for clarification.",
 		"**Large Data Optimization:** When output is voluminous, pipe through `grep`, `tail`, `head`, or other formatting tools for readability.",
 		"You can ONLY use helm to interact with the cluster.",
@@ -80,6 +105,10 @@ func (m HelmExecuteTool) InputSchema() core.ToolSchema {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Helm command to execute",
 			},
+			"cluster": {
+				Type:        core.ToolSchemaTypeString,
+				Description: "Optional connected Kubernetes cluster name. Omit to use the current cluster.",
+			},
 		},
 		Required: []string{"command"},
 	}
@@ -89,11 +118,39 @@ func (m HelmExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NB
 
 	nbRequestContext.Ctx.GetLogger().Info("helm: executing executeShellCommand tool call", "query", input.Command)
 	command := strings.TrimSpace(input.Command)
+	requested, err := RequestedHelmCluster(command, input.Arguments)
+	if err != nil {
+		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
+	}
+	target, err := ResolveKubernetesTarget(nbRequestContext, nbRequestContext.ToolConfig, requested)
+	if err != nil {
+		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
+	}
+	if target.Name == "" && requested == "" {
+		// Helm historically falls back to the conversation's workspace account
+		// when it has no saved config. Keep that default for existing callers.
+		target = core.ToolConfig{Values: []core.ToolConfigValue{{Name: "id", Value: nbRequestContext.AccountId}}}
+	}
+	crossCluster := !strings.EqualFold(target.Name, nbRequestContext.ToolConfig.Name)
+	// Account-agent configs are placeholders ("Agent") without a cluster ID.
+	// An untargeted Helm call must use the workspace account, not send that
+	// placeholder to the proxy as though it were a concrete cluster name.
+	var env map[string]string
+	if crossCluster {
+		_, commandWithoutContext := scanValueFlags(command, "--kube-context")
+		if inferHelmRequestType(commandWithoutContext) != core.ToolRequestTypeRead {
+			if err := CheckShellTargetWriteAccess(nbRequestContext.Ctx, target); err != nil {
+				return core.NBToolResponse{}, err
+			}
+		}
+		env, err = KubernetesTargetEnv(nbRequestContext, target)
+		if err != nil {
+			return core.NBToolResponse{}, err
+		}
+	}
 
 	wm := workspace.NewWorkspaceManager()
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, map[string]string{
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 	if err != nil {
 		// Pipeline-tail no-match reclassification (issue #32240).
 		// Same as kubectl_execute: `helm list -A | grep <name>` with
@@ -101,11 +158,17 @@ func (m HelmExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NB
 		// the helpers from tool_shell.go (PR #32007).
 		if isNoMatchExit(err, command) {
 			nbRequestContext.Ctx.GetLogger().Info("helm: reclassified pipeline-tail no-match as success", "command", command)
+			if crossCluster {
+				return successResponseNoMatchesOnCluster(nbRequestContext, response, target.Name)
+			}
 			return successResponseNoMatches(nbRequestContext, response)
 		}
 		nbRequestContext.Ctx.GetLogger().Error("helm: unable to execute shell script", "error", err.Error(), "command", command)
 		if response == "" {
 			response = err.Error()
+		}
+		if crossCluster {
+			response = fmt.Sprintf("[cluster: %s] %s", target.Name, response)
 		}
 		return core.NBToolResponse{
 			Data:   cliRecoveryEnvelope(response, "", "helm", "helm <command> --help"),
@@ -115,6 +178,9 @@ func (m HelmExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NB
 
 	outputformat := map[string]string{
 		"stdout": response,
+	}
+	if crossCluster {
+		outputformat["cluster"] = target.Name
 	}
 	outputformatBytes, err := common.MarshalJson(outputformat)
 	if err != nil {

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import cast, Dict, Any
+from typing import Callable, cast, Dict, Any
 import pandas as pd
 import numpy as np
 from uuid import UUID
@@ -41,6 +41,28 @@ class AnomalyType(str, Enum):
 
 
 @dataclass(frozen=True)
+class MetricKey:
+    """One utilisation key this metric is built from, and what its absence means.
+
+    `zero_when_absent` is the whole contract, and it is per KEY rather than per metric
+    because the two halves of a ratio mean opposite things when they come back empty.
+
+    A counter-derived key returns NOTHING when its label combination never occurred —
+    not zero. For an error count that is the normal state of a healthy service (measured
+    on dev: 299 workloads have HTTP series, only 68 have ever returned a 4xx/5xx), so
+    treating it as "no data" would cancel detection for the workloads that are fine.
+    Its denominator is the opposite: no requests at all genuinely is no data.
+
+    Usage keys (cpu, memory, replicas) are the simple case — the series exists whenever
+    the workload does, so an idle workload reads 0 and an empty answer really does mean
+    there is nothing to detect on. Those leave this False.
+    """
+
+    name: str
+    zero_when_absent: bool = False
+
+
+@dataclass(frozen=True)
 class MetricSpec:
     """Per-metric configuration consumed by the detection engine.
 
@@ -51,11 +73,17 @@ class MetricSpec:
     are intentionally not migrated — a future per-metric-tuning step is the place to wire them.
     """
 
-    query_fmt: str
-    default_threshold: float
-    dbscan_eps: float
-    dbscan_min_samples: int
-    step: str  # Prometheus step for this metric (was step_map)
+    # Either `utilisation_keys` (preferred: api-server builds the provider's native query
+    # from the key name) or `query_fmt` (raw PromQL, for metrics no key answers yet).
+    query_fmt: str = ""
+    utilisation_keys: tuple[MetricKey, ...] = ()
+    # Combines the fetched key series into the one series the detector reads. Required
+    # when utilisation_keys names more than one key, unused otherwise.
+    combine: Callable[..., pd.Series] | None = None
+    default_threshold: float = 0.0
+    dbscan_eps: float = 0.5
+    dbscan_min_samples: int = 5
+    step: str = "2m"  # Prometheus step for this metric (was step_map)
     time_range: str = "1m"  # passed to query_fmt.format(); current templates use literal windows
     trim_leading_zeros: bool = False  # was METRICS_TO_TRIM membership (memory/cpu only)
     real_data_threshold: float = 0.0  # was REAL_DATA_THRESHOLD (value above which data is "real")
@@ -64,10 +92,47 @@ class MetricSpec:
     min_sustained_points: int = 1
 
 
+@dataclass(frozen=True)
+class _KeyedColumn:
+    """The shape fetch_metrics expects for a column answered by a utilisation key.
+
+    fetch_metrics dispatches on the presence of `utilisation_key`: a column that has one
+    is asked for BY NAME and the account's default metrics provider answers it; a plain
+    PromQL string still goes straight to Prometheus.
+    """
+
+    utilisation_key: str
+    namespace: str
+    deployment_name: str
+
+
+def _errorrate_laplace(errors: pd.Series, requests: pd.Series) -> pd.Series:
+    """Laplace-smoothed error rate: errors / (requests + K).
+
+    Lives here rather than inside a PromQL string so the smoothing is visible and
+    testable, and so the two counts can come from whichever provider answers them.
+    K is calibrated for the spec's 2m bucket — the count keys return an increase over
+    the REQUESTED step, so changing ERRORRATE's step without re-deriving K silently
+    changes how much smoothing is applied.
+    """
+    errors, requests = errors.align(requests, join="outer", fill_value=0.0)
+    return errors / (requests + ERRORRATE_LAPLACE_K)
+
+
 METRIC_SPECS: Dict[AnomalyType, MetricSpec] = {
     AnomalyType.MEMORY: MetricSpec(
-        query_fmt='(max(max_over_time(container_memory_working_set_bytes{{ __CLUSTER__ namespace="{namespace}", '
-        'pod=~"{deployment}.*"}}[1m])) or vector(0))',
+        # Was max(max_over_time(container_memory_working_set_bytes{pod=~"<wl>.*"}[1m])).
+        # Two shape changes, both deliberate: the key sums a pod's containers before
+        # taking the max across pods (the old form took the max of any single container
+        # series), and it drops the 1m rolling max, which lagged falls without changing
+        # rises.
+        #
+        # It does NOT change which pods are selected. The key still matches
+        # pod=~"<wl>-.*", so a workload whose name prefixes another's still picks up the
+        # sibling's pods -- measured, both forms match 3 pods for services-server, 2 of
+        # them services-server-worker's. That selector is fixed separately; this spec
+        # inherits the fix when it lands.
+        utilisation_keys=(MetricKey("memory_usage_max_pod"),),
         default_threshold=50 * 1024 * 1024,  # 50 MB
         dbscan_eps=0.3,  # Tighter for memory (stable patterns)
         dbscan_min_samples=10,
@@ -77,8 +142,10 @@ METRIC_SPECS: Dict[AnomalyType, MetricSpec] = {
         real_data_threshold=0.0,
     ),
     AnomalyType.CPU: MetricSpec(
-        query_fmt='(sum(rate(container_cpu_usage_seconds_total{{  __CLUSTER__  namespace="{namespace}"'
-        ', pod=~"{deployment}.*", image!="", pod!=""}}[5m])) or vector(0))',
+        # Same [5m] rate window and the same pod selector as the query this replaces, so
+        # the series is unchanged. This is a pure provider-portability move; the sibling
+        # over-match noted on MEMORY above applies here too and is fixed separately.
+        utilisation_keys=(MetricKey("cpu_usage"),),
         default_threshold=0.5,  # only flag significant usage
         dbscan_eps=0.4,  # Medium for CPU
         dbscan_min_samples=8,
@@ -88,13 +155,19 @@ METRIC_SPECS: Dict[AnomalyType, MetricSpec] = {
         real_data_threshold=0.1,
     ),
     AnomalyType.ERRORRATE: MetricSpec(
-        # Laplace-smoothed error rate: error count / (total request count + K). The +K denominator
-        # gate means low-traffic moments (1 error / 1 request) yield ~1/(1+K) instead of 100%,
-        # removing the dominant source of error-rate noise. High-volume rates are ~unchanged.
-        query_fmt='(sum(increase(container_http_requests_total{{ __CLUSTER__ destination_workload_name="{deployment}",'
-        'destination_workload_namespace="{namespace}", status=~"^[45][0-9][0-9]$"}}[2m])) or vector(0))'
-        ' / ((sum(increase(container_http_requests_total{{ __CLUSTER__ destination_workload_name="{deployment}",'
-        'destination_workload_namespace="{namespace}"}}[2m])) or vector(0)) + ' + str(ERRORRATE_LAPLACE_K) + ")",
+        # Laplace-smoothed error rate: error count / (total request count + K). The +K
+        # denominator gate means low-traffic moments (1 error / 1 request) yield
+        # ~1/(1+K) instead of 100%, removing the dominant source of error-rate noise.
+        # High-volume rates are ~unchanged. The division now happens in _errorrate_laplace
+        # rather than inside PromQL.
+        #
+        # Note the asymmetry: an absent error count means "no errors" and is zero-filled,
+        # while an absent request count means no traffic at all, which is no data.
+        utilisation_keys=(
+            MetricKey("workload_http_error_count", zero_when_absent=True),
+            MetricKey("workload_http_request_count"),
+        ),
+        combine=_errorrate_laplace,
         default_threshold=0.05,  # 5% error rate (raised from 0.5% so sub-5% blips are ignored)
         dbscan_eps=0.8,  # Looser for sparse error data
         dbscan_min_samples=3,
@@ -103,8 +176,10 @@ METRIC_SPECS: Dict[AnomalyType, MetricSpec] = {
         min_sustained_points=3,  # require ~6 min (3 x 2m) of sustained errors, not a one-off blip
     ),
     AnomalyType.REPLICAS: MetricSpec(
-        query_fmt="(avg(kube_deployment_status_replicas{{ __CLUSTER__ "
-        'namespace="{namespace}", deployment="{deployment}"}}) or vector(0))',
+        # Was avg(kube_deployment_status_replicas) -- the replicas that currently EXIST,
+        # which moves during every rollout. replica_defined is the DESIRED count, so the
+        # detector now reacts to scaling decisions rather than to rollout churn.
+        utilisation_keys=(MetricKey("replica_defined"),),
         default_threshold=0.1,  # fractional change in replicas
         dbscan_eps=1.0,  # Very loose (discrete values)
         dbscan_min_samples=3,
@@ -112,9 +187,12 @@ METRIC_SPECS: Dict[AnomalyType, MetricSpec] = {
         time_range="1m",
     ),
     AnomalyType.LATENCY: MetricSpec(
-        query_fmt="(histogram_quantile(0.99, sum(rate(container_http_requests_duration_seconds_bucket{{"
-        '  __CLUSTER__  actual_destination_workload_name="{deployment}", actual_destination_workload_namespace="{'
-        'namespace}"}}[2m])) by (le)) or vector(0))',
+        # Never fired (#39260). The PromQL named a metric that does not exist and matched
+        # a pod-name label as if it held workload names; `or vector(0)` turned both into
+        # a flat zero series, so the detector trained on zeros and reported nothing. The
+        # key gets both right. Absent now cancels: no HTTP traffic means no latency to
+        # find an anomaly in, and zero-filling is what hid this.
+        utilisation_keys=(MetricKey("workload_http_latency_p99"),),
         default_threshold=0.5,  # seconds
         dbscan_eps=0.6,  # Medium-tight for latency
         dbscan_min_samples=5,
@@ -329,14 +407,94 @@ class AnomalyAlgoAbstract:
     _MEM_SUSTAINED_POINTS = 10  # consecutive elevated eval points to call it a sustained step/leak.
     _MEM_SUSTAINED_FACTOR = 1.5  # "elevated" = value > train_p99 * this.
 
-    def load_data_from_prometheus(
-        self, account_id: str, query: str, start_time=None, end_time=None, step=None, tenant_id: str = ""
+    def load_metric_series(
+        self, spec: "MetricSpec", config, start_time=None, end_time=None
     ) -> tuple[pd.Series | None, dict]:
-        """Load data from Prometheus and return both data and labels.
+        """Fetch a spec's series, by utilisation key where it has one.
+
+        A spec naming keys is fetched one key at a time and combined; a spec still
+        carrying PromQL takes the old path unchanged.
+
+        Returning None means "no data" and the caller cancels the prediction. Which
+        absences count as no data is declared per key by `zero_when_absent` -- see
+        MetricKey. Getting that wrong is not a loud failure: a detector that cancels
+        every run looks exactly like a workload with nothing wrong.
+        """
+        account_id = self.config.account_id
+        tenant_id = str(config.tenant_id or "")
+
+        if not spec.utilisation_keys:
+            query = spec.query_fmt.format(
+                namespace=self.config.namespace,
+                deployment=self.config.deployment,
+                time_range=spec.time_range,
+            )
+            return self.load_data_from_prometheus(
+                account_id,
+                query,
+                start_time=start_time,
+                end_time=end_time,
+                step=config.step,
+                tenant_id=tenant_id,
+            )
+
+        fetched: list[pd.Series] = []
+        labels: dict = {}
+        for key in spec.utilisation_keys:
+            column = _KeyedColumn(
+                utilisation_key=key.name,
+                namespace=self.config.namespace,
+                deployment_name=self.config.deployment,
+            )
+            series, key_labels = self.load_data_from_prometheus(
+                account_id,
+                column,
+                start_time=start_time,
+                end_time=end_time,
+                step=config.step,
+                tenant_id=tenant_id,
+            )
+            if series is None:
+                if not key.zero_when_absent:
+                    logger.warning(
+                        "anomaly: key returned no data and is required",
+                        extra={
+                            "key": key.name,
+                            "namespace": self.config.namespace,
+                            "deployment": self.config.deployment,
+                            "account_id": account_id,
+                        },
+                    )
+                    return None, {}
+                # Absent but meaningful: the label combination never occurred, which for
+                # a counter means zero, not missing. Shaped in align() by its sibling.
+                series = pd.Series(dtype="float64")
+            fetched.append(series)
+            labels = labels or key_labels
+
+        if len(fetched) == 1:
+            return fetched[0], labels
+        if spec.combine is None:
+            raise ValueError(f"spec names {len(fetched)} keys but has no combine function")
+        combined = spec.combine(*fetched)
+        if combined is None or combined.empty:
+            return None, {}
+        return combined, labels
+
+    def load_data_from_prometheus(
+        self, account_id: str, column, start_time=None, end_time=None, step=None, tenant_id: str = ""
+    ) -> tuple[pd.Series | None, dict]:
+        """Load one column and return both data and labels.
+
+        `column` is either raw PromQL (answered by Prometheus directly) or a
+        _KeyedColumn (answered by name, by the account's default provider). fetch_metrics
+        tells the two apart; everything below is identical either way.
 
         Returns:
-            Tuple of (data_series, labels_dict)
+            Tuple of (data_series, labels_dict) -- (None, {}) when nothing came back,
+            which the caller turns into a CancelPrediction.
         """
+        query = column if isinstance(column, str) else column.utilisation_key
         if start_time is None:
             start_time = pd.Timestamp.now() - pd.Timedelta(days=14)
 
@@ -344,7 +502,7 @@ class AnomalyAlgoAbstract:
             end_time = pd.Timestamp.now()
 
         response = fetch_metrics(
-            [query],
+            [column],
             start_time=start_time,
             end_time=end_time,
             step=step,
@@ -461,22 +619,12 @@ class AnomalyAlgoAbstract:
         if spec is None:
             raise ValueError(f"Invalid anomaly type: {self.config.anomaly_type}")
 
-        # 3) Build the final query (templates use fixed literal windows; time_range is passed
-        # for backward compatibility but no current template references it).
-        query = spec.query_fmt.format(
-            namespace=self.config.namespace,
-            deployment=self.config.deployment,
-            time_range=spec.time_range,
-        )
-
-        # 6) Load historical training data only if needed
-        data, _ = self.load_data_from_prometheus(
-            self.config.account_id,
-            query,
+        # 3/6) Load historical training data, by utilisation key where the spec names one.
+        data, _ = self.load_metric_series(
+            spec,
+            config,
             start_time=config.start_time,
             end_time=config.end_time,
-            step=config.step,
-            tenant_id=str(config.tenant_id or ""),
         )
         if data is None:
             logger.warning(f"anomaly :got no data for config {config.model_dump_json()} aborting")

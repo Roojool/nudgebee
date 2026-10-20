@@ -30,7 +30,14 @@ const NodeList = ({ nodeData, showNodes }) => {
         open={nodesModal}
         handleClose={closeNodesModal}
         title={
-          <Box display={'flex'} alignItems={'center'} gap={ds.space.mul(0, 5)} fontSize={ds.text.title} fontWeight={600} color={ds.gray[700]}>
+          <Box
+            display={'flex'}
+            alignItems={'center'}
+            gap={ds.space.mul(0, 5)}
+            fontSize={ds.text.title}
+            fontWeight={ds.weight.semibold}
+            color={ds.gray[700]}
+          >
             Instances
           </Box>
         }

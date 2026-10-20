@@ -117,7 +117,7 @@ const ExecutionSummaryCards: React.FC<ExecutionSummaryCardsProps> = ({ aggregate
       />
 
       <Box sx={{ margin: 'var(--ds-space-4) 0 0', flex: 1, display: 'flex', alignItems: 'flex-end' }}>
-        <Divider />
+        <Divider sx={{ flex: 1, alignSelf: 'flex-end' }} />
       </Box>
 
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)', paddingTop: 'var(--ds-space-4)' }}>

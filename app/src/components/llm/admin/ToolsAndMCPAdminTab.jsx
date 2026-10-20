@@ -17,7 +17,7 @@ import { ds } from '@utils/colors';
  * equivalent is the LLM one, restored when Providers got its own tab; this one
  * was missed in the initial move and is restored here.
  */
-const ToolsAndMCPAdminTab = () => {
+const ToolsAndMCPAdminTab = ({ stickyTable = false }) => {
   const [activeSubTab, setActiveSubTab] = useState('tools');
   const [accountId, setAccountId] = useState('');
 
@@ -52,8 +52,8 @@ const ToolsAndMCPAdminTab = () => {
           </Box>
         )}
       </Box>
-      {activeSubTab === 'tools' && <ListTools accountId={accountId} stickyTable />}
-      {activeSubTab === 'mcp' && <MCPConfigList stickyTable />}
+      {activeSubTab === 'tools' && <ListTools accountId={accountId} stickyTable={stickyTable} />}
+      {activeSubTab === 'mcp' && <MCPConfigList stickyTable={stickyTable} />}
     </Box>
   );
 };

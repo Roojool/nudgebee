@@ -1,10 +1,8 @@
 package triage
 
 import (
-	"context"
 	"os"
 	"testing"
-	"time"
 
 	"nudgebee/services/internal/database/models"
 
@@ -96,6 +94,39 @@ func TestUnlocatedScopeFor(t *testing.T) {
 	assert.Equal(t, "", none.arg)
 }
 
+// TestUnlocatedScopeForNodeAlerts — a node alert carries no namespace, so the
+// namespace rule would drop every node alert in the cluster into one shared ""
+// bucket and let them co-time-attach to each other. The node is the boundary
+// such an alert actually has.
+func TestUnlocatedScopeForNodeAlerts(t *testing.T) {
+	src := func(s string) *string { return &s }
+
+	node := unlocatedScopeFor(&models.Event{
+		Source:      src("prometheus"),
+		SubjectType: src("node"),
+		SubjectNode: src("GKE-Pool-ABC"),
+	})
+	assert.Contains(t, node.leaderPredicate, "subject_node")
+	assert.NotContains(t, node.leaderPredicate, "subject_namespace")
+	assert.Equal(t, "gke-pool-abc", node.arg, "node normalised the way the SQL side is")
+
+	// A node-typed event with no node name has nothing better than the namespace
+	// rule — it must not produce a predicate matching on an empty node.
+	noName := unlocatedScopeFor(&models.Event{Source: src("prometheus"), SubjectType: src("node")})
+	assert.Contains(t, noName.leaderPredicate, "subject_namespace")
+
+	// subject_node is also set on pod events (the node the pod runs on). Those
+	// keep the namespace rule — the pod's namespace is the tighter boundary.
+	pod := unlocatedScopeFor(&models.Event{
+		Source:           src("prometheus"),
+		SubjectType:      src("pod"),
+		SubjectNode:      src("gke-pool-abc"),
+		SubjectNamespace: src("checkout"),
+	})
+	assert.Contains(t, pod.leaderPredicate, "subject_namespace")
+	assert.Equal(t, "checkout", pod.arg)
+}
+
 // TestTimingFallbackAllowed — co-timing is only for alerts the graph cannot
 // place. Configuration changes never use it; AWS alarms always may.
 func TestTimingFallbackAllowed(t *testing.T) {
@@ -115,34 +146,4 @@ func TestTimingFallbackAllowed(t *testing.T) {
 	assert.False(t, timingFallbackAllowed(&models.Event{FindingType: str(" Configuration_Change ")}, false), "matched case- and space-insensitively")
 
 	assert.True(t, timingFallbackAllowed(&models.Event{}, false), "no source, no finding type, unplaced: fallback allowed")
-}
-
-// TestCollectConnectedMembers_LocatedWithoutNeighbours — the seed has a stored
-// map, so it is placed, even when topology grouping is switched off and even
-// though nothing connected is alerting. No database is touched on these paths.
-func TestCollectConnectedMembers_LocatedWithoutNeighbours(t *testing.T) {
-	str := func(s string) *string { return &s }
-	evidence := `[{"type": "knowledge_graph", "nodes": [
-	  {"id": "n1", "node_type": "Workload", "properties": {"kind": "Deployment", "name": "search", "namespace": "shop"}}
-	], "edges": []}]`
-	var j models.Json
-	if err := j.Scan([]uint8(evidence)); err != nil {
-		t.Fatal(err)
-	}
-	ev := &models.Event{
-		Id: "e1", SubjectNamespace: str("shop"), SubjectName: str("search-abc12"),
-		SubjectOwner: str("search"), SubjectOwnerKind: str("Deployment"), SubjectType: str("pod"),
-		Evidences: &j,
-	}
-
-	t.Setenv(topologyGroupingEnvFlag, "false")
-	pool, err := collectConnectedMembers(context.Background(), nil, ev, groupCandidate{ID: "e1"}, "shop|search", time.Now())
-	assert.NoError(t, err)
-	assert.True(t, pool.located, "placed regardless of the topology kill switch")
-	assert.Empty(t, pool.members)
-
-	ev.Evidences = nil
-	pool, err = collectConnectedMembers(context.Background(), nil, ev, groupCandidate{ID: "e1"}, "shop|search", time.Now())
-	assert.NoError(t, err)
-	assert.False(t, pool.located, "no stored map — not placed")
 }

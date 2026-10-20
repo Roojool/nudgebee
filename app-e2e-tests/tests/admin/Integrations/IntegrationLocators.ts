@@ -146,6 +146,7 @@ export class IntegrationLocators extends CommonLocators {
   readonly confluenceTokenInput!: Locator;
   readonly confluenceUserNameInput!: Locator;
   readonly confluenceSuccessToast!: Locator;
+  readonly confluenceUpdateSuccessToast!: Locator;
   readonly confluenceDuplicateErrorToast!: Locator;
   readonly confluenceTestConnectionBtn!: Locator;
   readonly confluenceTestConnectionSuccessToast!: Locator;
@@ -241,6 +242,8 @@ export class IntegrationLocators extends CommonLocators {
   readonly mcpLlmInstructionsInput!: Locator;
   readonly mcpSuccessToast!: Locator;
   readonly mcpDuplicateErrorToast!: Locator;
+  readonly mcpTestConnectionBtn!: Locator;
+  readonly mcpTestConnectionSuccessToast!: Locator;
 
   constructor(page: Page) {
     super(page);
@@ -536,6 +539,10 @@ export class IntegrationLocators extends CommonLocators {
     this.confluenceDuplicateErrorToast = page.getByText("already exists", {
       exact: false,
     });
+    this.confluenceUpdateSuccessToast = page.getByText(
+      "Confluence account updated successfully",
+      { exact: false },
+    );
     this.confluenceTestConnectionBtn = page.locator("#test-connection-btn")
       .or(page.getByRole("button", { name: /test connection/i }));
     this.confluenceTestConnectionSuccessToast = page.getByText("connection successful", { exact: false });
@@ -693,6 +700,9 @@ export class IntegrationLocators extends CommonLocators {
     this.mcpDuplicateErrorToast = page.getByText("already exists", {
       exact: false,
     });
+    this.mcpTestConnectionBtn = page.locator("#test-connection-btn")
+      .or(page.getByRole("button", { name: /test connection/i }));
+    this.mcpTestConnectionSuccessToast = page.getByText("connection successful", { exact: false });
   }
 
   getIntegrationByName(name: string): Locator {

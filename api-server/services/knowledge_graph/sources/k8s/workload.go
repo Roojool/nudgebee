@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/knowledge_graph/core"
-	"strings"
 	"time"
 
 	"github.com/lib/pq"
@@ -137,6 +136,18 @@ func init() {
 	core.RegisterSpecificTypeSchema(podSchema)
 }
 
+// workloadRowSelect is the projection every K8sWorkloadRow is read with. Shared
+// by the account build and LoadWorkloadRow so a per-resource update sees the
+// same row shape.
+const workloadRowSelect = `
+		SELECT
+			w.cloud_resource_id as id, w.tenant_id, w.cloud_account_id, w.kind, w.namespace, w.name,
+			ca.account_name as cluster_name, w.is_active, w.meta, w.labels, w.creation_time as created_at, w.creation_time as updated_at,
+			w.last_deployed_time
+		FROM k8s_workloads w
+		LEFT JOIN cloud_accounts ca ON w.cloud_account_id = ca.id
+`
+
 // fetchK8sWorkloads queries K8s workloads from the k8s_workloads table
 func (s *K8sSource) fetchK8sWorkloads(ctx context.Context, req *core.SourceBuildRequest) ([]K8sWorkloadRow, error) {
 	dbManager, err := database.GetDatabaseManager(database.Metastore)
@@ -145,13 +156,7 @@ func (s *K8sSource) fetchK8sWorkloads(ctx context.Context, req *core.SourceBuild
 	}
 
 	// Build query
-	query := `
-		SELECT
-			w.cloud_resource_id as id, w.tenant_id, w.cloud_account_id, w.kind, w.namespace, w.name,
-			ca.account_name as cluster_name, w.is_active, w.meta, w.labels, w.creation_time as created_at, w.creation_time as updated_at,
-			w.last_deployed_time
-		FROM k8s_workloads w
-		LEFT JOIN cloud_accounts ca ON w.cloud_account_id = ca.id
+	query := workloadRowSelect + `
 		WHERE w.tenant_id = $1
 	`
 
@@ -322,33 +327,9 @@ func (s *K8sSource) convertWorkloadsToGraph(workloads []K8sWorkloadRow, k8sNodeM
 		workloadKey := fmt.Sprintf("%s/%s/%s/%s", workload.ClusterName, workload.Kind, workload.Namespace, workload.Name)
 		workloadNode := workloadToNode[workloadKey]
 
-		// Check for git repository annotations and create repository connection
-		if len(workload.Meta) > 0 {
-			var metaMap map[string]interface{}
-			if err := json.Unmarshal(workload.Meta, &metaMap); err == nil {
-				s.createRepositoryConnection(&workload, workloadNode, metaMap, &repositoryNodes, &nodes, &edges, req)
-
-				// Check for Helm labels and create Helm chart nodes if workload is Helm-managed
-				s.createHelmConnection(&workload, workloadNode, metaMap, &helmChartNodes, &repositoryNodes, &nodes, &edges, req)
-			}
-		}
-
-		// Link workload to namespace
+		// Repository, Helm chart and namespace edges come from this row alone.
 		namespaceKey := fmt.Sprintf("%s/%s", workload.ClusterName, workload.Namespace)
-		if namespaceNode, exists := namespaceNodes[namespaceKey]; exists {
-			edge := core.NewEdge(
-				workloadNode.ID,
-				namespaceNode.ID,
-				core.RelationshipRunsOn,
-				map[string]interface{}{
-					"connection_type": "namespace",
-				},
-				req.TenantID,
-				req.CloudAccountID,
-				"k8s",
-			)
-			edges = append(edges, edge)
-		}
+		s.appendWorkloadOwnEdges(&workload, workloadNode, namespaceNodes[namespaceKey], &repositoryNodes, &helmChartNodes, &nodes, &edges, req)
 
 		// Link namespace to cluster
 		if clusterNode, exists := clusterNodes[workload.ClusterName]; exists {
@@ -445,21 +426,92 @@ func (s *K8sSource) convertWorkloadsToGraph(workloads []K8sWorkloadRow, k8sNodeM
 	return nodes, edges, clusterNodes, namespaceNodes, workloadToNode
 }
 
+// appendWorkloadOwnEdges emits the edges a workload derives from its own
+// k8s_workloads row: BUILT_FROM its git repository, IS_CONFIGURED_BY its Helm
+// chart (plus the synthesized Repository/HelmChart nodes), and RUNS_ON its
+// namespace. The account build and the per-resource update both go through this
+// function, so WorkloadEdgeSignature must list exactly what it emits.
+//
+// namespaceNode may be nil, in which case the namespace edge is skipped.
+func (s *K8sSource) appendWorkloadOwnEdges(
+	workload *K8sWorkloadRow,
+	workloadNode *core.DbNode,
+	namespaceNode *core.DbNode,
+	repositoryNodes *map[string]*core.DbNode,
+	helmChartNodes *map[string]*core.DbNode,
+	nodes *[]*core.DbNode,
+	edges *[]*core.DbEdge,
+	req *core.SourceBuildRequest,
+) {
+	// Check for git repository annotations and create repository connection
+	if len(workload.Meta) > 0 {
+		var metaMap map[string]interface{}
+		if err := json.Unmarshal(workload.Meta, &metaMap); err == nil {
+			s.createRepositoryConnection(workload, workloadNode, metaMap, repositoryNodes, nodes, edges, req)
+
+			// Check for Helm labels and create Helm chart nodes if workload is Helm-managed
+			s.createHelmConnection(workload, workloadNode, metaMap, helmChartNodes, repositoryNodes, nodes, edges, req)
+		}
+	}
+
+	// Link workload to namespace
+	if namespaceNode != nil {
+		*edges = append(*edges, core.NewEdge(
+			workloadNode.ID,
+			namespaceNode.ID,
+			core.RelationshipRunsOn,
+			map[string]interface{}{
+				"connection_type": "namespace",
+			},
+			req.TenantID,
+			req.CloudAccountID,
+			"k8s",
+		))
+	}
+}
+
+// extractControllerFields keeps a controller's replica count and rollout strategy.
+func (s *K8sSource) extractControllerFields(properties, spec, metaMap map[string]interface{}) {
+	// Replica count (important for scaling)
+	if replicas, ok := spec["replicas"].(float64); ok {
+		properties["replicas"] = int(replicas)
+	}
+	// Strategy (important for deployments)
+	if strategy, ok := spec["strategy"].(map[string]interface{}); ok {
+		if strategyType, ok := strategy["type"].(string); ok {
+			properties["strategy_type"] = strategyType
+		}
+	}
+}
+
+// extractPodFields keeps where a pod was scheduled and how it is reached.
+func (s *K8sSource) extractPodFields(properties, spec, metaMap map[string]interface{}) {
+	// Node assignment (important for scheduling)
+	if nodeName, ok := spec["nodeName"].(string); ok {
+		properties["node_name"] = nodeName
+	}
+	// Restart policy
+	if restartPolicy, ok := spec["restartPolicy"].(string); ok {
+		properties["restart_policy"] = restartPolicy
+	}
+	// Pod / host IPs from status. These
+	// are indexed in QueryablePropertiesMap[Pod] for scheduling / network
+	// filtering but were never emitted; read them from the already-parsed
+	// status object (no new API call). Guarded — absent on unscheduled Pods.
+	if status, ok := metaMap["status"].(map[string]interface{}); ok {
+		if podIP, ok := status["podIP"].(string); ok && podIP != "" {
+			properties["pod_ip"] = podIP
+		}
+		if hostIP, ok := status["hostIP"].(string); ok && hostIP != "" {
+			properties["host_ip"] = hostIP
+		}
+	}
+}
+
 // createNodeFromWorkload creates a knowledge graph node from a K8s workload
 func (s *K8sSource) createNodeFromWorkload(workload *K8sWorkloadRow, frameworks map[string]string, req *core.SourceBuildRequest) *core.DbNode {
-	// Determine node type based on workload kind
-	var nodeType core.NodeType
-	kind := strings.ToLower(workload.Kind)
-
-	switch kind {
-	case "pod":
-		nodeType = core.NodeTypePod
-	case "service":
-		nodeType = core.NodeTypeK8sService
-	default:
-		// For Deployments, StatefulSets, DaemonSets, etc., use Workload type
-		nodeType = core.NodeTypeWorkload
-	}
+	// What this row builds is declared by its kind (see kinds.go).
+	nodeType := workloadKindFor(workload.Kind).NodeType
 
 	// Build unique key
 
@@ -528,4 +580,54 @@ func (s *K8sSource) createNodeFromWorkload(workload *K8sWorkloadRow, frameworks 
 	}
 	uniqueKey := s.GenerateUniqueKey(tempNode)
 	return core.NewNode(nodeType, uniqueKey, properties, req.TenantID, req.CloudAccountID, "k8s")
+}
+
+// The workload kinds this file builds (see kinds.go). Controllers own their
+// replica count and rollout strategy; the batch kinds own their schedule. Pods
+// churn constantly — the change detector ignores their number and the account
+// build refreshes them — and their node records where they were scheduled.
+func init() {
+	for _, kind := range []string{"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"} {
+		registerWorkloadKind(workloadKind{
+			Kind:      kind,
+			NodeType:  core.NodeTypeWorkload,
+			Inventory: true,
+			Patchable: true,
+			Extract:   (*K8sSource).extractControllerFields,
+		})
+	}
+	// Jobs and CronJobs build Workload nodes today even though their schemas
+	// declare Job and CronJob node types; changing that changes their unique
+	// keys, so it is a change of its own.
+	registerWorkloadKind(workloadKind{
+		Kind:      "Job",
+		NodeType:  core.NodeTypeWorkload,
+		Inventory: true,
+		Churning:  true,
+	})
+	registerWorkloadKind(workloadKind{
+		Kind:      "CronJob",
+		NodeType:  core.NodeTypeWorkload,
+		Inventory: true,
+		Patchable: true,
+	})
+	registerWorkloadKind(workloadKind{
+		Kind:      "Pod",
+		NodeType:  core.NodeTypePod,
+		Inventory: true,
+		Churning:  true,
+		Extract:   (*K8sSource).extractPodFields,
+	})
+}
+
+// workloadEdgeSignature lists the outgoing edges appendWorkloadOwnEdges and the
+// container-image synthesis emit for a workload.
+var workloadEdgeSignature = core.EdgeSignature{
+	Source: "k8s",
+	Kinds: []core.EdgeKind{
+		{Relationship: core.RelationshipRunsOn, ConnectionType: "namespace"},
+		{Relationship: core.RelationshipBuiltFrom, ConnectionType: "repository"},
+		{Relationship: core.RelationshipIsConfiguredBy, ConnectionType: "helm_chart"},
+		{Relationship: core.RelationshipUsesImage},
+	},
 }

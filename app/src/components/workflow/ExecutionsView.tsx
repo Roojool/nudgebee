@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { Alert, Box, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import { Select } from '@ui/Select';
+import { Banner } from '@ui/Banner';
 import { Button } from '@ui/Button';
 import {
   ContentCopy,
@@ -1037,7 +1038,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
     }
 
     return (
-      <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
+      <Box sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
         {typeof data === 'string' ? data : JSON.stringify(data, null, 2)}
       </Box>
     );
@@ -1333,7 +1334,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                               sx={{
                                 fontSize: 'var(--ds-text-caption)',
                                 color: ds.gray[600],
-                                fontFamily: 'monospace',
+                                fontFamily: ds.font.mono,
                                 backgroundColor: 'var(--ds-gray-100)',
                                 border: '1px solid var(--ds-gray-200)',
                                 borderRadius: 'var(--ds-radius-sm)',
@@ -1544,7 +1545,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                         body: (
                           <Box
                             sx={{
-                              fontFamily: 'monospace',
+                              fontFamily: ds.font.mono,
                               fontSize: 'var(--ds-text-caption)',
                               color: 'var(--ds-red-600)',
                               wordBreak: 'break-word',
@@ -1582,7 +1583,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                                 <FormCard title='Inputs' description={''} icon={null} number={''} columns={1}>
                                   <Box
                                     sx={{
-                                      fontFamily: 'monospace',
+                                      fontFamily: ds.font.mono,
                                       fontSize: 'var(--ds-text-caption)',
                                       color: ds.gray[700],
                                       wordBreak: 'break-word',
@@ -1623,7 +1624,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                                 <FormCard title='Result' description={''} icon={null} number={''} columns={1}>
                                   <Box
                                     sx={{
-                                      fontFamily: 'monospace',
+                                      fontFamily: ds.font.mono,
                                       fontSize: 'var(--ds-text-caption)',
                                       color: ds.gray[700],
                                       wordBreak: 'break-word',
@@ -1703,21 +1704,31 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                   falls back to the current draft and may differ from what
                   actually ran. */}
           {executionData?.definition_source === 'draft_run' && (
-            <Alert severity='info' sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
-              This was a draft run (“Run current”) of an unpublished definition. The canvas shows the exact draft that ran, not the live version.
-            </Alert>
+            <Box sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
+              <Banner
+                tone='info'
+                surface='section'
+                message='This was a draft run (“Run current”) of an unpublished definition. The canvas shows the exact draft that ran, not the live version.'
+              />
+            </Box>
           )}
           {executionData?.definition_source === 'legacy_live_snapshot' && (
-            <Alert severity='info' sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
-              This execution predates version tracking — showing the live version snapshot taken at backfill time, which may differ from the exact
-              definition that ran.
-            </Alert>
+            <Box sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
+              <Banner
+                tone='info'
+                surface='section'
+                message='This execution predates version tracking — showing the live version snapshot taken at backfill time, which may differ from the exact definition that ran.'
+              />
+            </Box>
           )}
           {executionData?.definition_source === 'live_fallback' && (
-            <Alert severity='warning' sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
-              This execution predates version tracking and the live snapshot is unavailable — the canvas below reflects the current workflow draft and
-              may differ from what actually ran.
-            </Alert>
+            <Box sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
+              <Banner
+                tone='warning'
+                surface='section'
+                message='This execution predates version tracking and the live snapshot is unavailable — the canvas below reflects the current workflow draft and may differ from what actually ran.'
+              />
+            </Box>
           )}
 
           {/* Canvas has nothing to draw: either no execution is selected (most
@@ -2103,7 +2114,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                         {inlineInputViewMode === 'formatted' ? (
                           renderFormattedField(selectedTaskData.rendered_params ?? selectedTaskData.input ?? {}, 'input')
                         ) : (
-                          <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
+                          <Box sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
                             {JSON.stringify(selectedTaskData.rendered_params ?? selectedTaskData.input ?? {}, null, 2)}
                           </Box>
                         )}
@@ -2200,7 +2211,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                           {inlineOutputViewMode === 'formatted' ? (
                             renderFormattedField(selectedTaskData.output, 'output')
                           ) : (
-                            <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
+                            <Box sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
                               {typeof selectedTaskData.output === 'string'
                                 ? selectedTaskData.output
                                 : JSON.stringify(selectedTaskData.output, null, 2)}
@@ -2271,7 +2282,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                                 border: `1px solid ${ds.red[200]}`,
                                 borderRadius: 'var(--ds-radius-md)',
                                 padding: 'var(--ds-space-3)',
-                                fontFamily: 'monospace',
+                                fontFamily: ds.font.mono,
                                 fontSize: 'var(--ds-text-body)',
                                 wordBreak: 'break-word',
                                 whiteSpace: 'pre-wrap',

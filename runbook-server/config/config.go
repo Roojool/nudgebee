@@ -40,6 +40,14 @@ type appConfig struct {
 	ServiceEndpoint                string `mapstructure:"service_api_server_url"`
 	ServiceApiServerTimeoutSeconds int    `mapstructure:"service_api_server_timeout_seconds"`
 
+	// ServiceCronEndpoint, when set, replaces ServiceEndpoint for the scheduled
+	// cron triggers only (internal/system/cron_triggers.yaml). It exists for a
+	// split services-server: cron handlers run as goroutines on whichever pod
+	// takes the call, so pointing this at the worker Service moves scheduled
+	// jobs off the API pods while every other call keeps using ServiceEndpoint.
+	// Empty means crons follow ServiceEndpoint, as they always have.
+	ServiceCronEndpoint string `mapstructure:"service_api_server_cron_url"`
+
 	BaseUrl string `mapstructure:"base_url"`
 
 	ApprovalSigningKey string `mapstructure:"approval_signing_key"`
@@ -178,6 +186,7 @@ func init() {
 
 	viper.SetDefault("env", "")
 	viper.SetDefault("service_api_server_url", "http://services-server:8000")
+	viper.SetDefault("service_api_server_cron_url", "")
 	viper.SetDefault("service_api_server_timeout_seconds", "10")
 
 	// viper requires default values or bind.. else Unmarshal skips fields with no default values

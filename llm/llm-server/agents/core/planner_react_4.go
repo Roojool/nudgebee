@@ -69,9 +69,12 @@ type NBReActPlanner4 struct {
 	// so computing them inline would turn a once-per-turn DB read
 	// (fetchEvidenceIndex) into a per-iteration one.
 	userContextBlock string
-	evidenceIndex    string
-	orchestratorMode bool
-	humanPrompt      prompts.PromptTemplate
+	// executionTargetsBlock lists the clusters/accounts calls can target;
+	// computed once per planner, like userContextBlock.
+	executionTargetsBlock string
+	evidenceIndex         string
+	orchestratorMode      bool
+	humanPrompt           prompts.PromptTemplate
 
 	// Notebook is the durable investigation state. It is derived at the start of
 	// every Plan() from the update_notebook steps in intermediateSteps (see
@@ -174,6 +177,7 @@ func NewReActAgent4(ctx *security.RequestContext, request NBAgentRequest, nbAgen
 
 	return &NBReActPlanner4{
 		userContextBlock:      userContextBlock,
+		executionTargetsBlock: renderExecutionTargetsBlock(ctx, request, tools),
 		evidenceIndex:         evidenceIndex,
 		orchestratorMode:      orchMode,
 		humanPrompt:           newReact4HumanPromptTemplate(),
@@ -528,6 +532,9 @@ func (o *NBReActPlanner4) Plan(
 		}
 
 		actions, finish, perr := o.parseCompletion(result.Choices[0])
+		if perr == nil && finish == nil && o.agentName() == "elastic_search_metrics" {
+			o.useFirstExplicitMetricsQuery(actions, intermediateSteps)
+		}
 		// Tool calls to dispatch, or a hard parse error: hand straight back to
 		// the executor. Only a final answer (finish != nil) is critiqued.
 		if perr != nil || finish == nil {
@@ -1245,6 +1252,8 @@ const react4HumanPromptTemplate = `The current date and time is {{.today}}.
 {{.global_preferences_block}}
 {{end}}{{if .user_context_block}}
 {{.user_context_block}}
+{{end}}{{if .execution_targets_block}}
+{{.execution_targets_block}}
 {{end}}{{if .is_top_level}}{{if .conversation_context}}
 <conversation_context>
 {{.conversation_context}}
@@ -1271,7 +1280,7 @@ const react4HumanPromptTemplate = `The current date and time is {{.today}}.
 func newReact4HumanPromptTemplate() prompts.PromptTemplate {
 	vars := []string{
 		"today", "kb_prestep_content", "rag_examples", "skill_lists_menu", "global_preferences_block",
-		"user_context_block", "is_top_level", "orchestrator_mode", "conversation_context", "history",
+		"user_context_block", "execution_targets_block", "is_top_level", "orchestrator_mode", "conversation_context", "history",
 		"evidence_index", "memory_context_block", "channel_context_block", "notebook", "input",
 	}
 	return prompts.NewPromptTemplate(react4HumanPromptTemplate, vars)
@@ -1299,6 +1308,7 @@ func (o *NBReActPlanner4) humanText(input string) string {
 		"skill_lists_menu":         strings.TrimSpace(o.request.SkillListsMenu),
 		"global_preferences_block": strings.TrimSpace(renderGlobalPreferencesBlock(o.request.AccountPrompt)),
 		"user_context_block":       strings.TrimSpace(o.userContextBlock),
+		"execution_targets_block":  strings.TrimSpace(o.executionTargetsBlock),
 		"is_top_level":             isTopLevel,
 		"orchestrator_mode":        o.orchestratorMode,
 		"conversation_context":     strings.TrimSpace(o.request.ConversationContext),
@@ -1506,6 +1516,9 @@ func (o *NBReActPlanner4) renderObservation(step *NBAgentPlannerToolActionStep, 
 		obs = TruncateMiddle(step.Observation, maxObs/2, maxObs/2)
 	} else {
 		obs = SummarizeObservation(o.ctx, step, o.request, step.Observation)
+	}
+	if step.Action.Tool == "es_metrics_query" && step.Action.NativeToolInput != "" && step.Action.NativeToolInput != step.Action.ToolInput {
+		obs = "Execution note: the metrics tool used these arguments instead of the model's function call: " + TruncateMiddle(step.Action.ToolInput, 2048, 512) + "\nResult: " + obs
 	}
 	if ev := strings.TrimSpace(step.SubAgentEvidence); ev != "" {
 		obs = obs + "\n\n" + ev

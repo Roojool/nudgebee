@@ -236,3 +236,22 @@ func (s *AWSSource) ensureRouteTableNodes(reqCtx *security.RequestContext, nodes
 
 	return nodes, edges
 }
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Route tables route their VPC's and subnets' traffic through gateways and
+	// VPC endpoints.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeRouteTable, Name: "route_table",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createRouteTableEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Route tables are created from the row
+// cache by ensureRouteTableNodes, an account-wide pass.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{string(core.NodeTypeRouteTable)},
+		AccountLevel:  true,
+	}, nil)
+}

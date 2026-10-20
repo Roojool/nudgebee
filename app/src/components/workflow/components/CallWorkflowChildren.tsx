@@ -73,7 +73,7 @@ export const ChildTaskCard: React.FC<{ task: ChildTask; copyToClipboard?: (text:
           <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
             {task.id}
           </Typography>
-          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], fontFamily: 'monospace' }}>{task.type}</Typography>
+          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], fontFamily: ds.font.mono }}>{task.type}</Typography>
         </Box>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
           {duration && (
@@ -170,7 +170,7 @@ export const ChildTaskCard: React.FC<{ task: ChildTask; copyToClipboard?: (text:
                 border: `1px solid ${ds.red[200]}`,
                 borderRadius: 'var(--ds-radius-sm)',
                 padding: 'var(--ds-space-1) var(--ds-space-2)',
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 fontSize: 'var(--ds-text-caption)',
                 color: ds.red[600],
                 whiteSpace: 'pre-wrap',

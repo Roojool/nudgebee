@@ -443,6 +443,12 @@ async def run_agent_benchmark_and_notify(  # noqa: C901
                 llm_tier_models=llm_tier_models,
             )
 
+            # Verdicts run in the background; give them a bounded
+            # window so the run isn't marked complete with verdicts missing.
+            from llm.agents.common.verdict_judge import wait_for_verdicts
+
+            await asyncio.to_thread(wait_for_verdicts, run_id, 300)
+
             # Report & email (same as pytest path)
             run_manager.set_phase(run_id, run_manager.RunPhase.SENDING_REPORT)
             # complete_run does sync DB + HTTP I/O via reconcile_waiting_tests.
@@ -2723,6 +2729,32 @@ def _run_re_evaluation(run_id: str):
             except Exception as e:
                 logger.warning("Planner eval failed for test %s: %s", tr["test_id"], e)
 
+        # --- Verdict: independent qualitative judge ---
+        # Inline here: re-evaluation is already a background job. Rows here
+        # are status="pass", so there's always an answer to judge.
+        verdict_update = {}
+        try:
+            from llm.agents.common.verdict_judge import (
+                evaluate_verdict,
+                verdict_fields,
+            )
+
+            verdict_update = verdict_fields(
+                evaluate_verdict(
+                    {
+                        "test_id": tr["test_id"],
+                        "query": tr.get("query", ""),
+                        "expected_answer": tr.get("expected_answer", ""),
+                        "actual_answer": tr.get("actual_answer", ""),
+                        "execution_trace": trace,
+                        "status": "pass",
+                    },
+                    llm,
+                )
+            )
+        except Exception as e:
+            logger.warning("Verdict judge failed for test %s: %s", tr["test_id"], e)
+
         # --- Refetch token metrics ---
         # polling_conversation_id stores the session_id needed by the metrics API.
         # Fallback: if missing (old runs), look up session_id from conversation_id (DB UUID).
@@ -2773,6 +2805,7 @@ def _run_re_evaluation(run_id: str):
             score_reason=tr.get("_reason"),
             execution_trace=tr.get("_trace"),
             **token_update,
+            verdict=verdict_update or None,
         )
         logger.info(
             "Updated test %s (index %d): sim=%s rel=%s planner=%s tokens=%s",

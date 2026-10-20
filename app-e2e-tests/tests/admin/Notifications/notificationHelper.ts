@@ -1,6 +1,5 @@
 import { Page, expect, TestInfo } from "@playwright/test";
 import { LoginPage } from "../../../pages/LoginPage";
-import { ensureSwitchEnabled } from "../../utils/helpers";
 import { waitForGraphQLAndValidate } from "../../utils/GraphQLNetworkWatcher";
 import { NotificationLocators } from "./NotificationLocators";
 
@@ -68,27 +67,36 @@ export async function navigateToNewNotificationRule(
 
   await expect(locators.notificationRuleBtn).toBeVisible();
   await locators.notificationRuleBtn.click();
-
-  await ensureSwitchEnabled(page, locators.enableNotificationSwitch);
+  await locators.blankRuleItem.click();
+  await expect(locators.notificationNameInput).toBeVisible();
 
   return locators;
 }
 
+// Limits the rule to the configured account. Types that always cover every
+// account (weekly digest, daily email) show no account picker.
 export async function selectCluster(
   locators: NotificationLocators,
   page: Page
 ): Promise<void> {
   const clusterName = process.env.CLUSTER_NAME || process.env.CLUSTER;
   if (!clusterName) throw new Error("CLUSTER_NAME or CLUSTER env var is not set");
-  const isVisible = await locators.clusterSelector
+  const hasScope = await locators.scopeSelector
     .waitFor({ state: "visible", timeout: 5000 })
     .then(() => true)
     .catch(() => false);
-  if (!isVisible) {
-    console.log(`[selectCluster] Account selector not found on this tab — skipping.`);
+  if (!hasScope) {
+    console.log(`[selectCluster] This rule's types cover every account — skipping.`);
     return;
   }
+  await selectFromFilterDropdown(page, locators.scopeSelector, "These accounts");
+  await locators.clusterSelector.waitFor({ state: "visible" });
   await selectFromFilterDropdown(page, locators.clusterSelector, clusterName);
+  // A multi-select picker stays open after a pick; a single one closes itself.
+  const stillOpen = await locators.clusterSelector.getAttribute("aria-expanded").catch(() => null);
+  if (stillOpen === "true") {
+    await page.keyboard.press("Escape");
+  }
 }
 
 export async function configureChannels(
@@ -98,9 +106,7 @@ export async function configureChannels(
 ): Promise<boolean> {
   let anyConfigured = false;
 
-  if (channelConfig.slack && (await locators.slackBadge.isVisible())) {
-    await locators.slackBadge.click();
-    await locators.slackChannelSelector.waitFor({ state: "visible" });
+  if (channelConfig.slack && (await locators.slackChannelSelector.isVisible())) {
     const slackSelected = await selectFromFilterDropdown(page, locators.slackChannelSelector, channelConfig.slack);
     if (slackSelected) anyConfigured = true;
   }
@@ -108,10 +114,8 @@ export async function configureChannels(
   if (
     channelConfig.msTeamsGroup &&
     channelConfig.msTeamsChannel &&
-    (await locators.msTeamsBadge.isVisible())
+    (await locators.msTeamsGroupSelector.isVisible())
   ) {
-    await locators.msTeamsBadge.click();
-    await locators.msTeamsGroupSelector.waitFor({ state: "visible" });
     const groupSelected = await selectFromFilterDropdown(page, locators.msTeamsGroupSelector, channelConfig.msTeamsGroup);
 
     if (groupSelected) {
@@ -122,24 +126,14 @@ export async function configureChannels(
   }
 
   const isDev = process.env.E2E_ENVIRONMENT === "dev";
-  if (!isDev && channelConfig.gChat && (await locators.gChatBadge.isVisible())) {
-    await locators.gChatBadge.click();
-    await locators.gChatChannelSelector.waitFor({ state: "visible" });
+  if (!isDev && channelConfig.gChat && (await locators.gChatChannelSelector.isVisible())) {
     const gChatSelected = await selectFromFilterDropdown(page, locators.gChatChannelSelector, channelConfig.gChat);
     if (gChatSelected) anyConfigured = true;
   }
 
-  if (
-    (channelConfig.email || channelConfig.excludeUsers?.length) &&
-    (await locators.emailBadge.isVisible())
-  ) {
-    const emailAlreadyOpen = await locators.emailInput.isVisible().catch(() => false);
-    if (!emailAlreadyOpen) {
-      await locators.emailBadge.click();
-    }
-
+  // The daily email sends to users, with an extra address and users left out.
+  if ((channelConfig.email || channelConfig.excludeUsers?.length) && (await locators.emailInput.isVisible())) {
     if (channelConfig.email) {
-      await locators.emailInput.waitFor({ state: "visible" });
       await locators.emailInput.fill(channelConfig.email);
       anyConfigured = true;
     }
@@ -165,10 +159,11 @@ export async function submitAndVerify(
 ): Promise<void> {
   if (!anyChannelConfigured) {
     console.warn(
-      `\n⚠️  No messaging channels installed — suppressing rule "${ruleName}" to allow creation.\n` +
+      `\n⚠️  No messaging channels installed — saving "${ruleName}" as a one-hour Don't send.\n` +
         "   Install Slack, MS Teams, or Google Chat to test channel routing.\n"
     );
-    await page.locator(locators.enableNotificationSwitch).click();
+    await locators.dontSendAction.click();
+    await selectFromFilterDropdown(page, locators.pauseForSelector, "1 hour");
   }
 
   await locators.notificationNameInput.fill(ruleName);
@@ -179,7 +174,7 @@ export async function submitAndVerify(
   await waitForGraphQLAndValidate(
     page,
     async () => {
-      await locators.submitBtn.click();
+      await locators.ruleSaveBtn.click();
       await expect(
         locators.successToast
           .or(locators.updatedSuccessToast)
@@ -197,6 +192,6 @@ export async function submitAndVerify(
 
   if (await backendErrorMsg.isVisible().catch(() => false)) {
     console.warn(`⚠️  Backend unreachable creating rule "${ruleName}" — skipping without failure.`);
-    await locators.cancelBtn.click().catch(() => {});
+    await locators.ruleCancelEditorBtn.click().catch(() => {});
   }
 }

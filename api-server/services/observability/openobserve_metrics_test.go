@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"nudgebee/services/integrations"
+	"nudgebee/services/security"
 )
 
 func TestOpenObserveMetricSource_FetchMetricsQuery(t *testing.T) {
@@ -47,13 +50,18 @@ func TestOpenObserveMetricSource_FetchMetricsQuery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// In a real environment, configs are sourced from core.ListIntegrationConfigs.
-	// For testing, assuming network mock handles it without failure if we mock out the fetch.
-	// Since GetOpenObserveConfigs calls core.ListIntegrationConfigs which hits the DB,
-	// this test as-is would fail trying to query the real DB unless we provide a security context
-	// that mocks the DB, or if core supports an in-memory test store.
-	// For simplicity, we can just assert that the integration compiles, but we'll include this for completeness.
-	_ = server
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+	out, err := (&OpenObserveMetricSource{}).FetchMetricsQuery(mockRequestContext(), FetchMetricsRequest{AccountId: "test", Queries: map[string]string{"up": `up{job="prometheus"}`}})
+	require.NoError(t, err)
+	require.Len(t, out.Results, 1)
+	require.Nil(t, out.Results[0].Error)
+	require.Len(t, out.Results[0].Payload, 1)
+	// OSS metric responses use epoch milliseconds (#733); EE moved them to seconds.
+	assert.Equal(t, []int64{1699999999000}, out.Results[0].Payload[0].Timestamps)
 }
 
 func TestOpenObserveMetricSource_GetSupportedOperators(t *testing.T) {
@@ -136,4 +144,163 @@ func TestOpenObserveMetricNonLabelColumns(t *testing.T) {
 		_, skip := openObserveMetricNonLabelColumns[col]
 		assert.False(t, skip, "%q is a real label and must be offered", col)
 	}
+}
+
+// The utilisation query builders emit a __CLUSTER__ placeholder that relay-server
+// substitutes on the agent path and PrometheusSaasMetricSource expands itself. This
+// path does neither, so the source has to expand it before the query leaves — an
+// unexpanded token reaches OpenObserve verbatim and fails to parse.
+func TestOpenObserveMetricSourceExpandsClusterPlaceholder(t *testing.T) {
+	var received string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		received = r.Form.Get("query")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	defer server.Close()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+
+	_, err := (&OpenObserveMetricSource{}).FetchMetricsQuery(mockRequestContext(), FetchMetricsRequest{
+		AccountId: "test",
+		Queries:   map[string]string{"cpu_real": `sum(rate(node_cpu_seconds_total{__CLUSTER__ mode!="idle"}[5m]))`},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, received, "__CLUSTER__", "placeholder must not reach OpenObserve")
+	assert.Contains(t, received, `mode!="idle"`, "the rest of the selector must survive expansion")
+}
+
+// Keyword discovery is filtered in Go, not with a match[] selector, because
+// OpenObserve's shim resolves match[] to a metric NAME only: a `{__name__=~".*x.*"}`
+// selector returns an empty list and a selector with no literal name is a 400. Sending
+// one is what made metrics_list come back empty for every keyword.
+func TestOpenObserveFetchMetricListFiltersClientSide(t *testing.T) {
+	var gotQuery neturl.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/test-org/prometheus/api/v1/label/__name__/values", r.URL.Path)
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":[
+			"container_memory_usage_bytes",
+			"container_cpu_usage_seconds_total",
+			"redis_memory_used_bytes",
+			"Redis_Connected_Clients",
+			"up"
+		]}`))
+	}))
+	defer server.Close()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+
+	out, err := (&OpenObserveMetricSource{}).FetchMetricList(mockRequestContext(), FetchMetricsListRequest{
+		AccountId: "test",
+		Metric:    "redis",
+	})
+	require.NoError(t, err)
+
+	// The catalog is requested unfiltered — the only form the endpoint answers.
+	assert.Empty(t, gotQuery["match[]"], "no match[] selector may be sent")
+
+	names := make([]string, 0, len(out))
+	for _, m := range out {
+		names = append(names, m.Metric)
+	}
+	// Case-insensitive substring: callers pass a technology keyword, not an exact name.
+	assert.ElementsMatch(t, []string{"redis_memory_used_bytes", "Redis_Connected_Clients"}, names)
+}
+
+func TestOpenObserveFetchMetricListEmptyKeywordReturnsCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":["up","redis_memory_used_bytes"]}`))
+	}))
+	defer server.Close()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+
+	out, err := (&OpenObserveMetricSource{}).FetchMetricList(mockRequestContext(), FetchMetricsListRequest{AccountId: "test"})
+	require.NoError(t, err)
+	assert.Len(t, out, 2)
+}
+
+// openObserveFetchForTest points the source at a stub server and asks one key, with or
+// without Instant. Shared so the two endpoint tests differ only in the flag.
+func openObserveFetchForTest(t *testing.T, serverURL string, instant bool) OutputMetricQuery {
+	t.Helper()
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: serverURL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+	out, err := (&OpenObserveMetricSource{}).FetchMetricsQuery(mockRequestContext(), FetchMetricsRequest{
+		AccountId: "test",
+		Queries:   map[string]string{"container_cpu_usage_by_pod": `max_over_time(container_cpu_usage[1d:75s])`},
+		StartTime: 1700000000000,
+		EndTime:   1700086400000,
+		Instant:   instant,
+	})
+	require.NoError(t, err)
+	return out
+}
+
+// An Aggregate promises ONE point per series, and for OpenObserve that means a
+// different endpoint -- not a parameter.
+//
+// The builders wrap an aggregated key in max_over_time(...[range:step]) and the layer
+// sets Instant. Sent to query_range, that wrapper is evaluated once per step and comes
+// back as a whole series: measured at 101 points on a 1-day window where the contract
+// promises 1. Roughly thirty UI call sites read payload[0], so the result is an
+// arbitrary sample plotted as the workload, with no error anywhere.
+func TestOpenObserveInstantUsesTheInstantEndpoint(t *testing.T) {
+	var gotPath, gotForm string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotPath, gotForm = r.URL.Path, r.Form.Encode()
+		w.WriteHeader(http.StatusOK)
+		// The instant shape: `value`, not `values`.
+		_, _ = w.Write([]byte(`{"data":{"result":[{"metric":{"pod":"web-1"},"value":[1700000000,"0.25"]}]}}`))
+	}))
+	defer srv.Close()
+
+	res := openObserveFetchForTest(t, srv.URL, true)
+	assert.Contains(t, gotPath, "/prometheus/api/v1/query")
+	assert.NotContains(t, gotPath, "query_range", "an aggregate must not be a range query")
+	assert.Contains(t, gotForm, "time=", "an instant query is pinned to one instant")
+	assert.NotContains(t, gotForm, "step=")
+
+	require.Len(t, res.Results, 1)
+	require.Len(t, res.Results[0].Payload, 1, "one series")
+	assert.Equal(t, []float64{0.25}, res.Results[0].Payload[0].Values,
+		"the instant `value` shape must decode, not be dropped for lacking `values`")
+}
+
+// Without an aggregate nothing changes: a chart still wants the series.
+func TestOpenObserveRangeStillUsesQueryRange(t *testing.T) {
+	var gotPath, gotForm string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotPath, gotForm = r.URL.Path, r.Form.Encode()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"result":[{"metric":{"pod":"web-1"},"values":[[1700000000,"0.25"],[1700000075,"0.30"]]}]}}`))
+	}))
+	defer srv.Close()
+
+	res := openObserveFetchForTest(t, srv.URL, false)
+	assert.Contains(t, gotPath, "query_range")
+	assert.Contains(t, gotForm, "step=")
+	require.Len(t, res.Results, 1)
+	assert.Equal(t, []float64{0.25, 0.30}, res.Results[0].Payload[0].Values)
 }

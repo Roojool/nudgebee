@@ -1,9 +1,10 @@
-import { Grid, Typography, Box, Alert, CircularProgress } from '@mui/material';
+import { Grid, Typography, Box, CircularProgress } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { Link } from '@ui/Link';
 import { Input } from '@ui/Input';
 import { CollapsableCard } from '@ui/CollapsableCard';
 import { Stepper } from '@ui/Stepper';
-import { ContentCopy, Check, HelpOutline, CheckCircleOutline, ErrorOutline } from '@mui/icons-material';
+import { ContentCopy, Check, HelpOutline } from '@mui/icons-material';
 import { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
 import { getBrandTitle } from '@hooks/useTenantBranding';
@@ -238,9 +239,16 @@ const EnableGcpWebhookModal = ({ open, onClose, account, isAlreadyEnabled = fals
       <Box sx={{ px: ds.space[5], pt: ds.space[2], pb: ds.space[5] }}>
         {isAlreadyEnabled && !showWizard && (
           <>
-            <Alert icon={<CheckCircleOutline fontSize='small' />} severity='success' sx={{ mb: ds.space[4], mt: ds.space[4] }}>
-              Real-time alerts are enabled for project <strong>{projectId}</strong>.
-            </Alert>
+            <Box sx={{ mb: ds.space[4], mt: ds.space[4] }}>
+              <Banner
+                tone='success'
+                message={
+                  <>
+                    Real-time alerts are enabled for project <strong>{projectId}</strong>.
+                  </>
+                }
+              />
+            </Box>
             <Typography sx={{ fontSize: ds.text.bodyLg, color: ds.brand[500], mb: ds.space[4] }}>
               A webhook notification channel is configured and attached to alert policies in this GCP project. Alerts will be forwarded to{' '}
               {getBrandTitle()} automatically.
@@ -326,16 +334,16 @@ const EnableGcpWebhookModal = ({ open, onClose, account, isAlreadyEnabled = fals
                 )}
 
                 {!isCheckingPermission && permissionResult?.has_permission && (
-                  <Alert icon={<CheckCircleOutline fontSize='small' />} severity='success' sx={{ mb: ds.space[4] }}>
-                    Service account has the required monitoring permissions.
-                  </Alert>
+                  <Box sx={{ mb: ds.space[4] }}>
+                    <Banner tone='success' message='Service account has the required monitoring permissions.' />
+                  </Box>
                 )}
 
                 {!isCheckingPermission && permissionResult && !permissionResult.has_permission && (
                   <>
-                    <Alert icon={<ErrorOutline fontSize='small' />} severity='error' sx={{ mb: ds.space[4] }}>
-                      {permissionResult.error_detail || 'Service account lacks Cloud Monitoring permissions.'}
-                    </Alert>
+                    <Box sx={{ mb: ds.space[4] }}>
+                      <Banner tone='critical' message={permissionResult.error_detail || 'Service account lacks Cloud Monitoring permissions.'} />
+                    </Box>
                     <Box
                       sx={{
                         p: ds.space[3],
@@ -389,22 +397,33 @@ const EnableGcpWebhookModal = ({ open, onClose, account, isAlreadyEnabled = fals
                 )}
 
                 {setupError && (
-                  <Alert severity='error' sx={{ mb: ds.space[4] }}>
-                    {setupError}
-                  </Alert>
+                  <Box sx={{ mb: ds.space[4] }}>
+                    <Banner tone='critical' message={setupError} />
+                  </Box>
                 )}
 
                 {String(setupStatus) === 'success' && (
-                  <Alert icon={<CheckCircleOutline fontSize='small' />} severity='success' sx={{ mb: ds.space[4] }}>
-                    Real-time alerts enabled successfully. A webhook notification channel has been created in project <strong>{projectId}</strong>.
-                  </Alert>
+                  <Box sx={{ mb: ds.space[4] }}>
+                    <Banner
+                      tone='success'
+                      message={
+                        <>
+                          Real-time alerts enabled successfully. A webhook notification channel has been created in project{' '}
+                          <strong>{projectId}</strong>.
+                        </>
+                      }
+                    />
+                  </Box>
                 )}
 
                 {String(setupStatus) === 'fallback' && webhookUrl && (
                   <>
-                    <Alert severity='warning' sx={{ mb: ds.space[4] }}>
-                      {setupFailReason || 'Auto-setup could not complete. You can set it up manually using the instructions below.'}
-                    </Alert>
+                    <Box sx={{ mb: ds.space[4] }}>
+                      <Banner
+                        tone='warning'
+                        message={setupFailReason || 'Auto-setup could not complete. You can set it up manually using the instructions below.'}
+                      />
+                    </Box>
 
                     <Grid container spacing={ds.space[4]} mb={ds.space[4]}>
                       <Grid item xs={12}>

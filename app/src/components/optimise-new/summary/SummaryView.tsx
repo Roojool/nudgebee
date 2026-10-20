@@ -42,6 +42,8 @@ import {
 } from './insights';
 import RecommendationDetailPanel from '../RecommendationDetailPanel';
 import ResolveModal from '../ResolveModal';
+import K8sActionModal from '../K8sActionModal';
+import { k8sActionFor } from '../k8sActions';
 import { useNubiGlobalChat } from '@context/NubiGlobalChatContext';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import { buildNubiOptimizePrompt } from 'src/utils/nubiPromptBuilder';
@@ -853,14 +855,27 @@ const SummaryView = () => {
         open={detailOpen}
         onClose={handleCloseDetail}
         recommendation={selectedRecommendation}
-        accounts={Object.fromEntries(Object.entries(accounts).map(([id, a]) => [id, { name: a.account_name, cloud_provider: a.cloud_provider }]))}
+        accounts={Object.fromEntries(
+          Object.entries(accounts).map(([id, a]) => [
+            id,
+            { name: a.account_name, cloud_provider: a.cloud_provider, agentConnected: a.agent_connected },
+          ])
+        )}
         onCreateTicket={handleCreateTicket}
         onResolve={handleResolve}
         onCopyCli={handleCopyCli}
         onAskNubi={handleAskNubi}
       />
 
-      {resolveModalRec && (
+      {resolveModalRec && k8sActionFor(resolveModalRec) && (
+        <K8sActionModal
+          open
+          onClose={() => setResolveModalRec(null)}
+          recommendation={resolveModalRec}
+          agentConnected={accounts[resolveModalRec.account_id]?.agent_connected}
+        />
+      )}
+      {resolveModalRec && !k8sActionFor(resolveModalRec) && (
         <ResolveModal
           open={!!resolveModalRec}
           onClose={() => setResolveModalRec(null)}

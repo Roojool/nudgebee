@@ -841,6 +841,29 @@ function scoreBar(v) {
   return `<div class="flex items-center gap-1.5"><div class="score-bar flex-1"><div class="score-fill" style="width:${p}%;background:${c}"></div></div><span class="text-[11px] font-semibold w-[30px] text-right" style="color:${c}">${p}%</span></div>`;
 }
 
+// Verdict: an independent LLM judge's qualitative verdict (see
+// verdict_judge.py), distinct from the numeric Sim/Rel/Plan scores above.
+// Three states that must stay visually distinguishable: a real verdict,
+// "not yet judged / no evidence to judge from" (gray dash — same as an
+// ungraded Sim/Rel/Plan cell), and an evaluator crash (verdict_error set —
+// never shown as if it were a real "Failed" verdict).
+const VERDICT_LABELS = {passed: 'Passed', partially_correct: 'Partially Correct', failed: 'Failed'};
+const VERDICT_CLS = {passed: 'text-green-600', partially_correct: 'text-amber-600', failed: 'text-red-500'};
+function verdictBadge(t) {
+  if (t.verdict_error) {
+    return `<span class="text-[10px] font-semibold uppercase text-orange-500" title="Verdict judge failed: ${esc(t.verdict_error)}">Error</span>`;
+  }
+  if (!t.verdict_status) {
+    return '<span class="text-gray-300">—</span>';
+  }
+  if (t.verdict_status === 'pending') {
+    return '<span class="text-[10px] text-gray-400 italic" title="Verdict judge is running in the background">Judging…</span>';
+  }
+  const label = VERDICT_LABELS[t.verdict_status] || t.verdict_status;
+  const cls = VERDICT_CLS[t.verdict_status] || 'text-gray-400';
+  return `<span class="text-[10px] font-semibold uppercase ${cls}">${esc(label)}</span>`;
+}
+
 function fmtDuration(s) { if (!s) return '—'; const m = Math.floor(s/60), ss = Math.round(s%60); return m ? `${m}m ${ss}s` : `${ss}s`; }
 function fmtDate(d) { return d ? d.slice(0,16).replace('T',' ') : '—'; }
 
@@ -1182,6 +1205,15 @@ async function loadRunDetail(runId, silent) {
     metaItems.push({label: 'Accuracy', value: sc(oa)});
     metaItems.push({label: 'Avg Scores', value: `Answer: ${sc01(summary.avg_similarity||0)} · Relevancy: ${sc01(summary.avg_relevancy||0)} · Planner: ${sc01(summary.avg_planner||0)}`});
   }
+  const verdictRows = (s.test_results || []).filter(t => t.verdict_status || t.verdict_error);
+  if (verdictRows.length) {
+    const n = (st) => verdictRows.filter(t => t.verdict_status === st).length;
+    const errors = verdictRows.filter(t => t.verdict_error).length;
+    const parts = Object.keys(VERDICT_LABELS).map(st => `<span class="${VERDICT_CLS[st]} font-semibold">${n(st)} ${VERDICT_LABELS[st]}</span>`);
+    if (n('pending')) parts.push(`<span class="text-gray-400 italic">${n('pending')} Judging…</span>`);
+    if (errors) parts.push(`<span class="text-orange-500 font-semibold">${errors} Error</span>`);
+    metaItems.push({label: 'Verdicts', value: parts.join(' · ')});
+  }
   if (models !== '—') metaItems.push({label: 'Model', value: models});
   const meta = metaItems.map(m => `<span class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">${m.label}</span> <span class="text-[11px] text-gray-600">${m.value}</span>`);
 
@@ -1286,6 +1318,7 @@ async function loadRunDetail(runId, silent) {
     const sim = isPending(t) ? '<span class="text-gray-300">—</span>' : scoreBar(t.answer_similarity||0);
     const rel = isPending(t) ? '<span class="text-gray-300">—</span>' : scoreBar(t.answer_relevancy||0);
     const plan = isPending(t) ? '<span class="text-gray-300">—</span>' : scoreBar(t.planner_relevancy||0);
+    const verdictCell = isPending(t) ? '<span class="text-gray-300">—</span>' : verdictBadge(t);
     const durStr = isPending(t) ? '' : `${(t.duration_seconds||0).toFixed(1)}s`;
     const detailId = 'detail-test-' + t.test_index;
     const query = esc((t.query || '').slice(0, 200));
@@ -1453,6 +1486,21 @@ async function loadRunDetail(runId, silent) {
             return '<div class="mb-1.5"><span class="text-[10px] font-semibold '+s.t+' uppercase block mb-0.5">'+esc(label)+' Reason</span><div class="text-gray-700 '+s.bg+' rounded-lg p-2 border '+s.b+' text-[11px] whitespace-pre-wrap max-h-[80px] overflow-y-auto">'+esc(text)+'</div></div>';
           }).join('');
         })() : ''}
+        ${t.verdict_error ? `<div class="mb-2"><span class="text-[10px] font-semibold text-orange-500 uppercase block mb-0.5">Verdict — Evaluator Error</span><div class="text-orange-700 bg-orange-50 rounded-lg p-2 border border-orange-100 text-[11px] whitespace-pre-wrap max-h-[80px] overflow-y-auto">${esc(t.verdict_error)}</div></div>` : ''}
+        ${t.verdict_result ? (()=>{
+          const sections = [
+            ['walkthrough', 'Scenario Walkthrough'],
+            ['agent_actions', 'What The Agent Did'],
+            ['expected_path', 'Expected Path'],
+            ['comparison', 'Comparison'],
+            ['final_outcome', 'Final Outcome'],
+            ['reason', 'Verdict Reason'],
+          ];
+          const r = t.verdict_result;
+          return sections.filter(([k]) => r[k]).map(([k, label]) =>
+            '<div class="mb-1.5"><span class="text-[10px] font-semibold text-violet-400 uppercase block mb-0.5">Verdict — '+esc(label)+'</span><div class="text-gray-700 bg-violet-50 rounded-lg p-2 border border-violet-100 text-[11px] whitespace-pre-wrap max-h-[120px] overflow-y-auto">'+esc(r[k])+'</div></div>'
+          ).join('');
+        })() : ''}
         ${query ? `<div class="mb-2"><span class="text-[10px] font-semibold text-gray-400 uppercase block mb-0.5">Query</span><div class="text-gray-700 bg-white rounded-lg p-2 border border-gray-100 text-[11px] whitespace-pre-wrap max-h-[100px] overflow-y-auto">${query}</div></div>` : ''}
         ${(t.expected_answer || t.actual_answer) ? `
           <div class="grid grid-cols-2 gap-3">
@@ -1463,7 +1511,7 @@ async function loadRunDetail(runId, silent) {
     }
 
     return '<div class="flex items-center gap-1">'
-      + '<div onclick="' + onclickStr + '" class="group flex-1 min-w-0 grid grid-cols-[28px_2.5fr_0.6fr_0.5fr_0.5fr_0.5fr_0.5fr_0.6fr_1fr] gap-2.5 items-center px-3.5 py-[7px] bg-white border border-gray-100 rounded-md border-l-[3px] ' + cls + ' hover:shadow-sm transition-all ' + cursorCls + '">'
+      + '<div onclick="' + onclickStr + '" class="group flex-1 min-w-0 grid grid-cols-[28px_2.5fr_0.6fr_0.5fr_0.5fr_0.5fr_0.8fr_0.5fr_0.6fr_1fr] gap-2.5 items-center px-3.5 py-[7px] bg-white border border-gray-100 rounded-md border-l-[3px] ' + cls + ' hover:shadow-sm transition-all ' + cursorCls + '">'
       + '<span class="text-[11px] text-gray-400 text-center">' + t.test_index + '</span>'
       + '<span class="text-[11px] font-medium text-gray-700 truncate" title="' + esc(t.test_id||'') + '">' + esc(t.test_id||'') + '</span>'
       + '<span class="text-[10px] font-semibold uppercase ' + stCls + '">' + t.status
@@ -1472,6 +1520,7 @@ async function loadRunDetail(runId, silent) {
             : '')
         + '</span>'
       + sim + rel + plan
+      + '<span>' + verdictCell + '</span>'
       + '<span class="text-[11px] text-gray-500">' + durStr + '</span>'
       + '<span class="text-[11px] text-gray-500" title="cost in USD">' + (t.cost ? '$' + Number(t.cost).toFixed(2) : '—') + '</span>'
       + '<span class="text-[10px]">' + err + '</span>'
@@ -1562,8 +1611,8 @@ async function loadRunDetail(runId, silent) {
       <span class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Test Results — ${tests.length} total, <span class="text-green-600">${summary.success||0} pass</span>, <span class="text-red-500">${summary.failed||0} fail</span>${(summary.skipped||0) > 0 ? `, <span class="text-slate-500">${summary.skipped} skipped</span>` : ''} (${(summary.success_rate||0).toFixed(1)}%)</span>
     </div>
     <div class="az-agent-card overflow-hidden mb-3">
-      <div class="grid grid-cols-[28px_2.5fr_0.6fr_0.5fr_0.5fr_0.5fr_0.5fr_0.6fr_1fr] gap-3 px-4 py-2 text-[10px] font-semibold text-gray-400 uppercase tracking-wide bg-gray-50 border-b border-gray-100 sticky top-0 z-10">
-        <span>#</span><span>Test</span><span>Status</span><span>Sim</span><span>Rel</span><span>Plan</span><span>Dur</span><span>Cost</span><span>Error</span>
+      <div class="grid grid-cols-[28px_2.5fr_0.6fr_0.5fr_0.5fr_0.5fr_0.8fr_0.5fr_0.6fr_1fr] gap-3 px-4 py-2 text-[10px] font-semibold text-gray-400 uppercase tracking-wide bg-gray-50 border-b border-gray-100 sticky top-0 z-10">
+        <span>#</span><span>Test</span><span>Status</span><span>Sim</span><span>Rel</span><span>Plan</span><span>Verdict</span><span>Dur</span><span>Cost</span><span>Error</span>
       </div>
       <div id="detail-test-rows" class="flex flex-col gap-[1px]"></div>
     </div>

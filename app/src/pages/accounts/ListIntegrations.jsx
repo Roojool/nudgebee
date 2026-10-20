@@ -13,6 +13,7 @@ import { Button as DsButton } from '@ui/Button';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import IntegrationDynamicFormModal from '@components/integrations/modal/IntegrationDynamicFormModal';
+import WebhookActivityLogModal from '@components/integrations/modal/WebhookActivityLogModal';
 import AddLLMConfigModal from '@components/llm/AddLLMConfigModal';
 import VmAgentCredentialsDialog from '@components/integrations/modal/VmAgentCredentialsDialog';
 import { Label } from '@ui/Label';
@@ -21,6 +22,8 @@ import { toast as snackbar } from '@ui/Toast';
 import CustomTable from '@shared/tables/CustomTable';
 import { canManage } from '@lib/auth';
 import { getIntegrationDescription } from '@lib/integrationDescriptions';
+import { buildWebhookUrl, getWebhookToken } from '@lib/webhookUrl';
+import CopyButton from '@shared/buttons/CopyButton';
 import { action } from 'src/utils/actionStyles';
 import { ds } from 'src/utils/colors';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
@@ -45,13 +48,15 @@ const getDisplayName = (name) => {
     return 'SSH';
   }
   if (name === 'llm_gateway') {
-    return 'LLM Gateway';
+    return 'AI Gateway';
   }
   return snakeToTitleCase(name);
 };
 
 // The status each page opens on; relaxed to "all" once if it returns nothing.
 const DEFAULT_STATUS_FILTER = 'enabled';
+// LLM configs list at most this many linked accounts before collapsing the rest.
+const VISIBLE_ACCOUNT_CHIPS = 2;
 
 // Maps integration name to the config key that holds its primary connection info
 const integrationConnectionKey = {
@@ -172,7 +177,12 @@ const ListIntegrations = ({ integrationName }) => {
   // LLM Gateway is tenant-scoped (no account concept) — it drops the Account column.
   const isLLMGateway = integrationName === 'llm_gateway';
   const accountCols = isLLMGateway ? [] : ['Account'];
-  const headers = hideConnectionInfo
+  // Webhook integrations surface their inbound receiver URL where the connection
+  // info would otherwise sit — that URL is the whole point of the integration.
+  const showWebhookUrl = !!integrationName?.endsWith('_webhook');
+  const headers = showWebhookUrl
+    ? ['Name', 'URL', ...accountCols, 'Created By', 'Updated By', 'Status', '']
+    : hideConnectionInfo
     ? ['Name', ...accountCols, 'Created By', 'Updated By', 'Status', '']
     : ['Name', 'Connection Info', ...accountCols, 'Created By', 'Updated By', 'Status', ''];
 
@@ -232,6 +242,7 @@ const ListIntegrations = ({ integrationName }) => {
   const [testingConnectionId, setTestingConnectionId] = useState(null);
   const [testableConfig, setTestableConfig] = useState({ testable: false, testable_when: null });
   const [agentHealthMap, setAgentHealthMap] = useState({});
+  const [activityLogIntegration, setActivityLogIntegration] = useState(null);
   const [nameInput, setNameInput] = useState('');
   const [selectedNameFilter, setSelectedNameFilter] = useState('');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState(DEFAULT_STATUS_FILTER);
@@ -259,14 +270,14 @@ const ListIntegrations = ({ integrationName }) => {
     }
   };
 
+  // The tenant's default LLM provider is recorded as the integration's own
+  // default_llm_provider config value.
+  const isTenantDefault = (item) =>
+    (Array.isArray(item?.integration_config_values) ? item.integration_config_values : []).some(
+      (v) => v?.name === 'default_llm_provider' && v?.value === 'true'
+    );
+
   const linkedAccounts = (item) => (Array.isArray(item?.integrations_cloud_accounts) ? item.integrations_cloud_accounts : []);
-
-  const defaultAccountCount = (item) => linkedAccounts(item).filter((a) => a?.default_llm_provider === true).length;
-
-  const isDefaultForAllAccounts = (item) => {
-    const accounts = linkedAccounts(item);
-    return accounts.length > 0 && defaultAccountCount(item) === accounts.length;
-  };
 
   const getMenuItems = (item) => {
     // Same gate as the Add-integration button below (canManage('integrations',
@@ -277,6 +288,11 @@ const ListIntegrations = ({ integrationName }) => {
     if (!canManage('integrations', 'Write')) return [];
     const status = item.status || 'enabled';
     const items = [];
+    // Webhook integrations get an Activity Log entry point — the incoming events
+    // received on this webhook, plus total/processed counts.
+    if (integrationName?.endsWith('_webhook')) {
+      items.push({ label: 'Activity Log', id: 'activity_log' });
+    }
     if (item?.source === 'agent' && agentManagedIntegrations.includes(integrationName)) {
       if (status === 'disabled') {
         items.push({ label: 'Enable', id: 'enable' });
@@ -313,7 +329,7 @@ const ListIntegrations = ({ integrationName }) => {
       // Offered only where it can take effect — a disabled config is skipped by
       // resolution — and hidden once this config already serves every account
       // it is linked to.
-      if (isLLMIntegration && status !== 'disabled' && !isDefaultForAllAccounts(item)) {
+      if (isLLMIntegration && status !== 'disabled' && !isTenantDefault(item)) {
         items.push({ label: 'Set as default', id: 'set-default' });
       }
     }
@@ -432,6 +448,8 @@ const ListIntegrations = ({ integrationName }) => {
       setModalAction('regenerate');
     } else if (menuItem.id === 'test_connection') {
       handleTestConnection(item);
+    } else if (menuItem.id === 'activity_log') {
+      setActivityLogIntegration(item);
     }
   };
 
@@ -472,17 +490,10 @@ const ListIntegrations = ({ integrationName }) => {
   };
 
   // The marker sits on the config's own name rather than in a column, because
-  // it is a property of this config, not of any one account it serves.
-  //
-  // The UI applies one default to every account a config is linked to, so the
-  // normal state is all-or-nothing and a bare chip says it. A mixed state can
-  // only arrive through the API (the write path accepts a per-account map); it
-  // shows the count rather than being rounded to a plain "Default", which would
-  // misstate the accounts it excludes.
+  // it is a property of this config, not of any one account it serves: the
+  // tenant's default LLM provider, which accounts added later are linked to.
   const nameCell = (item) => {
-    const linked = linkedAccounts(item);
-    const marked = linked.filter((a) => a?.default_llm_provider === true).length;
-    if (!isLLMIntegration || marked === 0) {
+    if (!isLLMIntegration || !isTenantDefault(item)) {
       return { text: item.name };
     }
     return {
@@ -490,9 +501,9 @@ const ListIntegrations = ({ integrationName }) => {
         <Stack direction='row' spacing={0.5} alignItems='center' useFlexGap flexWrap='wrap'>
           <span>{item.name}</span>
           <Chip size='sm' variant='tag' tone='success'>
-            {marked === linked.length ? 'Default' : `Default (${marked} of ${linked.length})`}
+            Default
           </Chip>
-          <Tooltip title='Accounts added here use this provider by default.'>
+          <Tooltip title='Accounts added later use this provider automatically.'>
             <InfoOutlinedIcon sx={{ fontSize: ds.text.body, color: ds.gray[500], cursor: 'help' }} />
           </Tooltip>
         </Stack>
@@ -501,21 +512,72 @@ const ListIntegrations = ({ integrationName }) => {
   };
 
   // LLM only: other integration types are one-per-account, so they keep the
-  // plain text list and gain nothing from chips.
+  // plain text list and gain nothing from chips. One config can serve many
+  // accounts, so only the first few are shown and the rest collapse into a
+  // "+N more" chip whose tooltip lists every account.
   const accountChips = (item) => {
     const linked = linkedAccounts(item).filter((a) => a?.cloud_account_name);
     if (linked.length === 0) {
       return <span>-</span>;
     }
+    const visible = linked.slice(0, VISIBLE_ACCOUNT_CHIPS);
+    const hiddenCount = linked.length - visible.length;
     return (
       <Stack direction='row' spacing={0.5} useFlexGap flexWrap='wrap'>
-        {linked.map((acc, i) => (
+        {visible.map((acc, i) => (
           <Chip key={`${acc.cloud_account_name}-${i}`} size='sm' variant='tag' tone='neutral'>
             {acc.cloud_account_name}
           </Chip>
         ))}
+        {hiddenCount > 0 && (
+          <Tooltip
+            title={
+              <Stack spacing={0.5}>
+                {linked.map((acc, i) => (
+                  <span key={`${acc.cloud_account_name}-${i}`}>{acc.cloud_account_name}</span>
+                ))}
+              </Stack>
+            }
+          >
+            <span tabIndex={0} aria-label={`Linked accounts: ${linked.map((acc) => acc.cloud_account_name).join(', ')}`}>
+              <Chip size='sm' variant='tag' tone='subtle'>
+                {`+${hiddenCount} more`}
+              </Chip>
+            </span>
+          </Tooltip>
+        )}
       </Stack>
     );
+  };
+
+  // Webhook receiver URL cell: truncated to one line with the full URL on hover,
+  // plus a copy button — the same URL the Add/Edit modal hands out on creation.
+  const webhookUrlCell = (item) => {
+    const url = buildWebhookUrl(integrationName, getWebhookToken(item.integration_config_values));
+    if (!url) {
+      return { text: '-' };
+    }
+    return {
+      component: (
+        <Stack direction='row' spacing={0.5} alignItems='center'>
+          <Tooltip title={url}>
+            <Typography
+              sx={{
+                fontSize: ds.text.small,
+                color: ds.gray[600],
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                maxWidth: ds.space.mul(1, 70),
+              }}
+            >
+              {url}
+            </Typography>
+          </Tooltip>
+          <CopyButton text={url} size='sm' toastMessage='Webhook URL copied' />
+        </Stack>
+      ),
+    };
   };
 
   const buildIntegrationRow = (item) => {
@@ -532,6 +594,9 @@ const ListIntegrations = ({ integrationName }) => {
         component: <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(item)} data={item} onMenuClick={onMenuClick} />,
       },
     ];
+    if (showWebhookUrl) {
+      return [baseRow[0], webhookUrlCell(item), ...baseRow.slice(1)];
+    }
     if (hideConnectionInfo) {
       return baseRow;
     }
@@ -717,7 +782,7 @@ const ListIntegrations = ({ integrationName }) => {
     </DsButton>
   ) : undefined;
 
-  // The providers whose header carries a "how do I get these values" guide.
+  // Providers whose header carries a "how do I get these values" guide.
   const setupGuideIntegration =
     integrationName === 'splunk_observability_platform'
       ? 'Splunk Observability Cloud'
@@ -770,11 +835,12 @@ const ListIntegrations = ({ integrationName }) => {
         accessKey={regeneratedCredentials?.accessKey}
         accessSecret={regeneratedCredentials?.accessSecret}
       />
+      <WebhookActivityLogModal open={!!activityLogIntegration} onClose={() => setActivityLogIntegration(null)} integration={activityLogIntegration} />
       {integrationName === 'solarwinds' && (
         <Modal
           handleClose={() => setOpenSetupGuide(false)}
           title={
-            <Typography component='h2' variant='h6' fontWeight={600}>
+            <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
               SolarWinds Observability Setup Guide
             </Typography>
           }
@@ -785,7 +851,7 @@ const ListIntegrations = ({ integrationName }) => {
           isCancelRequired={false}
         >
           <Stack spacing={ds.space[4]} sx={{ fontSize: ds.text.bodyLg }}>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 1: Choose your Data Center Region
             </Typography>
             <Typography variant='body2' component='div'>
@@ -806,7 +872,7 @@ const ListIntegrations = ({ integrationName }) => {
                 </li>
               </ul>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 2: Create an API Access Token
             </Typography>
             <Typography variant='body2' component='div'>
@@ -832,7 +898,7 @@ const ListIntegrations = ({ integrationName }) => {
         <Modal
           handleClose={() => setOpenSetupGuide(false)}
           title={
-            <Typography component='h2' variant='h6' fontWeight={600}>
+            <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
               Splunk Observability Cloud Setup Guide
             </Typography>
           }
@@ -843,7 +909,7 @@ const ListIntegrations = ({ integrationName }) => {
           isCancelRequired={false}
         >
           <Stack spacing={ds.space[4]} sx={{ fontSize: ds.text.bodyLg }}>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 1: Find your Realm
             </Typography>
             <Typography variant='body2' component='div'>
@@ -855,7 +921,7 @@ const ListIntegrations = ({ integrationName }) => {
                 </li>
               </ol>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 2: Create an Organization Access Token
             </Typography>
             <Typography variant='body2' component='div'>
@@ -880,7 +946,7 @@ const ListIntegrations = ({ integrationName }) => {
         <Modal
           handleClose={() => setOpenSetupGuide(false)}
           title={
-            <Typography component='h2' variant='h6' fontWeight={600}>
+            <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
               Splunk Enterprise Setup Guide
             </Typography>
           }
@@ -895,11 +961,11 @@ const ListIntegrations = ({ integrationName }) => {
               This is for Splunk Enterprise and Splunk Cloud Platform, which are queried with SPL. For Splunk Observability Cloud (SignalFx), use the
               separate <strong>Splunk Observability Cloud</strong> integration instead.
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 1: Find your management endpoint
             </Typography>
             <Typography variant='body2' component='div'>
-              Nudgebee talks to the management port, not the web UI.
+              {getBrandTitle()} talks to the management port, not the web UI.
               <ul style={{ paddingLeft: ds.space[4], marginTop: ds.space[1] }}>
                 <li>
                   Use <code>https://&lt;host&gt;:8089</code> — port <code>8089</code>, not <code>8000</code>
@@ -909,11 +975,11 @@ const ListIntegrations = ({ integrationName }) => {
                 </li>
               </ul>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 2: Create a least-privilege role and user
             </Typography>
             <Typography variant='body2' component='div'>
-              Nudgebee only ever reads, so give it a role that can only read.
+              {getBrandTitle()} only ever reads, so give it a role that can only read.
               <ol style={{ paddingLeft: ds.space[4], marginTop: ds.space[1] }}>
                 <li>
                   Go to <strong>Settings → Roles</strong> and create a role with the <code>search</code> capability only
@@ -926,7 +992,7 @@ const ListIntegrations = ({ integrationName }) => {
                 </li>
               </ol>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 3: Create an authentication token
             </Typography>
             <Typography variant='body2' component='div'>
@@ -940,12 +1006,12 @@ const ListIntegrations = ({ integrationName }) => {
                 <li>Basic auth with a username and password also works if token auth is unavailable</li>
               </ol>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 4: Name the indexes
             </Typography>
             <Typography variant='body2' component='div'>
-              Every search Nudgebee runs is pinned to one of these indexes. If you ingest with the Splunk Distribution of the OpenTelemetry Collector,
-              they are the indexes set as <code>splunkPlatform.index</code>, <code>splunkPlatform.metricsIndex</code> and{' '}
+              Every search {getBrandTitle()} runs is pinned to one of these indexes. If you ingest with the Splunk Distribution of the OpenTelemetry
+              Collector, they are the indexes set as <code>splunkPlatform.index</code>, <code>splunkPlatform.metricsIndex</code> and{' '}
               <code>splunkPlatform.tracesIndex</code> in that chart.
               <ul style={{ paddingLeft: ds.space[4], marginTop: ds.space[1] }}>
                 <li>
@@ -964,7 +1030,7 @@ const ListIntegrations = ({ integrationName }) => {
               index with nothing in it. Whichever indexes you name must also be in the role&apos;s allowed list from Step 2.
             </Typography>
             <Typography variant='body2' sx={{ color: 'text.secondary' }}>
-              The Splunk Operator for Kubernetes issues a self-signed certificate by default. If Nudgebee cannot verify it, enable{' '}
+              The Splunk Operator for Kubernetes issues a self-signed certificate by default. If {getBrandTitle()} cannot verify it, enable{' '}
               <strong>Skip TLS certificate verification</strong> in the form above.
             </Typography>
           </Stack>
@@ -973,7 +1039,7 @@ const ListIntegrations = ({ integrationName }) => {
       <Modal
         handleClose={isActionLoading ? () => {} : handleConfirmationClose}
         title={
-          <Typography component='h2' variant='h6' fontWeight={600}>
+          <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
             {`${snakeToTitleCase(modalAction || '')} ${getDisplayName(integrationName)} Integration: ${selectedIntegration.name}`}
           </Typography>
         }
@@ -1090,7 +1156,7 @@ const ListIntegrations = ({ integrationName }) => {
             </Stack>
           }
           description={getIntegrationDescription(integrationName)}
-          actions={addAccountButton}
+          actions={hasLoaded && totalCount > 0 ? addAccountButton : undefined}
         />
         {showConnectPrompt ? (
           <ListingLayout.Body padding={ds.space[5]}>
@@ -1102,6 +1168,7 @@ const ListIntegrations = ({ integrationName }) => {
               action={
                 canAddAccount
                   ? {
+                      id: `add-${toKebabCase(integrationName)}-account-btn`,
                       label: `Add ${getDisplayName(integrationName)} Account`,
                       onClick: () => {
                         setSelectedIntegration({});

@@ -135,6 +135,7 @@ var observedSourcesForWeighting = map[string]bool{
 	"traces":           true,
 	"datadog-apm":      true,
 	"newrelic-apm":     true,
+	"elastic-apm":      true,
 	"cloud":            true, // CentralizedExternalServiceEnricher edges
 	"cloud_enrichment": true,
 	"dns_resolver":     true,
@@ -596,6 +597,45 @@ func (g *DependencyGraph) getDependencyDistance(service1Key, service2Key string)
 	}
 
 	return -1 // No path found
+}
+
+// dependsOnDistance is how many hops service1 is from service2 following
+// dependencies only — a service to what it calls or routes to — or -1 when
+// service1 does not depend on service2 within maxHops.
+//
+// getDependencyDistance searches both directions, so it answers "are these two
+// connected", which is what deciding membership needs. It cannot say which of the
+// two needs the other, and that is the question a leader election asks.
+func (g *DependencyGraph) dependsOnDistance(service1Key, service2Key string, maxHops int) int {
+	service1Key = g.resolveKey(service1Key)
+	service2Key = g.resolveKey(service2Key)
+	if service1Key == service2Key {
+		return 0
+	}
+
+	type hop struct {
+		node string
+		dist int
+	}
+	queue := []hop{{service1Key, 0}}
+	visited := map[string]bool{service1Key: true}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if current.dist >= maxHops {
+			continue
+		}
+		for _, neighbor := range g.Edges[current.node] {
+			if neighbor == service2Key {
+				return current.dist + 1
+			}
+			if !visited[neighbor] {
+				visited[neighbor] = true
+				queue = append(queue, hop{neighbor, current.dist + 1})
+			}
+		}
+	}
+	return -1
 }
 
 // isUpstream checks if service1 is an upstream dependency of service2

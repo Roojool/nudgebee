@@ -34,3 +34,18 @@ func init() {
 	core.RegisterSpecificTypeSchema(azureKeyVaultSchema)
 	core.RegisterSpecificTypeSchema(azureKeyVaultKeySchema)
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:        []string{"vault", "vaults"},
+		NodeType:     core.NodeTypeSecretVault,
+		SpecificType: "AzureKeyVault",
+	})
+	registerKind(resourceKind{
+		Service:      "microsoft.keyvault",
+		NodeType:     core.NodeTypeSecretVault,
+		SpecificType: "AzureKeyVault",
+	})
+}

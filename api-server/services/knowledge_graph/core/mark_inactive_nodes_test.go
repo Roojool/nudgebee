@@ -18,6 +18,8 @@ import (
 
 const markInactiveNodesTenant = "b2ca6e00-0000-4000-8000-000000000002"
 
+const markInactivePartialTenant = "b2ca6e00-0000-4000-8000-000000000003"
+
 func TestMarkInactiveNodes_TenantScopedSourceSweptDespiteAccountFilter(t *testing.T) {
 	dbm := testenv.RequireMetastore(t)
 	ctx := newTestRequestContext()
@@ -53,7 +55,7 @@ func TestMarkInactiveNodes_TenantScopedSourceSweptDespiteAccountFilter(t *testin
 	// the account-scoping predicate under test.
 	const inScopeAccountID = "b2ca6e00-0000-4000-8000-0000000000bb"
 	const newSyncVersion = 2
-	if _, err := svc.markInactiveNodes(ctx, markInactiveNodesTenant, []string{inScopeAccountID}, newSyncVersion, nil, nil); err != nil {
+	if _, err := svc.markInactiveNodes(ctx, markInactiveNodesTenant, []string{inScopeAccountID}, newSyncVersion, nil, nil, true); err != nil {
 		t.Fatalf("markInactiveNodes: %v", err)
 	}
 
@@ -83,5 +85,68 @@ func TestMarkInactiveNodes_TenantScopedSourceSweptDespiteAccountFilter(t *testin
 	}
 	if isActive, ok := active[protectedKey]; !ok || !isActive {
 		t.Errorf("out-of-scope aws-sourced node was incorrectly tombstoned: is_active=%v ok=%v (want true)", isActive, ok)
+	}
+}
+
+// A partial (account-scoped) build never runs the tenant-scoped producers, so the
+// #35519 exception above must not apply: an ownership-sourced node stays active
+// even though this build did not re-stamp it. Without the sweepTenantScoped gate,
+// rebuilding one cloud account would tombstone the tenant's whole ownership,
+// identity and source-control layer.
+func TestMarkInactiveNodes_PartialBuildProtectsTenantScopedSources(t *testing.T) {
+	dbm := testenv.RequireMetastore(t)
+	ctx := newTestRequestContext()
+	svc := NewService(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), dbm)
+	t.Cleanup(func() {
+		_, _ = dbm.Exec(`DELETE FROM knowledge_graph_node WHERE tenant_id = $1::uuid`, markInactivePartialTenant)
+	})
+
+	groupKey := BuildUniqueKey(CloudProviderExternal, markInactivePartialTenant, "", NodeTypeUserGroup, "", "partial-group")
+	group := NewNode(NodeTypeUserGroup, groupKey,
+		map[string]interface{}{"specific_type": "NudgebeeGroup", "name": "partial-group"},
+		markInactivePartialTenant, markInactivePartialTenant, "ownership")
+
+	const scopeAccountID = "b2ca6e00-0000-4000-8000-0000000000cc"
+	staleKey := BuildUniqueKey(CloudProviderAWS, scopeAccountID, "us-east-1", NodeTypeComputeInstance, "", "partial-stale")
+	stale := NewNode(NodeTypeComputeInstance, staleKey,
+		map[string]interface{}{"specific_type": "EC2Instance", "name": "partial-stale"},
+		markInactivePartialTenant, scopeAccountID, "aws")
+
+	const oldSyncVersion = 1
+	if err := svc.SaveNodes([]*DbNode{group, stale}, oldSyncVersion); err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	const newSyncVersion = 2
+	if _, err := svc.markInactiveNodes(ctx, markInactivePartialTenant, []string{scopeAccountID}, newSyncVersion, nil, nil, false); err != nil {
+		t.Fatalf("markInactiveNodes: %v", err)
+	}
+
+	rows, err := dbm.Query(`SELECT unique_key, is_active FROM knowledge_graph_node WHERE tenant_id = $1::uuid`, markInactivePartialTenant)
+	if err != nil {
+		t.Fatalf("query nodes: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	active := make(map[string]bool)
+	for rows.Next() {
+		var uniqueKey string
+		var isActive bool
+		if err := rows.Scan(&uniqueKey, &isActive); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		active[uniqueKey] = isActive
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+
+	if isActive, ok := active[groupKey]; !ok || !isActive {
+		t.Errorf("partial build tombstoned an ownership-sourced node: is_active=%v ok=%v (want true)", isActive, ok)
+	}
+	if isActive, ok := active[staleKey]; !ok {
+		t.Errorf("stale in-scope node was deleted from database (want it to exist with is_active=false)")
+	} else if isActive {
+		t.Errorf("stale in-scope node was not tombstoned by the partial build: is_active=true (want false)")
 	}
 }

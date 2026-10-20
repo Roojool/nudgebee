@@ -10,6 +10,8 @@ export const InvestigateTabs = {
   analysis: { id: "simple-tab-0", panelId: "simple-tabpanel-0", label: "Investigation Analysis" },
   tasks: { id: "simple-tab-1", panelId: "simple-tabpanel-1", label: "Tasks" },
   rca: { id: "simple-tab-2", panelId: "simple-tabpanel-2", label: "RCA Report" },
+  // Same tab strip as the three above; index 3 is fixed in investigate.jsx regardless of which conditional tabs render.
+  remediation: { id: "simple-tab-3", panelId: "simple-tabpanel-3", label: "Remediation" },
 } as const;
 
 export type InvestigateTab = (typeof InvestigateTabs)[keyof typeof InvestigateTabs];
@@ -42,6 +44,10 @@ export class InvestigateLocators extends TroubleshootEventsLocators {
   readonly followUpBtn: Locator;
   readonly generateRcaBtn: Locator;
   readonly refreshInvestigationBtn: Locator;
+  readonly runAutomationBtn: Locator;
+  readonly automationRunRows: Locator;
+  readonly workflowResolutionBtn: Locator;
+  readonly automationDropdownMenu: Locator;
 
   constructor(page: Page) {
     super(page);
@@ -79,15 +85,11 @@ export class InvestigateLocators extends TroubleshootEventsLocators {
       .or(page.getByRole("button", { name: "Expand details panel" }))
       .first();
 
-    // The 'Where' row label is the cheapest proof the expanded sidebar body is
-    // mounted rather than the collapsed rail. Deliberately no .or(): it is a
-    // literal from the sidebar's own markup and any wider text match would find
-    // the word elsewhere on the investigation.
-    this.sidebarWhereLabel = page.getByText("Where", { exact: true });
-
-    // Deliberately no .or(): the subject name this wraps is event data, so the
-    // only wider handle would be a text match on a value that changes per event.
+    // No .or(): the subject name is event data, so any wider text match would be unstable.
     this.podNameLink = page.getByTestId("pod-name-link").first();
+
+    // The subject row's label is its type ("Pod", "Ec2 Instance"), so its testid is the only stable anchor for the expanded body.
+    this.sidebarWhereLabel = this.podNameLink;
 
     // Label text carries a live count ('Show More (7)'), so the fallback matches
     // the stable half only.
@@ -139,6 +141,21 @@ export class InvestigateLocators extends TroubleshootEventsLocators {
       .getByTestId("refresh-investigation-btn")
       .or(page.getByRole("button", { name: "Refresh investigation" }))
       .first();
+
+    // RunAutomationMenu.tsx's dropdown trigger in the Remediation tab's "Run an automation" card.
+    this.runAutomationBtn = page
+      .getByTestId("run-automation-btn")
+      .or(page.getByRole("button", { name: "Automations" }))
+      .first();
+
+    // EventAutomationRunsList.tsx's testid for each past-run row; scoped to the Remediation panel.
+    this.automationRunRows = this.tabPanel(InvestigateTabs.remediation).getByTestId("event-automation-run-link");
+
+    // RunAutomationMenu's ds/DropdownMenu — not the generic openMenu, since multiple role="menu" divs can be mounted at once.
+    this.automationDropdownMenu = page.locator('div[role="menu"]:visible').filter({ has: page.getByPlaceholder("Search automation") });
+
+    // investigate.jsx's WorkflowExecution resolution chip; its label updates live from a triggered run's status.
+    this.workflowResolutionBtn = page.getByTestId("workflow-resolution-btn");
   }
 
   // Role+name leads: MUI Tab exposes its label as the accessible name. 'Tasks'
@@ -161,9 +178,10 @@ export class InvestigateLocators extends TroubleshootEventsLocators {
   // and ThreeDotsMenu only ever gives it an index-derived id ('tdm-0') because
   // the investigate menu items declare no id of their own. That id shifts as
   // permissions add or drop entries, so the label — scoped to the open menu — is
-  // the only stable handle.
-  menuItem(label: string): Locator {
-    return this.openMenu.locator('[role="menuitem"]').filter({ hasText: label }).first();
+  // the only stable handle. Defaults to the generic More-actions-style menu;
+  // pass automationDropdownMenu for an item inside that dropdown instead.
+  menuItem(label: string, container: Locator = this.openMenu): Locator {
+    return container.locator('[role="menuitem"]').filter({ hasText: label }).first();
   }
 
   // ds/Modal labels its MUI Dialog via id='alert-dialog-title', so the modal

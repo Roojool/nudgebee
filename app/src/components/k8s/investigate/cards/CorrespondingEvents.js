@@ -26,10 +26,22 @@ class CorrespondingEvents {
       const filteredData = evidenceData.find((item) => item.type === 'json' && safeJSONParse(item.data)?.name === 'api_traces_enricher');
       if (filteredData) {
         const tracesData = JSON.parse(filteredData.data);
-        let namespaceAndWorkload = tracesData.data.map((g) => ({
-          namespace: g.workload_namespace || g.ResourceAttributes['k8s.namespace.name'] || '',
-          workload: g.workload_name || g.ResourceAttributes['k8s.deployment.name'] || '',
-        }));
+        // A span names both of its ends under SpanAttributes as source.workload_*
+        // and destination.workload_*. The root-level and ResourceAttributes pairs
+        // below are the older shapes; no payload we emit today carries them, and
+        // reading ResourceAttributes unguarded threw when it was absent.
+        let namespaceAndWorkload = (tracesData.data || []).flatMap((g) => {
+          const span = g.SpanAttributes || {};
+          const resource = g.ResourceAttributes || {};
+          return [
+            { namespace: span['source.workload_namespace'], workload: span['source.workload_name'] },
+            { namespace: span['destination.workload_namespace'], workload: span['destination.workload_name'] },
+            {
+              namespace: g.workload_namespace || resource['k8s.namespace.name'] || '',
+              workload: g.workload_name || resource['k8s.deployment.name'] || '',
+            },
+          ];
+        });
         this.namespaces = [...new Set(namespaceAndWorkload.map((g) => g.namespace).filter((ns) => ns))];
         this.workloadNames = [...new Set(namespaceAndWorkload.map((g) => g.workload).filter((wl) => wl))];
       }

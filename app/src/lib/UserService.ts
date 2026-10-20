@@ -58,6 +58,8 @@ query GetUserByProviderAndAccountId($username: String!, $provider: String!) {
       credential
       auth_tenant_id
       expires_at
+      kind
+      scopes
       auth_status
       provider
       user_id
@@ -459,6 +461,9 @@ export async function getUserByUsernameAndAccountProviderAndCredential({
           tenant_id: row.auth_tenant_id,
           credential: row.credential,
           expires_at: row.expires_at,
+          kind: row.kind,
+          // NULL = full access. A JSON column may arrive as a string, like the ones above.
+          scopes: typeof row.scopes === 'string' ? JSON.parse(row.scopes) : row.scopes ?? null,
           user: {
             id: row.id,
             display_name: row.display_name,

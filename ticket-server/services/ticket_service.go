@@ -20,12 +20,42 @@ const ActionCreated = "created"
 const MessageCreatedSuccess = "Ticket created successfully"
 const ActionCommented = "commented"
 const MessageCommentedSuccess = "Existing ticket found, Added comment successfully"
+const ActionCreatedUnlinked = "created_unlinked"
 
 func GetErrorResponse(err string) models.TicketInsertResponse {
 	return models.TicketInsertResponse{
 		Data: models.Data{
 			InsertTicketsOne: models.InsertTicketsOne{
 				Error: err,
+			},
+		},
+	}
+}
+
+// unlinkedTicketResponse builds the response for a ticket that was created
+// successfully in the external tool but could not be saved to the tickets
+// table (database outage, or a constraint violation on a field value that
+// isn't recognized locally). Reporting this as a plain error would make the
+// caller believe nothing was created and invite a retry — which creates a
+// second real ticket upstream, since the dedup check in checkIfTicketExistsAndAddComment
+// has no local row to match against. Reporting it as created-but-unlinked
+// instead gives the user the real ticket ID/URL and tells them not to retry.
+// See GitHub issue #39098.
+func unlinkedTicketResponse(tool string, ticket models.Ticket) models.TicketInsertResponse {
+	return models.TicketInsertResponse{
+		Data: models.Data{
+			InsertTicketsOne: models.InsertTicketsOne{
+				Platform:    ticket.Platform,
+				ReferenceId: ticket.ReferenceID,
+				Severity:    ticket.Severity,
+				Status:      ticket.Status,
+				TicketID:    ticket.TicketID,
+				URL:         ticket.URL,
+				Action:      ActionCreatedUnlinked,
+				Message: fmt.Sprintf(
+					"Ticket %s was created in %s but could not be saved here, so it won't show up in the ticket list. Find it directly in %s — do not retry, that would create a duplicate.",
+					ticket.TicketID, tool, tool,
+				),
 			},
 		},
 	}
@@ -374,7 +404,9 @@ func CreateIssue(ctx *gin.Context, ticket models.Ticket) (models.TicketInsertRes
 
 	dbManager, dbErr := database.GetDatabaseManager()
 	if dbErr != nil {
-		return GetErrorResponse(fmt.Sprintf("failed to save %s ticket %s to database", configuration.Tool, ticket.TicketID)), fmt.Errorf("database unavailable: %v", dbErr)
+		slog.Error("ticket created upstream but database is unavailable to link it in NudgeBee",
+			"tool", configuration.Tool, "ticketID", ticket.TicketID, "url", ticket.URL, "error", dbErr)
+		return unlinkedTicketResponse(configuration.Tool, ticket), nil
 	}
 
 	var inserted models.Ticket
@@ -393,8 +425,9 @@ func CreateIssue(ctx *gin.Context, ticket models.Ticket) (models.TicketInsertRes
 		ticket.Tenant, ticket.AccountID, ticket.Status, ticket.TicketID, ticket.IntegrationID, ticket.URL,
 	)
 	if err != nil {
-		return GetErrorResponse(fmt.Sprintf("failed to save %s ticket %s to database", configuration.Tool, ticket.TicketID)),
-			fmt.Errorf("error executing insert ticket query for %s ticket %s: %v", configuration.Tool, ticket.TicketID, err)
+		slog.Error("ticket created upstream but failed to save it to database; it will not be linked or deduplicated in NudgeBee",
+			"tool", configuration.Tool, "ticketID", ticket.TicketID, "url", ticket.URL, "error", err)
+		return unlinkedTicketResponse(configuration.Tool, ticket), nil
 	}
 
 	return models.TicketInsertResponse{
@@ -784,6 +817,18 @@ func UpdateTicket(ctx *gin.Context, ticket models.Ticket, updateFields models.Up
 
 	if err := manager.Update(ctx, configuration, ticket.TicketID, updateFields); err != nil {
 		return err
+	}
+	if configuration.Tool == "servicenow" {
+		// ServiceNow never takes a severity: it derives Priority from Impact and Urgency, so
+		// the row must follow ServiceNow's result rather than whatever severity the caller sent.
+		updateFields.Severity = ""
+		if updateFields.Impact != "" || updateFields.Urgency != "" {
+			if current, err := manager.Get(ctx, configuration, ticket.TicketID); err != nil {
+				slog.Warn("ServiceNow: could not read back severity after update", "ticketID", ticket.TicketID, "error", slog.AnyValue(err))
+			} else if current != nil {
+				updateFields.Severity = current.Severity
+			}
+		}
 	}
 	syncTicketToDB(ticket.TicketID, ticket.IntegrationID, updateFields)
 	return nil

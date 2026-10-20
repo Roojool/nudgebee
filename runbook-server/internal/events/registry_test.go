@@ -343,3 +343,28 @@ func TestEventRegistry_DateVars(t *testing.T) {
 	// timestamp_iso is populated, so only the non-empty branch matches.
 	assert.ElementsMatch(t, []string{"wf-has-ts"}, gotIDs)
 }
+
+func TestEventRegistry_MatchesListenAccounts(t *testing.T) {
+	mockStore := new(MockTriggerStore)
+	registry := NewEventRegistry(mockStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// The DAO emits one row per listened account; a row without one listens to its own.
+	mockStore.On("FindEventTriggers", mock.Anything).Return([]model.WorkflowEventTriggerRule{
+		{WorkflowID: "wf-multi", AccountID: "acct-a", ListenAccountID: "acct-a", EventType: "alert"},
+		{WorkflowID: "wf-multi", AccountID: "acct-a", ListenAccountID: "acct-b", EventType: "alert"},
+		{WorkflowID: "wf-legacy", AccountID: "acct-a", EventType: "alert"},
+	}, nil)
+	assert.NoError(t, registry.Refresh(context.Background()))
+
+	ids := func(rules []model.WorkflowEventTriggerRule) []string {
+		var out []string
+		for _, r := range rules {
+			out = append(out, r.WorkflowID)
+		}
+		return out
+	}
+	phase := string(model.DefaultLifecyclePhase)
+	assert.ElementsMatch(t, []string{"wf-multi", "wf-legacy"}, ids(registry.Match("alert", "acct-a", map[string]any{}, phase)))
+	assert.Equal(t, []string{"wf-multi"}, ids(registry.Match("alert", "acct-b", map[string]any{}, phase)))
+	assert.Empty(t, registry.Match("alert", "acct-c", map[string]any{}, phase))
+}

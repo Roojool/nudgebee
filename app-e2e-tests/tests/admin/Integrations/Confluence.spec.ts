@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import {
   navigateToDocsTab,
   testConnection,
@@ -9,6 +9,7 @@ import {
   disableIntegration,
   enableIntegration,
   selectAccountFromDropdown,
+  openEditIntegration,
 } from "./util";
 
 const requiredEnv = [
@@ -24,7 +25,7 @@ const configName = process.env.CONFLUENCE_INTEGRATION_CONFIG_NAME!;
 test.describe.serial("Confluence Account Integration", () => {
   let integrationExists = false;
 
-  test("Check if Confluence integration exists", { tag: ["@dev", "@test", "@oss", "@regression", "@functional"] }, async ({ page }) => {
+  test("Check if Confluence integration exists", { tag: ["@test", "@oss", "@regression", "@functional"] }, async ({ page }) => {
     test.skip(
       missingEnv.length > 0,
       `Missing required env vars: ${missingEnv.join(", ")} — add them to the E2E_TEST_ENV secret`,
@@ -40,7 +41,7 @@ test.describe.serial("Confluence Account Integration", () => {
     });
   });
 
-  test("Delete Confluence integration if present", { tag: ["@dev", "@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
+  test("Delete Confluence integration if present", { tag: ["@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
     test.skip(
       missingEnv.length > 0,
       `Missing required env vars: ${missingEnv.join(", ")} — add them to the E2E_TEST_ENV secret`,
@@ -57,7 +58,7 @@ test.describe.serial("Confluence Account Integration", () => {
     });
   });
 
-  test("Add Confluence Account Integration", { tag: ["@dev", "@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
+  test("Add Confluence Account Integration", { tag: ["@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
     test.skip(
       missingEnv.length > 0,
       `Missing required env vars: ${missingEnv.join(", ")} — add them to the E2E_TEST_ENV secret`,
@@ -94,7 +95,45 @@ test.describe.serial("Confluence Account Integration", () => {
     });
   });
 
-  test("Disable Confluence integration", { tag: ["@dev", "@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
+  test("Update Confluence Account Integration", { tag: ["@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
+    test.skip(
+      missingEnv.length > 0,
+      `Missing required env vars: ${missingEnv.join(", ")} — add them to the E2E_TEST_ENV secret`,
+    );
+    const locators = await navigateToDocsTab(page);
+    const present = await ensureIntegrationPresent(page, {
+      openList: async () => {
+        await locators.confluenceBtn.click();
+      },
+      configName,
+      serviceName: "Confluence",
+      statusFilterId: "confluence-status-filter",
+      integrationKey: "confluence",
+    });
+    test.skip(!present, "Confluence integration is not Active — Slack notification sent");
+
+    await openEditIntegration(page, {
+      openList: async () => {
+        await locators.confluenceBtn.click();
+      },
+      configName,
+      serviceName: "Confluence",
+      statusFilterId: "confluence-status-filter",
+    });
+
+    await locators.confluenceNamespaceInput.waitFor({ state: "visible", timeout: 10000 });
+    await expect(locators.confluenceNamespaceInput).toHaveValue(process.env.CONFLUENCE_NAMESPACE!);
+    await locators.confluenceNamespaceInput.fill(process.env.CONFLUENCE_NAMESPACE!);
+
+    await saveAndHandleAlreadyExists(page, {
+      saveBtn: locators.saveBtn,
+      successToast: locators.confluenceUpdateSuccessToast,
+      testName: "Update Confluence Account Integration",
+      operationNames: ["AddIntegrations"],
+    });
+  });
+
+  test("Disable Confluence integration", { tag: ["@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
     test.skip(
       missingEnv.length > 0,
       `Missing required env vars: ${missingEnv.join(", ")} — add them to the E2E_TEST_ENV secret`,
@@ -113,7 +152,7 @@ test.describe.serial("Confluence Account Integration", () => {
     await disableIntegration(page, { configName, serviceName: "Confluence" });
   });
 
-  test("Enable Confluence integration", { tag: ["@dev", "@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
+  test("Enable Confluence integration", { tag: ["@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
     test.skip(
       missingEnv.length > 0,
       `Missing required env vars: ${missingEnv.join(", ")} — add them to the E2E_TEST_ENV secret`,

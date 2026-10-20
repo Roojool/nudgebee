@@ -89,6 +89,13 @@ func (s *OpenObserveMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 	start, end, step := openObserveMetricQueryRangeParams(req)
 
 	for queryKey, rawQuery := range req.Queries {
+		// The utilisation query builders emit a __CLUSTER__ placeholder that relay-server
+		// substitutes on the agent path and PrometheusSaasMetricSource expands itself. This
+		// path does neither, so it must expand the token here -- otherwise it reaches
+		// OpenObserve verbatim and every query fails to parse. OpenObserveConfig carries no
+		// additional-labels field (the org is the tenant boundary), so it expands to empty.
+		// Runs before matcher injection so that operates on valid PromQL.
+		rawQuery = integrations.ExpandClusterPlaceholder(rawQuery, "")
 		query, err := injectPromQLMatchers(rawQuery, req.LabelMatchers, req.Labels)
 		if err != nil {
 			errorMsg := err.Error()
@@ -105,13 +112,28 @@ func (s *OpenObserveMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 			}
 		}
 
+		// An instant query is a different endpoint, not a parameter. `Instant` is set
+		// whenever the caller asked for an Aggregate (service.go: "a collapse answers
+		// with one point per series"), and the builders have already wrapped the
+		// expression in max_over_time(...[range:step]). Running that through
+		// query_range evaluates the wrapper once per step and answers with a whole
+		// series -- 101 points where the contract promises one, which ~30 UI call
+		// sites read as payload[0] and plot as the workload.
+		//
+		// Prometheus's own source has always branched here; this one did not, so every
+		// aggregated key on an OpenObserve account came back uncollapsed.
 		endpoint := fmt.Sprintf("%s/api/%s/prometheus/api/v1/query_range", cfg.URL, cfg.OrgID)
 
 		form := neturl.Values{}
 		form.Add("query", query)
-		form.Add("start", start)
-		form.Add("end", end)
-		form.Add("step", strconv.Itoa(step))
+		if req.Instant {
+			endpoint = fmt.Sprintf("%s/api/%s/prometheus/api/v1/query", cfg.URL, cfg.OrgID)
+			form.Add("time", end)
+		} else {
+			form.Add("start", start)
+			form.Add("end", end)
+			form.Add("step", strconv.Itoa(step))
+		}
 
 		authHeader := openObserveAuthHeader(cfg.Username, cfg.Password)
 
@@ -143,7 +165,11 @@ func (s *OpenObserveMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 			Data struct {
 				Result []struct {
 					Metric map[string]string `json:"metric"`
-					Values [][]any           `json:"values"`
+					// A range query answers with `values` (a matrix); an instant query
+					// answers with `value` -- one [ts, "n"] pair. Both are read here so
+					// the two endpoints share one decode path.
+					Values [][]any `json:"values"`
+					Value  []any   `json:"value"`
 				} `json:"result"`
 			} `json:"data"`
 		}
@@ -156,9 +182,16 @@ func (s *OpenObserveMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 
 		var payloadResults []Result
 		for _, r := range payload.Data.Result {
-			timestamps := make([]int64, 0, len(r.Values))
-			values := make([]float64, 0, len(r.Values))
-			for _, v := range r.Values {
+			// Normalise the instant shape onto the range one so everything below reads
+			// the same. A pair with no timestamp is not a point, and is dropped by the
+			// length check in the loop rather than silently becoming a zero.
+			pairs := r.Values
+			if len(pairs) == 0 && len(r.Value) > 0 {
+				pairs = [][]any{r.Value}
+			}
+			timestamps := make([]int64, 0, len(pairs))
+			values := make([]float64, 0, len(pairs))
+			for _, v := range pairs {
 				if len(v) != 2 {
 					continue
 				}
@@ -200,15 +233,16 @@ func (s *OpenObserveMetricSource) FetchMetricList(ctx *security.RequestContext, 
 		return nil, fmt.Errorf("failed to get OpenObserve configs: %w", err)
 	}
 
-	// The regex literal must be quoted: `{__name__=~.*foo.*}` is not valid PromQL and the
-	// server rejects or ignores it, silently returning the unfiltered set.
-	var matchers []string
-	if req.Metric != "" {
-		matchers = append(matchers, fmt.Sprintf(`{__name__=~".*%s.*"}`, escapePromQLLabelValue(req.Metric)))
-	}
-
+	// Filtered client-side, not with a match[] selector. OpenObserve's Prometheus shim
+	// resolves match[] to a metric NAME only: a `{__name__=~".*foo.*"}` selector comes
+	// back as an empty list rather than the matching subset, and a selector that does not
+	// start with a literal name is rejected outright with HTTP 400 ("match[] argument must
+	// start with a metric name"). Verified against OpenObserve v1.0.3. Asking for the
+	// whole catalog — the one form the endpoint answers — and matching here is what makes
+	// keyword discovery return anything at all; the catalog is a single call and the
+	// caller caps the list well below its size.
 	endpoint := fmt.Sprintf("%s/api/%s/prometheus/api/v1/label/__name__/values", cfg.URL, cfg.OrgID) +
-		openObserveMetricMetadataQuery(req.StartTime, req.EndTime, matchers, time.Now())
+		openObserveMetricMetadataQuery(req.StartTime, req.EndTime, nil, time.Now())
 
 	authHeader := openObserveAuthHeader(cfg.Username, cfg.Password)
 
@@ -234,8 +268,15 @@ func (s *OpenObserveMetricSource) FetchMetricList(ctx *security.RequestContext, 
 		return nil, err
 	}
 
+	// Case-insensitive substring, matching what the keyword search advertises: callers
+	// pass a technology keyword ("redis", "jvm") rather than an exact metric name.
+	filter := strings.ToLower(req.Metric)
+
 	var output []OutputMetrics
 	for _, name := range payload.Data {
+		if filter != "" && !strings.Contains(strings.ToLower(name), filter) {
+			continue
+		}
 		output = append(output, OutputMetrics{Metric: name, Attributes: map[string]any{}})
 	}
 
@@ -272,7 +313,7 @@ func (s *OpenObserveMetricSource) FetchMetricLabelValues(ctx *security.RequestCo
 	sql := fmt.Sprintf(`SELECT %s FROM "%s" WHERE %s IS NOT NULL GROUP BY %s ORDER BY %s LIMIT 100`,
 		col, metric, col, col, col)
 
-	values, err := openObserveMetricSearch(cfg, sql, req.StartTime, req.EndTime, col)
+	values, err := openObserveMetricSearch(cfg, sql, req.StartTime, req.EndTime, col, openObserveSearchTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -313,10 +354,15 @@ func isOpenObserveEmptyResultError(body string) bool {
 	return strings.Contains(lower, "stream not found") || strings.Contains(lower, "field not found")
 }
 
+// openObserveSearchTimeout is the default budget for a single /_search call. A sweep
+// that issues several of them shortens it to whatever is left of its own deadline.
+const openObserveSearchTimeout = 15 * time.Second
+
 // openObserveMetricSearch runs a SQL query against a metric stream and returns the distinct
 // values of one column. Metrics live in their own streams, so the /_search API answers
-// metadata questions the Prometheus shim cannot.
-func openObserveMetricSearch(cfg integrations.OpenObserveConfig, sql string, startMs, endMs int64, col string) ([]string, error) {
+// metadata questions the Prometheus shim cannot. The caller supplies the timeout because a
+// sweep of several searches has to divide one action deadline between them.
+func openObserveMetricSearch(cfg integrations.OpenObserveConfig, sql string, startMs, endMs int64, col string, timeout time.Duration) ([]string, error) {
 	startMicros, endMicros := openObserveTimeRangeMicros(startMs, endMs, time.Now())
 
 	searchReq := openObserveSearchRequest{}
@@ -337,7 +383,7 @@ func openObserveMetricSearch(cfg integrations.OpenObserveConfig, sql string, sta
 			"Content-Type":  "application/json",
 		}),
 		common.HttpWithBody(io.NopCloser(bytes.NewReader(payloadBytes))),
-		common.HttpWithTimeout(15*time.Second),
+		common.HttpWithTimeout(timeout),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("OpenObserve metric search failed: %w", err)

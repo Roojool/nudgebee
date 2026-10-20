@@ -75,6 +75,7 @@ export default defineConfig({
     ["html", { outputFolder: "playwright-report", open: "never" }],
     ["json", { outputFile: "playwright-report/results.json" }],
     ["./notifications/SlackReporter.ts"],
+    ["./notifications/E2EReportReporter.ts"],
   ],
 
   use: {

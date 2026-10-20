@@ -22,14 +22,14 @@ import { containsLink, snakeToTitleCase, safeJSONParse } from 'src/utils/common'
 import { ListingLayout } from '@ui/ListingLayout';
 import CustomTable from '@shared/tables/CustomTable';
 import FilterDropdown from '@ui/FilterDropdown';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
-import { cardTabSx, cardKeyDown } from './utils';
+import { cardTabSx } from './utils';
 import { SeverityIcon, type SeverityLevel } from '@ui/SeverityIcon';
 import DownloadButton from '@shared/buttons/DownloadButton';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import ResolutionDetailPanel from './ResolutionDetailPanel';
-import { describeResolutionReference, formatResolutionType } from './resolutionDetail';
+import { describeResolutionReference, formatResolutionType, workloadLabelFor } from './resolutionDetail';
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
@@ -298,8 +298,7 @@ const ResolutionsView = () => {
           rec?.namespace ||
           '';
         const name = rec?.spec?.claimRef?.name || rec?.metadata?.name || '';
-        const workloadName =
-          rr.recommendation?.cloud_resourse?.meta?.controller || rr.recommendation?.cloud_resourse?.meta?.config?.labels?.['app.kubernetes.io/name'];
+        const workloadName = workloadLabelFor(rr);
 
         // The type, plus what it produced when that is something a reader can use.
         const reference = describeResolutionReference(rr.type_reference_id, rr.status, rr.data?.ticket_key);
@@ -503,13 +502,12 @@ const ResolutionsView = () => {
     <Box sx={{ p: '0px' }} data-testid='optimize-resolutions-page'>
       {/* Stat cards sit ABOVE the listing shell, per the ListingLayout contract. */}
       <Box sx={{ display: 'flex', gap: ds.space[3], mt: ds.space[4] }}>
-        <WidgetCard
-          role='button'
-          tabIndex={0}
-          aria-pressed={selectedStatus === ''}
+        <Card
+          interactive
+          pressed={selectedStatus === ''}
+          size='sm'
           data-testid='resolutions-card-all'
           onClick={handleAllCardClick}
-          onKeyDown={cardKeyDown(handleAllCardClick)}
           sx={cardTabSx(selectedStatus === '', false)}
         >
           <Stat
@@ -518,25 +516,24 @@ const ResolutionsView = () => {
             info={{ tooltip: 'Every resolution attempted on a recommendation, across all statuses. Click to clear the status filter.' }}
             value={cardsLoading ? '…' : allResolutionsCount.toLocaleString()}
           />
-        </WidgetCard>
+        </Card>
 
         {STATUS_CARDS.map(({ status, label, tooltip }) => {
           const count = statusCounts[status] || 0;
           const pressed = selectedStatus === status;
           // A zero card is muted and inert rather than tooltipped: the count on its
-          // face already says why, and WidgetCard is not a forwardRef, so a MUI
+          // face already says why, and Card is not a forwardRef, so a MUI
           // Tooltip wrapped round it cannot hold the ref it needs to position.
           const muted = count === 0 && !pressed && !cardsLoading;
           return (
-            <WidgetCard
+            <Card
               key={status}
-              role='button'
-              tabIndex={muted ? -1 : 0}
-              aria-pressed={pressed}
-              aria-disabled={muted || undefined}
+              interactive
+              disabled={muted}
+              pressed={pressed}
+              size='sm'
               data-testid={`resolutions-card-${status.toLowerCase()}`}
-              onClick={muted ? undefined : () => handleStatusCardClick(status)}
-              onKeyDown={muted ? undefined : cardKeyDown(() => handleStatusCardClick(status))}
+              onClick={() => handleStatusCardClick(status)}
               sx={cardTabSx(pressed, muted)}
             >
               <Stat
@@ -546,7 +543,7 @@ const ResolutionsView = () => {
                 info={{ tooltip: muted ? tooltip : `${tooltip} Click to filter the list; click again to unselect.` }}
                 value={cardsLoading ? '…' : count.toLocaleString()}
               />
-            </WidgetCard>
+            </Card>
           );
         })}
       </Box>

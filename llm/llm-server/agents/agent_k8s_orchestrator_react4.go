@@ -11,8 +11,8 @@ import (
 // AgentK8sOrchestratorReAct4Name is an EVALUATION handle: the same lean K8s
 // orchestrator as k8s_orchestrator, pinned to the ReAct4 provider-native
 // tool-calling planner. It exists so ReAct4 can be exercised in a deployed
-// environment via @k8s_orchestrator_react4 without flipping
-// LlmServerReAct4Enabled for every account and every agent.
+// environment via @k8s_orchestrator_react4 without altering
+// LlmServerPlannerEngine for every account and every agent.
 //
 // Three properties make it safe to register alongside the primary handle:
 //
@@ -61,7 +61,7 @@ func newK8sOrchestratorReAct4Agent(accountId string) core.NBAgent {
 }
 
 // PrefersReAct4 pins this handle to the native tool-calling planner regardless
-// of LlmServerReAct4Enabled. It is still subject to the provider/model
+// of LlmServerPlannerEngine. It is still subject to the provider/model
 // capability gate, so on a provider without native tool support this handle
 // degrades to ReAct3 rather than failing.
 func (a *K8sOrchestratorReAct4Agent) PrefersReAct4() bool { return true }

@@ -62,20 +62,33 @@ type KBRetrievalProbeResult struct {
 	Candidates []KBRetrievalProbeKB  `json:"candidates"`
 }
 
-// dropReasonUnattributable is the only drop the pre-step performs: a document
-// came back from RAG but no candidate KB owns it, so it is failed closed
-// (retrieveRelevantKB -> attributeKBReferences). There is deliberately NO
-// relative score cutoff — see the comment in retrieveRelevantKB.
-const dropReasonUnattributable = "No knowledge base in scope owns this document, so the pre-step drops it (fail-closed)."
+// The two drops the pre-step performs, in the order it performs them. There is
+// deliberately NO relative score cutoff — see the comment in retrieveRelevantKB.
+const (
+	// dropReasonJudgeRejected: retrieval found the document, and the judge
+	// decided it does not answer this question. The judge keeps at most one
+	// document per question, so on a question the knowledge base can answer
+	// this is the reason most candidates carry.
+	dropReasonJudgeRejected = "Retrieval found this document, but it was not judged to answer the question."
+	// dropReasonUnattributable: a document came back from RAG but no candidate
+	// KB owns it, so it is failed closed (retrieveRelevantKB ->
+	// attributeKBReferences).
+	dropReasonUnattributable = "No knowledge base in scope owns this document, so the pre-step drops it (fail-closed)."
+)
 
 // ProbeKBRetrieval answers "what would actually be retrieved for this
 // question?" by running the SAME path as the KB pre-step: a reranked search on
 // the knowledge_base module, the same dedup, the same attribution.
 //
 // It differs from retrieveRelevantKB in exactly two ways, both deliberate:
-// token usage is NOT tracked (an operator testing a query must not land on the
-// account's LLM bill or skew per-agent usage attribution), and the documents
-// that attribution drops are reported instead of only counted.
+// retrieval token usage is NOT tracked (an operator testing a query must not
+// skew per-agent usage attribution), and the documents the pre-step drops are
+// reported instead of only counted.
+//
+// The judge DOES run here, and its LLM call is tracked like any other. Skipping
+// it would be cheaper and would make this panel lie: Injected is defined as
+// "would the pre-step put this in the prompt", and the pre-step injects at most
+// the one document the judge picked.
 //
 // Scope is one of three, in precedence order:
 //
@@ -190,11 +203,24 @@ func ProbeKBRetrieval(ctx *security.RequestContext, accountId, agentId, kbId, qu
 	if scopedCollection == "" {
 		candidates = mergeAccountIntegrationKBs(ctx, accountId, kbs)
 	}
-	refs, attributed, dropped := attributeKBReferences(ctx, accountId, kept, candidates)
-	result.Injected = len(attributed)
-	result.Dropped = dropped
+	// Same order as the pre-step: judge the deduped set, then attribute what
+	// survived. Attribution runs on the survivors so Injected counts what would
+	// really reach the prompt, while every retrieved document is still reported
+	// below with the reason it did not.
+	judged := judgeKBResultsFn(ctx, accountId, userId, "", "", query, kept)
+	judgedKeys := make(map[string]struct{}, len(judged))
+	for _, doc := range judged {
+		judgedKeys[ragDocDedupKey(doc)] = struct{}{}
+	}
 
-	docs2, matchedKBIds := buildProbeDocuments(kept, refs, attributed)
+	refs, attributed, _ := attributeKBReferences(ctx, accountId, judged, candidates)
+	result.Injected = len(attributed)
+	// Everything retrieved that is not injected was dropped, by the judge or by
+	// attribution. Counting only attribution's drops would leave the judge's
+	// invisible in the totals.
+	result.Dropped = result.Retrieved - result.Injected
+
+	docs2, matchedKBIds := buildProbeDocuments(kept, refs, attributed, judgedKeys)
 	result.Documents = docs2
 
 	result.Candidates = summarizeCandidates(candidates, matchedKBIds)
@@ -205,14 +231,17 @@ func ProbeKBRetrieval(ctx *security.RequestContext, accountId, agentId, kbId, qu
 	return result, nil
 }
 
-// buildProbeDocuments pairs every retrieved document with what attribution
-// decided about it. attributeKBReferences appends to refs and attributed
+// buildProbeDocuments pairs every retrieved document with what the judge and
+// then attribution decided about it. judgedKeys is the set of dedup keys that
+// survived the judge, so a drop can be reported with the stage that caused it;
+// when the judge is switched off it holds every key and no document can be
+// attributed to it. attributeKBReferences appends to refs and attributed
 // together, so index i of one describes index i of the other; a document whose
 // dedup key is absent from attributed is one it dropped.
 //
 // The second return is the set of KB ids that actually contributed a document,
 // used to mark the in-scope knowledge bases that matched nothing.
-func buildProbeDocuments(kept toolcore.RAGSearchResults, refs []AgentReference, attributed toolcore.RAGSearchResults) ([]KBRetrievalProbeDoc, map[string]struct{}) {
+func buildProbeDocuments(kept toolcore.RAGSearchResults, refs []AgentReference, attributed toolcore.RAGSearchResults, judgedKeys map[string]struct{}) ([]KBRetrievalProbeDoc, map[string]struct{}) {
 	injectedKeys := make(map[string]int, len(attributed))
 	for i, doc := range attributed {
 		injectedKeys[ragDocDedupKey(doc)] = i
@@ -256,6 +285,8 @@ func buildProbeDocuments(kept toolcore.RAGSearchResults, refs []AgentReference, 
 				entry.KBId = kbId
 				matchedKBIds[kbId] = struct{}{}
 			}
+		} else if _, survived := judgedKeys[ragDocDedupKey(doc)]; !survived {
+			entry.DropReason = dropReasonJudgeRejected
 		} else {
 			entry.DropReason = dropReasonUnattributable
 		}

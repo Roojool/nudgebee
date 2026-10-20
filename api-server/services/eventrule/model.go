@@ -3,6 +3,9 @@ package eventrule
 import "nudgebee/services/eventrule/playbooks"
 
 type EventConfig struct {
+	// Id is the event_rules row being updated. When set, UpdateEventRule routes by
+	// the stored row (source, locator, labels) instead of the request's fields.
+	Id          string `json:"id"`
 	Annotations struct {
 		Description string `json:"description"`
 		Summary     string `json:"summary"`

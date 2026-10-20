@@ -158,18 +158,20 @@ def get_batched_findings_message_template(payload: BatchedFindingsPayload):
             "Also seen: " + " · ".join(f"{copy_library.display_name(key)} ({count})" for key, count in top_aggregated)
         )
 
-    footer_actions = None
-    if len(unique_account_ids) == 1:
-        only_account = next(iter(unique_account_ids))
-        footer_actions = [
-            link_button(
-                "View all findings",
-                settings.urls.events_url(only_account, utm_source=URLRoutes.UTMSource.SLACK),
-                style="primary",
-            )
-        ]
-    else:
-        footer_lines.append(f"View all findings on {settings.urls.branding_link('slack')}")
+    # events_url() pointed at "/events", which isn't a real app page; troubleshoot_url()
+    # is. No account filter here — Details buttons above already scope to their account.
+    footer_actions = [
+        link_button(
+            "View all findings",
+            settings.urls.troubleshoot_url(
+                [],
+                start_time_ms=int(payload.batch_start_time.timestamp() * 1000),
+                end_time_ms=int(payload.batch_end_time.timestamp() * 1000),
+                utm_source=URLRoutes.UTMSource.SLACK,
+            ),
+            style="primary",
+        )
+    ]
     attachments.append(
         neutral_footer_attachment(
             text="\n".join(footer_lines),

@@ -2,6 +2,8 @@ package triage
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	"nudgebee/services/eventrule"
@@ -79,7 +81,7 @@ func ApplyThresholdSuggestion(ctx *security.RequestContext, req ApplyThresholdRe
 		return ApplyThresholdResult{}, fmt.Errorf("blocked: this is a high-risk (dangerous) suggestion and requires explicit override")
 	}
 
-	rule, err := LoadSourceRule(ctx.GetContext(), db, req.CloudAccountID, sug.AlertName)
+	rule, err := LoadSourceRule(ctx.GetContext(), db, sc.GetTenantId(), req.CloudAccountID, sug.AlertName, sug.Source, req.AlertRuleKey)
 	if err != nil {
 		return ApplyThresholdResult{}, fmt.Errorf("source rule not found for alert %q: %w", sug.AlertName, err)
 	}
@@ -122,7 +124,8 @@ func ApplyThresholdSuggestion(ctx *security.RequestContext, req ApplyThresholdRe
 
 	switch req.Method {
 	case "direct":
-		if err := applyDirect(ctx, &sugForApply, rule, rewritten); err != nil {
+		previous, err := applyDirect(ctx, &sugForApply, rule, rewritten)
+		if err != nil {
 			_ = markApplyFailed(ctx.GetContext(), db, req, err.Error())
 			result.Status = "failed"
 			result.Error = err.Error()
@@ -132,6 +135,7 @@ func ApplyThresholdSuggestion(ctx *security.RequestContext, req ApplyThresholdRe
 		if merr := markApplied(ctx.GetContext(), db, req, sc.GetUserId(), "applied", rewritten, newThreshold, nil); merr != nil {
 			ctx.GetLogger().Error("failed to record threshold apply state", "error", merr, "alert_rule_key", req.AlertRuleKey)
 		}
+		storePreviousProviderConfig(ctx, db, req.AlertRuleKey, req.CloudAccountID, previous)
 
 	case "pr":
 		resolutionID, err := applyViaPR(ctx, &sugForApply, rule, rewritten, req)
@@ -180,37 +184,30 @@ func RevertThresholdSuggestion(ctx *security.RequestContext, alertRuleKey, cloud
 	if sug.ApplyMethod == "pr" {
 		return ApplyThresholdResult{}, fmt.Errorf("revert via PR is not supported automatically; open a revert PR manually")
 	}
-	if sug.PreviousThreshold == nil {
-		return ApplyThresholdResult{}, fmt.Errorf("no previous threshold recorded; cannot revert")
-	}
-
-	rule, err := LoadSourceRule(ctx.GetContext(), db, cloudAccountID, sug.AlertName)
+	rule, err := LoadSourceRule(ctx.GetContext(), db, sc.GetTenantId(), cloudAccountID, sug.AlertName, sug.Source, alertRuleKey)
 	if err != nil {
 		return ApplyThresholdResult{}, fmt.Errorf("source rule not found: %w", err)
 	}
 
-	prevDuration := 0
-	if sug.PreviousDuration != nil {
-		prevDuration = *sug.PreviousDuration
-	}
-	// Force a threshold rewrite for revert regardless of the original recommendation type.
-	sugCopy := *sug
-	if sugCopy.RecommendationType == "disable" || sugCopy.RecommendationType == "increase_duration" || sugCopy.RecommendationType == "tune_both" {
-		// Anything that originally changed the duration must restore both threshold
-		// and duration on revert (tune_both included — otherwise the duration change
-		// is left applied).
-		sugCopy.RecommendationType = "tune_both"
-	} else {
-		sugCopy.RecommendationType = "tune_threshold"
-	}
-
-	rewritten, err := BuildRewrittenRule(&sugCopy, rule, *sug.PreviousThreshold, prevDuration)
+	plan, err := planRevert(sug, rule, loadPreviousProviderConfig(ctx, db, alertRuleKey, cloudAccountID))
 	if err != nil {
 		return ApplyThresholdResult{}, err
 	}
-	if err := applyDirect(ctx, &sugCopy, rule, rewritten); err != nil {
+	if plan.reEnable {
+		if _, err := eventrule.DisableEventRule(ctx, eventrule.DisableEventConfig{
+			Alert:     sug.AlertName,
+			AccountID: sug.CloudAccountID,
+			TenantID:  sug.TenantID,
+			Id:        rule.ID,
+			Enable:    true,
+		}); err != nil {
+			return ApplyThresholdResult{}, err
+		}
+	} else if _, err := applyDirect(ctx, plan.sug, rule, plan.rewritten); err != nil {
 		return ApplyThresholdResult{}, err
 	}
+	rewritten := plan.rewritten
+	appliedThreshold := plan.appliedThreshold
 
 	_, err = db.ExecContext(ctx.GetContext(), `
 		UPDATE event_threshold_suggestions
@@ -224,7 +221,7 @@ func RevertThresholdSuggestion(ctx *security.RequestContext, alertRuleKey, cloud
 	return ApplyThresholdResult{
 		Status:            "reverted",
 		Method:            "direct",
-		AppliedThreshold:  *sug.PreviousThreshold,
+		AppliedThreshold:  appliedThreshold,
 		PreviousThreshold: sug.CurrentThreshold,
 		AppliedExpr:       rewritten.Expr,
 	}, nil
@@ -294,7 +291,7 @@ func GetThresholdApplyOptions(ctx *security.RequestContext, alertRuleKey, cloudA
 		return out, nil
 	}
 
-	rule, ruleErr := LoadSourceRule(ctx.GetContext(), db, cloudAccountID, sug.AlertName)
+	rule, ruleErr := LoadSourceRule(ctx.GetContext(), db, sc.GetTenantId(), cloudAccountID, sug.AlertName, sug.Source, alertRuleKey)
 
 	// Dry-run preview (no write).
 	if ruleErr == nil {
@@ -307,45 +304,34 @@ func GetThresholdApplyOptions(ctx *security.RequestContext, alertRuleKey, cloudA
 		out.PreviewError = fmt.Sprintf("source rule not found: %v", ruleErr)
 	}
 
-	// Direct availability per source.
+	// Direct availability comes from the same resolver Alert Manager uses, so the
+	// two screens never disagree about whether a change can reach the source.
 	direct := ApplyOption{Method: "direct"}
-	switch {
-	case ruleErr != nil:
+	if ruleErr != nil {
 		direct.Reason = "no editable rule found for this alert"
-	case promQLSources[sug.Source]:
-		// The rule row decides the write path: prometheus_user goes to the account's
-		// own ruler (Mimir / Cortex / Grafana Cloud) over the direct integration,
-		// anything else is a PrometheusRule CR pushed through the k8s agent.
-		if rule.Source == "prometheus_user" {
-			ok, reason := alertrule.PrometheusRulerConfigured(ctx, cloudAccountID)
-			direct.Available = ok
-			direct.Reason = reason
-		} else if eventrule.IsK8sAgentConnected(cloudAccountID) {
-			direct.Available = true
-		} else {
-			direct.Reason = "k8s agent not connected — cannot push the PrometheusRule change"
+	} else if target, terr := eventrule.ResolveRuleTarget(ctx, rule.ID, eventrule.ResolveOptions{AlertRuleKey: sug.AlertRuleKey}); terr != nil {
+		direct.Reason = fmt.Sprintf("cannot resolve the source rule: %v", terr)
+	} else {
+		c := directCapability(target.Operations, sug.RecommendationType)
+		direct.Available = c.Available
+		direct.Reason = c.Reason
+		if c.Available && c.Warning != "" {
+			direct.Reason = c.Warning
 		}
-	case sug.Source == "AWS_CloudWatch_Alarm":
-		direct.Available = true // IAM denials surface at apply time
-	case azureSources[sug.Source], sug.Source == "GCP_Metric_Alert":
-		// Cloud-collector write path for Azure/GCP is best-effort; offer direct but warn.
-		direct.Available = true
-		direct.Reason = "direct apply for this provider is best-effort; verify after applying"
-	default:
-		direct.Reason = fmt.Sprintf("direct apply not supported for source %q", sug.Source)
 	}
 	if out.PreviewError != "" && direct.Available {
 		direct.Available = false
-		if direct.Reason == "" {
-			direct.Reason = "cannot build the rewritten rule: " + out.PreviewError
-		}
+		direct.Reason = "cannot build the rewritten rule: " + out.PreviewError
 	}
 
-	// PR availability — a git integration must be configured for the tenant.
+	// PR availability — PromQL rule files only, and a git integration must be configured.
 	pr := ApplyOption{Method: "pr"}
-	if hasGitIntegration(ctx.GetContext(), db, sc.GetTenantId()) {
+	switch {
+	case !promQLSources[sug.Source]:
+		pr.Reason = fmt.Sprintf("PR apply is supported only for Prometheus rule files, not %q", sug.Source)
+	case eventrule.HasGitIntegration(ctx.GetContext(), db, sc.GetTenantId()):
 		pr.Available = true
-	} else {
+	default:
 		pr.Reason = "no GitHub/GitLab integration configured"
 	}
 
@@ -353,20 +339,37 @@ func GetThresholdApplyOptions(ctx *security.RequestContext, alertRuleKey, cloudA
 	return out, nil
 }
 
-// hasGitIntegration reports whether the tenant has an enabled github/gitlab integration.
-func hasGitIntegration(ctx context.Context, db *sqlx.DB, tenantID string) bool {
-	var count int
-	err := db.GetContext(ctx, &count, `
-		SELECT COUNT(*) FROM integrations
-		WHERE tenant_id = $1 AND status = 'enabled' AND type IN ('github', 'gitlab')`, tenantID)
-	if err != nil {
-		return false
+// directCapability is the resolver operation a suggestion's direct apply needs.
+func directCapability(ops eventrule.RuleOperations, recommendationType string) eventrule.Capability {
+	switch recommendationType {
+	case "disable":
+		return ops.DisableAtSource
+	case "increase_duration":
+		return ops.UpdateDuration
+	case "tune_both":
+		if !ops.UpdateDuration.Available {
+			return ops.UpdateDuration
+		}
 	}
-	return count > 0
+	return ops.UpdateThreshold
 }
 
-// applyDirect writes the rewritten rule back through the existing eventrule write-back path.
-func applyDirect(ctx *security.RequestContext, sug *ApplySuggestionRow, rule *SourceRule, rewritten *RewrittenRule) error {
+// applyDirect writes the rewritten rule back to the system that evaluates it. The
+// resolver decides the route and whether it is allowed; every failure is returned so
+// apply/revert status is never faked.
+func applyDirect(ctx *security.RequestContext, sug *ApplySuggestionRow, rule *SourceRule, rewritten *RewrittenRule) (map[string]any, error) {
+	target, err := eventrule.ResolveRuleTarget(ctx, rule.ID, eventrule.ResolveOptions{AlertRuleKey: sug.AlertRuleKey})
+	if err != nil {
+		return nil, fmt.Errorf("resolve source rule: %w", err)
+	}
+	recommendation := sug.RecommendationType
+	if rewritten.Disable {
+		recommendation = "disable"
+	}
+	if c := directCapability(target.Operations, recommendation); !c.Available {
+		return nil, fmt.Errorf("%w: %s", eventrule.ErrOperationUnavailable, c.Reason)
+	}
+
 	if rewritten.Disable {
 		_, err := eventrule.DisableEventRule(ctx, eventrule.DisableEventConfig{
 			Alert:     sug.AlertName,
@@ -375,74 +378,40 @@ func applyDirect(ctx *security.RequestContext, sug *ApplySuggestionRow, rule *So
 			Id:        rule.ID,
 			Enable:    false,
 		})
-		return err
+		return nil, err
 	}
 
-	// Cloud-provider sources (GCP/AWS/Azure) must be written back to the provider's
-	// monitoring API. The generic UpdateEventRule path only pushes Prometheus rules (via
-	// relay) and otherwise just upserts the internal event_rules cache — for cloud sources
-	// its external-provider branch never fires (the source names differ from the canonical
-	// provider keys and event_rules.external_rule_id is empty), so the real alert was left
-	// untouched while the apply was still reported as successful. Route cloud sources to
-	// the provider write explicitly, using the suggestion's alert_rule_key as the external
-	// rule id, and surface any failure so apply/revert status is never faked.
-	if provider, ok := cloudAlertProvider(rule.Source); ok {
-		_, err := alertrule.UpdateAlertRule(ctx, provider, "user", sug.AlertRuleKey, alertrule.AlertRuleConfig{
-			AccountId:      sug.CloudAccountID,
-			Name:           sug.AlertName,
-			AlertType:      rule.AlertType,
-			Query:          rewritten.Expr,
-			Severity:       rule.Severity,
-			Duration:       rewritten.Duration,
-			Enabled:        true,
-			ProviderConfig: rewritten.ProviderConfig,
-		})
-		return err
+	// Cloud-provider sources (GCP/AWS/Azure) are written through cloud-collector with
+	// the locator the resolver derived (event ARN / policy name / ARM id).
+	if provider, ref := target.CloudWriteRef(); provider != "" {
+		cfg := cloudUpdateConfig(target, sug, rule, rewritten, ref)
+		result, err := alertrule.UpdateAlertRule(ctx, provider, "user", ref, cfg)
+		if err != nil {
+			return nil, err
+		}
+		return result.Previous, nil
 	}
 
-	cfg := eventrule.EventConfig{
-		Alert:                sug.AlertName,
-		AccountID:            sug.CloudAccountID,
-		Source:               rule.Source,
-		Expr:                 rewritten.Expr,
-		Category:             rule.Category,
-		Severity:             rule.Severity,
-		Enabled:              true,
-		AlertType:            rule.AlertType,
-		MetricProvider:       rule.MetricProvider,
-		MetricProviderSource: rule.MetricProviderSource,
-		ProviderConfig:       rewritten.ProviderConfig,
+	// The stored rule is the base, so the write-back changes only the threshold or
+	// duration and keeps annotations, labels and the rule's playbook.
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, fmt.Errorf("threshold apply: database manager: %w", err)
 	}
-	cfg.Duration = rule.Duration
+	cfg, err := eventrule.LoadEventConfig(ctx.GetContext(), dbms.Db, sug.TenantID, rule.ID)
+	if err != nil {
+		return nil, fmt.Errorf("threshold apply: load rule: %w", err)
+	}
+	cfg.Expr = rewritten.Expr
+	if rewritten.ProviderConfig != nil {
+		cfg.ProviderConfig = rewritten.ProviderConfig
+	}
 	if rewritten.Duration != "" {
 		cfg.Duration = rewritten.Duration
 	}
-	// Preserve existing annotations/labels so the write-back does not wipe them.
-	cfg.Annotations.Description = rule.AnnDescription
-	cfg.Annotations.Summary = rule.AnnSummary
-	cfg.Annotations.Runbook = rule.AnnRunbook
-	cfg.Labels.Severity = rule.LabelSeverity
-	if cfg.Severity == "" {
-		cfg.Severity = rule.LabelSeverity
-	}
 
-	_, err := eventrule.UpdateEventRule(ctx, cfg)
-	return err
-}
-
-// cloudAlertProvider maps a triage suggestion source to the canonical alertrule provider
-// key used by alertrule.UpdateAlertRule (which delegates AWS/GCP/Azure to cloud-collector).
-// Returns ok=false for non-cloud sources (Prometheus/PromQL), which take the relay path.
-func cloudAlertProvider(source string) (string, bool) {
-	switch {
-	case source == "GCP_Metric_Alert":
-		return "gcp_monitoring", true
-	case source == "AWS_CloudWatch_Alarm":
-		return "aws_cloudwatch", true
-	case azureSources[source]:
-		return "azure_app_insights", true
-	}
-	return "", false
+	_, err = eventrule.UpdateEventRule(ctx, cfg)
+	return nil, err
 }
 
 // applyViaPR routes the rewritten rule through the GitOps PR path.
@@ -523,4 +492,131 @@ func markApplyFailed(ctx context.Context, db *sqlx.DB, req ApplyThresholdRequest
 		WHERE alert_rule_key = $1 AND cloud_account_id = $2`,
 		req.AlertRuleKey, req.CloudAccountID, req.Method, errMsg)
 	return err
+}
+
+// cloudUpdateConfig builds the cloud-collector update for an apply or a revert.
+// A revert sends only the recorded values: cloud-collector rejects a restore mixed
+// with a new threshold or duration. The AWS region is not such a value — it only
+// locates an alarm known by name — so a revert of that alarm still carries it.
+func cloudUpdateConfig(target *eventrule.RuleTarget, sug *ApplySuggestionRow, rule *SourceRule, rewritten *RewrittenRule, ref string) alertrule.AlertRuleConfig {
+	cfg := alertrule.AlertRuleConfig{
+		AccountId: sug.CloudAccountID,
+		Name:      sug.AlertName,
+		AlertType: rule.AlertType,
+		Query:     rewritten.Expr,
+		Severity:  rule.Severity,
+		Duration:  rewritten.Duration,
+		Enabled:   target.Enabled,
+	}
+	if target.Locator.AWSAlarmName != "" {
+		cfg.Name = target.Locator.AWSAlarmName
+	}
+	if len(rewritten.Restore) > 0 {
+		cfg.Restore = rewritten.Restore
+	} else {
+		cfg.ProviderConfig = map[string]interface{}{}
+		for k, v := range rewritten.ProviderConfig {
+			cfg.ProviderConfig[k] = v
+		}
+	}
+	if target.Kind == eventrule.TargetAWS && ref == "" {
+		if cfg.ProviderConfig == nil {
+			cfg.ProviderConfig = map[string]interface{}{}
+		}
+		cfg.ProviderConfig["region"] = target.Locator.AWSRegion
+	}
+	return cfg
+}
+
+// revertPlan is how a direct apply is undone.
+type revertPlan struct {
+	// reEnable: the apply disabled the rule, so switch it back on.
+	reEnable bool
+	// sug is the suggestion as applyDirect should see it (its recommendation
+	// type decides which capability gates the write).
+	sug              *ApplySuggestionRow
+	rewritten        *RewrittenRule
+	appliedThreshold float64
+}
+
+// planRevert decides how to undo an applied suggestion:
+//   - a disable is undone by switching the rule back on, not by rewriting a
+//     threshold (which for a quality-only suggestion would be 0);
+//   - a cloud apply that recorded what it replaced gets exactly that back;
+//   - otherwise the stored previous threshold/duration are written again.
+func planRevert(sug *ApplySuggestionRow, rule *SourceRule, previous map[string]any) (revertPlan, error) {
+	if sug.RecommendationType == "disable" {
+		return revertPlan{reEnable: true, sug: sug, rewritten: &RewrittenRule{Expr: rule.Expr}, appliedThreshold: sug.CurrentThreshold}, nil
+	}
+	if len(previous) > 0 {
+		plan := revertPlan{
+			sug:              sug,
+			rewritten:        &RewrittenRule{Source: rule.Source, Expr: rule.Expr, Restore: previous},
+			appliedThreshold: sug.CurrentThreshold,
+		}
+		if sug.PreviousThreshold != nil {
+			plan.appliedThreshold = *sug.PreviousThreshold
+		}
+		if v, ok := previous["threshold"].(float64); ok {
+			plan.appliedThreshold = v
+		}
+		return plan, nil
+	}
+	if sug.PreviousThreshold == nil {
+		return revertPlan{}, fmt.Errorf("no previous threshold recorded; cannot revert")
+	}
+	prevDuration := 0
+	if sug.PreviousDuration != nil {
+		prevDuration = *sug.PreviousDuration
+	}
+	// Force a threshold rewrite regardless of the original recommendation type.
+	// Anything that changed the duration must restore both threshold and duration
+	// (tune_both included — otherwise the duration change is left applied).
+	sugCopy := *sug
+	if sugCopy.RecommendationType == "increase_duration" || sugCopy.RecommendationType == "tune_both" {
+		sugCopy.RecommendationType = "tune_both"
+	} else {
+		sugCopy.RecommendationType = "tune_threshold"
+	}
+	rewritten, err := BuildRewrittenRule(&sugCopy, rule, *sug.PreviousThreshold, prevDuration)
+	if err != nil {
+		return revertPlan{}, err
+	}
+	return revertPlan{sug: &sugCopy, rewritten: rewritten, appliedThreshold: *sug.PreviousThreshold}, nil
+}
+
+// storePreviousProviderConfig records what a cloud apply replaced, for an exact
+// revert. Best-effort and separate from markApplied, so a missing column can never
+// turn a successful apply into a failure.
+func storePreviousProviderConfig(ctx *security.RequestContext, db *sqlx.DB, alertRuleKey, cloudAccountID string, previous map[string]any) {
+	var value any
+	if len(previous) > 0 {
+		b, err := json.Marshal(previous)
+		if err != nil {
+			ctx.GetLogger().Warn("threshold apply: cannot encode previous provider config", "error", err)
+			return
+		}
+		value = string(b)
+	}
+	if _, err := db.ExecContext(ctx.GetContext(), `
+		UPDATE event_threshold_suggestions SET previous_provider_config = $3::jsonb
+		WHERE alert_rule_key = $1 AND cloud_account_id = $2`,
+		alertRuleKey, cloudAccountID, value); err != nil {
+		ctx.GetLogger().Warn("threshold apply: cannot record previous provider config", "error", err, "alert_rule_key", alertRuleKey)
+	}
+}
+
+// loadPreviousProviderConfig returns what the last cloud apply replaced, or nil.
+func loadPreviousProviderConfig(ctx *security.RequestContext, db *sqlx.DB, alertRuleKey, cloudAccountID string) map[string]any {
+	var raw sql.NullString
+	if err := db.GetContext(ctx.GetContext(), &raw, `
+		SELECT previous_provider_config::text FROM event_threshold_suggestions
+		WHERE alert_rule_key = $1 AND cloud_account_id = $2`, alertRuleKey, cloudAccountID); err != nil || !raw.Valid {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw.String), &out); err != nil {
+		return nil
+	}
+	return out
 }

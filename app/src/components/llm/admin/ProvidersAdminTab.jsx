@@ -11,7 +11,7 @@ import { ds } from '@utils/colors';
  * itself is out of scope for this consolidation, so this pairing is a
  * mirror, not a code merge of the two pages).
  */
-const ProvidersAdminTab = () => (
+const ProvidersAdminTab = ({ stickyTable = false }) => (
   <Box>
     <Box sx={{ mb: ds.space[3] }}>
       <Banner
@@ -26,7 +26,7 @@ const ProvidersAdminTab = () => (
         actions={[{ label: 'Manage in Integrations', onClick: () => window.open('/accounts/account-form?cloudProvider=llm', '_blank') }]}
       />
     </Box>
-    <LLMConfigList stickyTable />
+    <LLMConfigList stickyTable={stickyTable} />
   </Box>
 );
 

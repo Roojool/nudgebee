@@ -26,9 +26,9 @@ jest.mock('@ui/Label', () => ({
   Label: ({ text }) => <span data-testid='label'>{text}</span>,
 }));
 
-jest.mock('@ui/CustomBorderCard', () => ({
+jest.mock('@ui/Card', () => ({
   __esModule: true,
-  default: ({ children }) => <div data-testid='border-card'>{children}</div>,
+  Card: ({ children }) => <div data-testid='border-card'>{children}</div>,
 }));
 
 jest.mock('@shared/icons/SafeIcon', () => ({
@@ -66,9 +66,9 @@ describe('CollapsableCard', () => {
       expect(screen.getByText('Test Card')).toBeInTheDocument();
     });
 
-    it('renders "Nothing major to show" when no highlights', () => {
+    it('asks the reader to open the card when there are no highlights, without claiming it is empty', () => {
       render(<CollapsableCard {...baseProps} />);
-      expect(screen.getByText('Nothing major to show. Check the card for more.')).toBeInTheDocument();
+      expect(screen.getByText('Open the card to see what it holds.')).toBeInTheDocument();
     });
 
     it('renders highlight messages', () => {

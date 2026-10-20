@@ -1,8 +1,10 @@
 import React, { useCallback, useRef } from 'react';
 import { Box, Typography } from '@mui/material';
 import SeverityIcon from '@ui/SeverityIcon';
+import Tooltip from '@ui/Tooltip';
+import { Label } from '@ui/Label';
 import { toSeverityLevel } from '@utils/common';
-import { SEVERITY_ORDER } from '@api1/vm';
+import { SEVERITY_ORDER, VmScanStatus } from '@api1/vm';
 import { ds } from '@utils/colors';
 
 /** Plain table-cell text with an optional second line. Mirrors cloudaccount's CustomText. */
@@ -35,6 +37,29 @@ export const SeverityCounts = ({ counts }: { counts?: Record<string, number> }) 
 };
 
 export const sumSeverities = (counts?: Record<string, number>) => Object.values(counts || {}).reduce((total, n) => total + (n || 0), 0);
+
+/**
+ * Renders a VM's most recent scan outcome next to its Last Scan timestamp,
+ * so an ageing timestamp with no scan running isn't mistaken for fresh data
+ * (see #38466). Renders nothing when the VM has no scan history yet — the
+ * Last Scan column's own "—" already covers that case.
+ */
+export const ScanStatusIndicator = ({ status }: { status?: VmScanStatus }) => {
+  if (!status) return null;
+  if (status.status === 'started') {
+    return <Label tone='neutral' size='sm' text='Scanning…' />;
+  }
+  if (status.status === 'failed') {
+    return (
+      <Tooltip title={status.error || 'Scan failed'}>
+        <span>
+          <Label tone='critical' size='sm' text='Scan failed' />
+        </span>
+      </Tooltip>
+    );
+  }
+  return null;
+};
 
 /** How many VM names a grouped cell spells out before it starts counting. */
 const VM_NAME_LIMIT = 3;

@@ -1,6 +1,5 @@
 import { test } from "@playwright/test";
 import * as channels from "./notificationConstants";
-import { ensureSwitchEnabled } from "../../utils/helpers";
 import {
   navigateToNewNotificationRule,
   configureChannels,
@@ -13,12 +12,15 @@ test("Add Daily High notification rule", { tag: ["@dev", "@test", "@oss", "@regr
 
   const locators = await navigateToNewNotificationRule(page);
 
-  await locators.dailyHighTab.click();
+  // There is one daily email rule; with one already saved, its chip is disabled and
+  // the page edits that rule instead.
+  if (await locators.dailyHighTab.isDisabled()) {
+    await locators.ruleCancelEditorBtn.click();
+    test.skip(true, "This tenant already has its daily email rule");
+  }
+  await locators.selectOnlyType(locators.dailyHighTab);
 
-  await page.waitForLoadState("networkidle");
-  await ensureSwitchEnabled(page, locators.enableNotificationSwitch);
-
-  // Daily High scope is global (no cluster selector).
+  // The daily email covers every account (no account picker) and sends by email only.
   const anyConfigured = await configureChannels(page, locators, {
     slack: channels.slack.slack_daily_high,
     msTeamsGroup: channels.msteams.msteams_group_name,

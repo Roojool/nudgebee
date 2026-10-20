@@ -241,7 +241,7 @@ export const getCloudProviderLabel = (cloudProvider: string) => {
       label = 'LLM';
       break;
     case 'LLM_GATEWAY':
-      label = 'LLM Gateway';
+      label = 'AI Gateway';
       break;
     case 'MCP':
       label = 'MCP';
@@ -587,6 +587,15 @@ export const isK8sAccountNameValid = (value: string) => {
   return regex.test(value);
 };
 
+// Parses the comma-separated AWS region box into the array the API expects. An
+// empty result means "discover regions from the account", never "no regions" —
+// the latter would collect nothing while the account reported healthy.
+export const parseAwsRegions = (value: string) =>
+  value
+    .split(',')
+    .map((region) => region.trim())
+    .filter(Boolean);
+
 export const isAWSAccountNameValid = (value: string) => {
   const regex = /^(?!.*(?:--|__|\s\s))[a-zA-Z0-9](?:[a-zA-Z0-9\s_-]{2,47}[a-zA-Z0-9])?$/;
   return regex.test(value);
@@ -740,6 +749,15 @@ export const formatAuditActor = (actor: string) => {
     .map((word) => acronyms[word.toLowerCase()] || word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
     .join(' ');
 };
+
+export const formatCurrency = (amount: number | null | undefined) => {
+  if (amount == null || amount === 0) return '$0.00';
+  if (amount >= 1000) return `$${(amount / 1000).toFixed(2)}K`;
+  if (amount >= 1) return `$${amount.toFixed(2)}`;
+  return `$${amount.toFixed(4)}`;
+};
+
+export const formatCount = (n: number | null | undefined) => (n != null ? n.toLocaleString() : '0');
 
 export const formatActionNameForAuditMessage = (actionName: string) => {
   if (!actionName) return '';
@@ -923,116 +941,6 @@ export const extractIp = (value: string) => {
     return `${match[1]}.${match[2]}.${match[3]}.${match[4]}`;
   }
 };
-
-export const CPU_QUERIES = [
-  {
-    key: 'cpu_real',
-    query:
-      'sum(rate(node_cpu_seconds_total{ __CLUSTER__ mode!="idle"}[24h])) or sum(rate(node_resources_cpu_usage_seconds_total{ __CLUSTER__ mode!="idle"}[24h]))',
-  },
-  {
-    key: 'cpu_request',
-    query: 'sum(kube_pod_container_resource_requests{ __CLUSTER__ resource="cpu"})',
-  },
-  {
-    key: 'cpu_limits',
-    query: 'sum(kube_pod_container_resource_limits{ __CLUSTER__ resource="cpu"})',
-  },
-  {
-    key: 'cpu_total',
-    query: 'sum(machine_cpu_cores{__CLUSTER__}) or sum(node_resources_cpu_logical_cores{__CLUSTER__})',
-  },
-];
-
-export const MEMORY_QUERIES = [
-  {
-    key: 'mem_real',
-    query:
-      'sum(node_memory_MemTotal_bytes{__CLUSTER__} - node_memory_MemAvailable_bytes{__CLUSTER__}) or sum(node_resources_memory_total_bytes{__CLUSTER__} - node_resources_memory_available_bytes{__CLUSTER__})',
-  },
-  {
-    key: 'mem_request',
-    query: 'sum(kube_pod_container_resource_requests{__CLUSTER__ resource="memory"})',
-  },
-  {
-    key: 'mem_limits',
-    query: 'sum(kube_pod_container_resource_limits{__CLUSTER__ resource="memory"})',
-  },
-  {
-    key: 'mem_total',
-    query: 'sum(node_memory_MemTotal_bytes{__CLUSTER__}) or sum(node_resources_memory_total_bytes{__CLUSTER__})',
-  },
-];
-
-export const PERCENTILE_QUERIES = [
-  {
-    key: 'p90_mem',
-    query:
-      'quantile(0.9, node_memory_MemTotal_bytes{__CLUSTER__} - node_memory_MemAvailable_bytes{__CLUSTER__}) or quantile(0.9, node_resources_memory_total_bytes{__CLUSTER__} - node_resources_memory_available_bytes{__CLUSTER__})',
-  },
-  {
-    key: 'p90_cpu',
-    query:
-      'sum(quantile_over_time(0.90, rate(node_cpu_seconds_total{__CLUSTER__ mode!="idle"}[24h])[24h:])) or sum(quantile_over_time(0.90, rate(node_resources_cpu_usage_seconds_total{__CLUSTER__ mode!="idle"}[24h])[24h:]))',
-  },
-  {
-    key: 'p50_mem',
-    query:
-      'quantile(0.5, node_memory_MemTotal_bytes{__CLUSTER__} - node_memory_MemAvailable_bytes{__CLUSTER__}) or quantile(0.5, node_resources_memory_total_bytes{__CLUSTER__} - node_resources_memory_available_bytes{__CLUSTER__})',
-  },
-  {
-    key: 'p50_cpu',
-    query:
-      'sum(quantile_over_time(0.50, rate(node_cpu_seconds_total{__CLUSTER__ mode!="idle"}[24h])[24h:])) or sum(quantile_over_time(0.50, rate(node_resources_cpu_usage_seconds_total{__CLUSTER__ mode!="idle"}[24h])[24h:]))',
-  },
-  {
-    key: 'max_usage_mem',
-    query:
-      'max_over_time(sum(node_memory_MemTotal_bytes{__CLUSTER__} - node_memory_MemFree_bytes{__CLUSTER__} - node_memory_Buffers_bytes{__CLUSTER__} - node_memory_Cached_bytes{__CLUSTER__})[24h:])',
-  },
-  {
-    key: 'max_usage_cpu',
-    query:
-      'sum(max_over_time(rate(node_cpu_seconds_total{__CLUSTER__ mode!="idle"}[24h])[24h:])) or sum(max_over_time(rate(node_resources_cpu_usage_seconds_total{__CLUSTER__ mode!="idle"}[24h])[24h:]))',
-  },
-];
-
-export const CLUSTER_USAGE_PROMQL1 = [
-  {
-    key: 'cpu_real',
-    query:
-      'sum (rate(node_cpu_seconds_total{__CLUSTER__ mode!="idle"}[5m])) or sum(rate(node_resources_cpu_usage_seconds_total{__CLUSTER__ mode!="idle"}[5m]))',
-  },
-  {
-    key: 'cpu_request',
-    query: 'sum(kube_pod_container_resource_requests{__CLUSTER__ resource="cpu"})',
-  },
-  {
-    key: 'cpu_limits',
-    query: 'sum(kube_pod_container_resource_limits{__CLUSTER__ resource="cpu"})',
-  },
-  {
-    key: 'cpu_total',
-    query: 'sum(machine_cpu_cores{__CLUSTER__})  or sum(node_resources_cpu_logical_cores{__CLUSTER__})',
-  },
-  {
-    key: 'mem_real',
-    query:
-      'sum(node_memory_MemTotal_bytes{__CLUSTER__} - node_memory_MemAvailable_bytes{__CLUSTER__}) or sum(node_resources_memory_total_bytes{__CLUSTER__} - node_resources_memory_available_bytes{__CLUSTER__})',
-  },
-  {
-    key: 'mem_request',
-    query: 'sum(kube_pod_container_resource_requests{__CLUSTER__ resource="memory"})',
-  },
-  {
-    key: 'mem_limits',
-    query: 'sum(kube_pod_container_resource_limits{__CLUSTER__ resource="memory"})',
-  },
-  {
-    key: 'mem_total',
-    query: 'sum(node_memory_MemTotal_bytes{__CLUSTER__}) or sum(node_resources_memory_total_bytes{__CLUSTER__})',
-  },
-];
 
 export const containsLink = (value: string) => {
   const urlPattern = new RegExp(

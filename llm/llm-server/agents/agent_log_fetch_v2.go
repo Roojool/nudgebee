@@ -18,14 +18,7 @@ import (
 	"unicode"
 )
 
-// FetchLogsAgentV2 is the canonical, provider-independent variant of the
-// fetch_logs agent, gated by the deploy-time env var
-// LLM_SERVER_LOG_AGENT_V2_ENABLED (config.Config.LogAgentV2Enabled), checked in
-// Execute via canonicalEnabled. The shared factory in agent_log_fetch.go init()
-// always constructs v2; when the gate is off v2 delegates to the embedded v1
-// FetchLogsAgent so behaviour is identical to v1.
-//
-// It embeds *FetchLogsAgent and reuses every v1 helper. Routing (see Execute):
+// Routing (see Execute):
 //   - any services-server-backed log provider (loki/es/signoz/loggly/azure/
 //     observe/pinot/…) → a single canonical `{"where": {...}}` (canonical entity
 //     names like `namespace`/`pod`/`service`) run through logs_execute_v2 →
@@ -33,27 +26,13 @@ import (
 //     builds the native query server-side. The provider type no longer matters
 //     to the agent: query building + execution are entirely services-server's
 //     job now, so there is no per-provider allowlist.
-//   - datadog → the v1 facet-syntax path (its where→facet conversion stays on
+//   - datadog → the facet-syntax path (its where→facet conversion stays on
 //     the proven facet syntax; it does not use the canonical path).
 //   - empty / k8s-only (no services-server backend) → kubectl directly.
 //
-// Resilience: when the services-server path errors OR returns no logs, v2 falls
-// back to kubectl (kubectlFallback) so a misconfigured label mapping or a
+// Resilience: when the services-server path errors OR returns no logs, Execute
+// falls back to kubectl (kubectlFallback) so a misconfigured label mapping or a
 // backend gap still yields logs when the workload is reachable in-cluster.
-type FetchLogsAgentV2 struct {
-	*FetchLogsAgent
-}
-
-func newFetchLogsAgentV2(accountId string) *FetchLogsAgentV2 {
-	return &FetchLogsAgentV2{FetchLogsAgent: newFetchLogsAgent(accountId)}
-}
-
-// canonicalEnabled reports whether the canonical v2 path is enabled for this
-// deploy, via the LLM_SERVER_LOG_AGENT_V2_ENABLED env var. It is a global
-// per-environment toggle (default true); there is no per-account granularity.
-func (a *FetchLogsAgentV2) canonicalEnabled(ctx *security.RequestContext) bool {
-	return config.Config.LogAgentV2Enabled
-}
 
 // defaultFetchLogsWallClockTimeout is the fallback when
 // LlmServerFetchLogsWallClockTimeoutSeconds is 0 or unset. 300s picks a
@@ -91,18 +70,16 @@ func resolveFetchLogsWallClockTimeout() time.Duration {
 	return defaultFetchLogsWallClockTimeout
 }
 
-// Execute routes the log fetch. When the v2 gate (LLM_SERVER_LOG_AGENT_V2_ENABLED)
-// is off it delegates to the embedded v1 agent (identical to pre-v2 behaviour).
-// When on, it sends a canonical where to services-server for any backed provider,
-// keeps datadog on the proven facet path, and uses kubectl for empty/k8s. When
-// the services-server path fails or returns no logs, it falls back to kubectl
-// (kubectlFallback).
+// Execute routes the log fetch: it sends a canonical where to services-server
+// for any services-server-backed provider, keeps datadog on the proven facet
+// path, and uses kubectl for empty/k8s. When the services-server path fails or
+// returns no logs, it falls back to kubectl (kubectlFallback).
 //
 // Wrapped in runFetchLogsWithTimeout so any downstream stall (services-server
 // RPC, kubectl_execute, datadog client, workspace pod) bails at
 // fetchLogsWallClockTimeout instead of hanging the whole conversation until
 // TTL reap — the exact regression class from conv 8832d8f4.
-func (a *FetchLogsAgentV2) Execute(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
+func (a *FetchLogsAgent) Execute(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
 	return runFetchLogsWithTimeout(ctx, resolveFetchLogsWallClockTimeout(), func(tctx *security.RequestContext) (core.NBAgentResponse, error) {
 		return a.executeInner(tctx, request)
 	})
@@ -110,12 +87,7 @@ func (a *FetchLogsAgentV2) Execute(ctx *security.RequestContext, request core.NB
 
 // executeInner is the pre-wall-clock-wrapper body of Execute. Split out so the
 // wrapper can be a thin decorator around unchanged routing logic.
-func (a *FetchLogsAgentV2) executeInner(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
-	// Flag off → behave exactly as v1 (which applies the override itself).
-	if !a.canonicalEnabled(ctx) {
-		return a.FetchLogsAgent.Execute(ctx, request)
-	}
-
+func (a *FetchLogsAgent) executeInner(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
 	provider := a.effectiveProvider(request)
 	providerName := strings.ToLower(strings.TrimSpace(provider.Provider))
 
@@ -474,7 +446,7 @@ func parseRelativeWindow(v string) (time.Duration, bool) {
 // in-cluster access) and the services-server path had at least answered honestly
 // (succeeded but empty), the original response is preferred so a real "no logs"
 // answer isn't masked by a kubectl access error.
-func (a *FetchLogsAgentV2) kubectlFallback(ctx *security.RequestContext, request core.NBAgentRequest, provider services_server.ObservabilityProvider, primary core.NBAgentResponse) (core.NBAgentResponse, error) {
+func (a *FetchLogsAgent) kubectlFallback(ctx *security.RequestContext, request core.NBAgentRequest, provider services_server.ObservabilityProvider, primary core.NBAgentResponse) (core.NBAgentResponse, error) {
 	primaryQuery := envelopeQuery(primary.Response)
 	ctx.GetLogger().Info("fetch_logs v2: services-server returned error/empty — falling back to kubectl",
 		"provider", provider.Provider, "primary_status", primary.Status, "primary_query", primaryQuery)
@@ -561,8 +533,8 @@ func withFallbackNote(resp core.NBAgentResponse, note string) core.NBAgentRespon
 // fetchResponseIsEmpty reports whether a makeFetchResponse envelope carries no
 // log content — the signal (besides a Failed status) for the kubectl fallback.
 // Treated as empty: a missing body, a blank `logs` field, the
-// tools.NoLogsFoundPrefix sentinel (emitted by logs_execute / logs_execute_v2 on
-// a zero-row result), or a `{"logs":[]}` envelope with zero entries. A kubectl
+// tools.NoLogsFoundPrefix sentinel (emitted by logs_execute_v2 on a zero-row
+// result), or a `{"logs":[]}` envelope with zero entries. A kubectl
 // `{"stdout":...}` body has no `logs` key and is never flagged.
 func fetchResponseIsEmpty(resp core.NBAgentResponse) bool {
 	if len(resp.Response) == 0 {
@@ -592,7 +564,7 @@ func fetchResponseIsEmpty(resp core.NBAgentResponse) bool {
 // explicit start_time. It is returned even on an error/failure response so
 // callers can inspect it consistently; it is empty when generation itself
 // failed (no query was ever produced).
-func (a *FetchLogsAgentV2) generateCanonicalLogQueryAndExecute(ctx *security.RequestContext, request core.NBAgentRequest, provider services_server.ObservabilityProvider) (core.NBAgentResponse, string, error) {
+func (a *FetchLogsAgent) generateCanonicalLogQueryAndExecute(ctx *security.RequestContext, request core.NBAgentRequest, provider services_server.ObservabilityProvider) (core.NBAgentResponse, string, error) {
 	fields, indices := fetchLabelsAndIndices(a.accountId, provider)
 	jsonQuery, err := generateCanonicalLogQuery(ctx, request, provider, fields, indices)
 	if err != nil {

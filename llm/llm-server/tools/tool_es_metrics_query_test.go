@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
 
 	"github.com/stretchr/testify/assert"
@@ -97,6 +98,61 @@ func TestESMetricsQueryTool_SubstitutesTimeMacros(t *testing.T) {
 	parsed, err := time.Parse(time.RFC3339, gte)
 	require.NoError(t, err, "gte %q is not an RFC3339 instant Elasticsearch can range on", gte)
 	assert.WithinDuration(t, time.Now().UTC().Add(-24*time.Hour), parsed, time.Minute)
+}
+
+func TestValidateESMetricsQueryShape_RejectsObservedMalformedQueries(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"placeholder and bare filter", `{"query":{"bool_query_placeholder":true,"filter":[0,1,2]}}`, "bool_query_placeholder"},
+		{"fabricated bool_filter", `{"query":{"bool_filter":[null,null,null]}}`, "bool_filter"},
+		{"fabricated encoded bool path", `{"query":{"bool_1_0_0_1":true}}`, "bool_1_0_0_1"},
+		{"fabricated encoded query path", `{"query":{"query_bool_filter_0_term_kubernetes_namespace":"nudgebee"}}`, "query_bool_filter_0"},
+		{"bool scalar from live E2E", `{"query":{"bool":0}}`, "bool query must be a JSON object"},
+		{"bool filter scalar", `{"query":{"bool":{"filter":[0,1,2]}}}`, "bool.filter must contain query objects"},
+		{"filter without bool", `{"query":{"filter":[{"match_all":{}}]}}`, "filter must be inside a bool"},
+		{"nonobject query", `{"query":"match_all"}`, "query clause must be a JSON object"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var input any
+			if err := json.Unmarshal([]byte(tc.input), &input); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateESMetricsQueryShape(input); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestValidateESMetricsQueryShape_AcceptsValidForms(t *testing.T) {
+	for _, raw := range []string{
+		`{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.pod.cpu.usage.nanocores"}},{"range":{"@timestamp":{"gte":"now-7d"}}}]}}}`,
+		`{"bool":{"filter":[{"term":{"kubernetes.namespace":"nudgebee"}}]}}`,
+		`{"query":{"match_all":{}},"size":1}`,
+	} {
+		var input any
+		if err := json.Unmarshal([]byte(raw), &input); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateESMetricsQueryShape(input); err != nil {
+			t.Errorf("valid DSL rejected: %v", err)
+		}
+	}
+}
+
+func TestESMetricsQueryTool_RejectsObservedPlaceholderBeforeAPI(t *testing.T) {
+	input := core.NBToolCallRequest{Command: `{"index":"metrics-kubernetes.*","query":{"query":{"bool_query_placeholder":true,"filter":[0,1,2]}}}`}
+	response, err := (ESMetricsQueryTool{}).Call(core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin()}, input)
+	if err == nil || response.Status != core.NBToolResponseStatusError {
+		t.Fatalf("expected tool error, got response=%+v err=%v", response, err)
+	}
+	if !strings.Contains(response.Data, "bool_query_placeholder") || !strings.Contains(response.Data, "Build a new query") {
+		t.Fatalf("expected actionable validation error, got %q", response.Data)
+	}
 }
 
 // Regression tests for #36236: per-query errors carried in results[].Error

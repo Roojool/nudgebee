@@ -10,6 +10,7 @@ import (
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
 	"nudgebee/services/tenant"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -113,6 +114,12 @@ type TableDefinition struct {
 	// clause still bounds the result. Leave false for tables whose NULL-account
 	// rows are sensitive or global-only.
 	TenantWideReadable bool
+	// AccountScope, when set, replaces the account-id restriction applied to
+	// account-scoped readers with a table-specific SQL predicate. It must build
+	// SQL only from the quoted ids it is given. The result goes to the SQL
+	// builder as a separate argument and never through QueryRequest, which
+	// callers control.
+	AccountScope func(accountIds []string, quote func(any) string) string
 }
 
 var AzureTraceTableDefinition = map[string]ColumnDefinition{
@@ -824,6 +831,58 @@ func extractFilterSQL(request *QueryRequest, filterName string, sqlColumn string
 	return sql
 }
 
+// cleanEmptyAndClauses recursively prunes empty QueryWhereClause nodes from where.And.
+func cleanEmptyAndClauses(where *QueryWhereClause) {
+	if where == nil || len(where.And) == 0 {
+		return
+	}
+	active := make([]QueryWhereClause, 0, len(where.And))
+	for i := range where.And {
+		cleanEmptyAndClauses(&where.And[i])
+		if len(where.And[i].Binary) > 0 || len(where.And[i].And) > 0 || len(where.And[i].Or) > 0 || where.And[i].Not != nil {
+			active = append(active, where.And[i])
+		}
+	}
+	where.And = active
+}
+
+// extractCategoryFilterSQL extracts equality/IN filter(s) for "category" from request.Where,
+// generates the SQL fragment (e.g. " AND LOWER(it_filter.category) = 'database'"), and
+// removes the filter from its owning Binary map, including inside _and clauses.
+//
+// Unlike extractFilterSQL (which leaves filters inside _and in place for outer WHERE
+// enforcement because some DefGenerators push into loosely-scoped subqueries), category
+// is NOT a declared column on the outer integrations relation and is fully constrained
+// by the EXISTS subquery pushdown against integration_types. Leaving it in _and causes
+// generateWhereClause to fail with "column category defined in where clause not found".
+func extractCategoryFilterSQL(request *QueryRequest, sqlColumn string) string {
+	if request == nil {
+		return ""
+	}
+	dialect := &postgresDialect{}
+	var parts []string
+	for {
+		filter, holder := locateBinaryFilter(&request.Where, "category")
+		if holder == nil {
+			break
+		}
+		if eqVal, ok := filter[Eq]; ok {
+			parts = append(parts, " AND "+sqlColumn+" = "+dialect.QuoteLiteral(eqVal))
+		} else if inVal, ok := filter[In]; ok {
+			if vals, ok := inVal.([]any); ok && len(vals) > 0 {
+				quoted := make([]string, len(vals))
+				for i, v := range vals {
+					quoted[i] = dialect.QuoteLiteral(v)
+				}
+				parts = append(parts, " AND "+sqlColumn+" IN ("+strings.Join(quoted, ",")+")")
+			}
+		}
+		delete(holder, "category")
+	}
+	cleanEmptyAndClauses(&request.Where)
+	return strings.Join(parts, "")
+}
+
 // renderFilterSQLForColumn is extractFilterSQL without the delete: it renders the
 // eq/IN fragment against an arbitrary sqlColumn and leaves request.Where untouched.
 // Must run before extractFilterSQL, which deletes the top-level filter this then
@@ -949,6 +1008,12 @@ func VulnerabilityRecommendationSQL(recAlias, vulnAccessor string) string {
 		END`
 }
 
+// imageScanOnlyRuleNameFilter matches renderFilterSQLForColumn's rendering of
+// an exact rule_name='image_scan' filter (Eq or single-value In), tolerant of
+// whitespace so it doesn't silently stop matching if that helper's formatting
+// changes -- see recommendation_groupings_v2's DefGenerator below.
+var imageScanOnlyRuleNameFilter = regexp.MustCompile(`^\s*AND\s+r\.rule_name\s*(?:=\s*'image_scan'|IN\s*\(\s*'image_scan'\s*\))\s*$`)
+
 var table_metadata = map[string]TableDefinition{
 	"k8s_cluster_groupings_v2": {
 		Type:   Normal,
@@ -1023,6 +1088,11 @@ var table_metadata = map[string]TableDefinition{
 			) AS ksw
 			USING (cloud_account_id, tenant_id)
 			JOIN (
+				-- Pods bucketed the way the pods table names them: the container
+				-- reason where there is one, the phase otherwise. Counting the raw
+				-- phase instead -- which this did until #36593 -- files every
+				-- CrashLoopBackOff pod under "Running" and every ImagePullBackOff
+				-- one under "Pending", so a cluster with broken pods reads healthy.
 				SELECT
 					ksp.cloud_account_id,
 					ksp.tenant_id,
@@ -1031,7 +1101,7 @@ var table_metadata = map[string]TableDefinition{
 					SELECT
 						ksp.cloud_account_id,
 						ksp.tenant_id,
-						ksp.status,
+						COALESCE(ksp.container_status, ksp.status) AS status,
 						COUNT(*) AS status_count
 					FROM
 						k8s_pods ksp
@@ -1040,7 +1110,7 @@ var table_metadata = map[string]TableDefinition{
 					GROUP BY
 						ksp.cloud_account_id,
 						ksp.tenant_id,
-						ksp.status
+						COALESCE(ksp.container_status, ksp.status)
 				) AS ksp
 				GROUP BY
 					ksp.cloud_account_id,
@@ -1938,6 +2008,9 @@ var table_metadata = map[string]TableDefinition{
 				Type: ColumnDefinitionTypeString,
 			},
 			"subject_owner": {
+				Type: ColumnDefinitionTypeString,
+			},
+			"subject_owner_kind": {
 				Type: ColumnDefinitionTypeString,
 			},
 			"service_key": {
@@ -3300,36 +3373,6 @@ var table_metadata = map[string]TableDefinition{
 		Source:           database.Metastore,
 		Name:             "recommendation_groupings_v2",
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
-			// Push down these filters into the subquery so the planner can use
-			// idx_recommendation_tenant_account_status(tenant_id, cloud_account_id, status, category, rule_name)
-			pushdownFilters := extractFilterSQL(&request, "account_id", "r.cloud_account_id")
-			pushdownFilters += extractFilterSQL(&request, "status", "r.status")
-			pushdownFilters += extractFilterSQL(&request, "category", "r.category")
-			pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
-			// Push tenant_id into the CTE for the same reason the sibling recommendations_v2
-			// generator does (see its comment): the ROW_NUMBER() window's PARTITION BY does
-			// not include tenant_id, so the planner cannot push an outer tenant filter through
-			// the window fence. Without it the CTE windows every tenant's recommendations
-			// (joined to cloud_resourses, detoasting the meta jsonb) before the outer query
-			// narrows to one tenant. It also completes the leading column of the composite
-			// idx_recommendation_tenant_account_status index. tenant_id is injected by the
-			// security layer as an _and clause, not into _binary, so it is not extracted by
-			// the calls above — take it straight from the security context.
-			sc := ctx.GetSecurityContext()
-			tenantId := sc.GetTenantId()
-			if tenantId == "" && !sc.IsSuperAdmin() {
-				// Fail closed: a non-super-admin must always be tenant-scoped.
-				return "", request, fmt.Errorf("tenant_id is required")
-			}
-			if tenantId != "" {
-				pushdownFilters += " AND r.tenant_id = " + (&postgresDialect{}).QuoteLiteral(tenantId)
-			}
-
-			// Fast path: when no column requiring a JOIN or the dedup window function is
-			// needed (e.g. pure count queries like count_recommendations), skip the CTE
-			// entirely and scan recommendation directly. This avoids the LEFT JOINs to
-			// cloud_resourses / cloud_accounts and the ROW_NUMBER() window function.
-			//
 			// joinRequiringCols is only the columns projected out of the cloud_resourses /
 			// cloud_accounts joins. The two dedup columns are tracked separately in
 			// windowRequiringCols: they need the ROW_NUMBER() window but not the
@@ -3391,6 +3434,43 @@ var table_metadata = map[string]TableDefinition{
 			needsJoin := references(joinRequiringCols)
 			needsWindow := references(windowRequiringCols)
 
+			isFastPath := !needsJoin && !needsWindow
+
+			// status/rule_name pre-window can crown the wrong row primary; only
+			// safe fast-path or rule_name='image_scan' (resource_id always NULL).
+			pushdownFilters := extractFilterSQL(&request, "account_id", "r.cloud_account_id")
+			pushdownFilters += extractFilterSQL(&request, "category", "r.category")
+			ruleNameFilterSQL := renderFilterSQLForColumn(&request, "rule_name", "r.rule_name")
+			isImageScanOnly := imageScanOnlyRuleNameFilter.MatchString(ruleNameFilterSQL)
+			switch {
+			case isFastPath:
+				pushdownFilters += extractFilterSQL(&request, "status", "r.status")
+				pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
+				pushdownFilters += extractFilterSQL(&request, "severity", "r.severity")
+			case isImageScanOnly:
+				pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
+				pushdownFilters += extractFilterSQL(&request, "severity", "r.severity")
+			}
+
+			// Push tenant_id into the CTE for the same reason the sibling recommendations_v2
+			// generator does (see its comment): the ROW_NUMBER() window's PARTITION BY does
+			// not include tenant_id, so the planner cannot push an outer tenant filter through
+			// the window fence. Without it the CTE windows every tenant's recommendations
+			// (joined to cloud_resourses, detoasting the meta jsonb) before the outer query
+			// narrows to one tenant. It also completes the leading column of the composite
+			// idx_recommendation_tenant_account_status index. tenant_id is injected by the
+			// security layer as an _and clause, not into _binary, so it is not extracted by
+			// the calls above — take it straight from the security context.
+			sc := ctx.GetSecurityContext()
+			tenantId := sc.GetTenantId()
+			if tenantId == "" && !sc.IsSuperAdmin() {
+				// Fail closed: a non-super-admin must always be tenant-scoped.
+				return "", request, fmt.Errorf("tenant_id is required")
+			}
+			if tenantId != "" {
+				pushdownFilters += " AND r.tenant_id = " + (&postgresDialect{}).QuoteLiteral(tenantId)
+			}
+
 			// The vulnerabilities join is its own opt-in, separate from needsJoin
 			// above: unlike cloud_resourses/cloud_accounts (needed by many common
 			// columns), it's only relevant to the 3 columns that actually read
@@ -3415,7 +3495,7 @@ var table_metadata = map[string]TableDefinition{
 				v.data_source AS v_data_source, v.details AS v_details`
 			}
 
-			if !needsJoin && !needsWindow {
+			if isFastPath {
 				def := `(
 		SELECT
 			r.*` + vulnCols + `,
@@ -3808,10 +3888,12 @@ var table_metadata = map[string]TableDefinition{
 		Type:             Normal,
 		Source:           database.Metastore,
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
-			// Drive from recommendation using idx_recommendation_security_status_weight
-			// (cloud_account_id, status, severity_weight DESC) so the planner can seek to
-			// (account, status='Open') and scan in severity order, stopping at LIMIT without
-			// sorting all 400K+ rows.
+			// Drive from recommendation using idx_recommendation_severity_weight
+			// (cloud_account_id, status, severity_weight DESC) — shared with
+			// recommendations_v2 and the CIS/misconfig groupings, not image_scan-
+			// specific — so the planner can seek to (account, status='Open') and
+			// scan in severity order, stopping at LIMIT without sorting all
+			// matching rows.
 			// pod_container is an inline subquery (NOT a CTE) so PostgreSQL can pull the entire
 			// def up into the outer query — a CTE barrier would prevent the planner from seeing
 			// the recommendation table and applying the index for the outer ORDER BY + LIMIT.
@@ -4650,7 +4732,19 @@ var table_metadata = map[string]TableDefinition{
 			// transition, and a column would need a migration plus a writer.
 			"container_status": {
 				Type: ColumnDefinitionTypeString,
-				Def:  podContainerStatusExpr,
+				Def:  `COALESCE(container_status, ` + podContainerStatusExpr("meta") + `)`,
+			},
+			// What the Status filter and the Summary counts are keyed on: the
+			// container reason when there is one, the phase otherwise -- the same
+			// value the table renders, so filtering for CrashLoopBackOff returns
+			// exactly the rows that read CrashLoopBackOff.
+			//
+			// The stored column only, with no jsonb fallback: unlike
+			// container_status above this one lands in WHERE and GROUP BY, where it
+			// is evaluated for every row scanned rather than the 25 on screen.
+			"display_status": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "COALESCE(container_status, status)",
 			},
 			"node_name": {
 				Type: ColumnDefinitionTypeString,
@@ -4966,6 +5060,24 @@ var table_metadata = map[string]TableDefinition{
 			"pod_fqdn": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "concat(namespace, '/', name)",
+			},
+			// The pods list sends one where to both tables -- rows from
+			// k8s_pods_v2, the result count from here -- so a column missing on
+			// this side fails the count with "column not found in table" the
+			// moment the user picks a status.
+			//
+			// container_status is the stored column alone here, without the jsonb
+			// fallback k8s_pods_v2 adds for display: this table only ever groups
+			// and filters, and a jsonb read in a WHERE runs for every row scanned
+			// (minutes over the 333k historical pods one account holds), not for
+			// the page being shown.
+			"container_status": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "container_status",
+			},
+			"display_status": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "COALESCE(container_status, status)",
 			},
 			"creation_time": {
 				Type: ColumnDefinitionTypeDatetime,
@@ -5417,7 +5529,6 @@ var table_metadata = map[string]TableDefinition{
 		Source:           database.Metastore,
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
 			pushdownFilters := extractFilterSQL(&request, "account_id", "r.cloud_account_id")
-			pushdownFilters += extractFilterSQL(&request, "status", "r.status")
 			// needsWindow: is_primary_recommendation is a ROW_NUMBER() OVER (...) window,
 			// which Postgres cannot compute until it has materialized every row in the
 			// partition — that defeats the ORDER BY .. LIMIT top-N pushdown every paginated
@@ -5426,16 +5537,10 @@ var table_metadata = map[string]TableDefinition{
 			// dashboard-panel "Is primary" filter/column does. Gated the same way as the
 			// sibling recommendation_groupings_v2 generator above (windowRequiringCols).
 			needsWindow := requestReferencesColumns(request, map[string]bool{"is_primary_recommendation": true})
-			// id is not part of PARTITION BY, so pushing it pre-window would narrow
-			// the sibling set is_primary_recommendation is ranked against — a caller
-			// that filters by id AND reads that column would see rank computed only
-			// among the requested ids, not the full history. Only take the shortcut
-			// when the request provably doesn't touch that column (mirrors the
-			// joinRequiringCols guard in recommendation_groupings_v2 above); otherwise
-			// fall back to the correct-but-slower outer-filter path. When the window
-			// isn't computed at all (needsWindow false), there is no partition to
-			// narrow, so pushing early is always safe.
+			// status/id/rule_name/account_object_id pre-window can crown the wrong
+			// row primary (same bug class as recommendation_groupings_v2 above).
 			if !needsWindow {
+				pushdownFilters += extractFilterSQL(&request, "status", "r.status")
 				pushdownFilters += extractFilterSQL(&request, "id", "r.id")
 				pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
 				pushdownFilters += extractFilterSQL(&request, "account_object_id", "r.account_object_id")
@@ -7020,11 +7125,23 @@ var table_metadata = map[string]TableDefinition{
 					nr.severity,
 					nr.delivery_mode,
 					nr.frequency,
+					nr.event_types,
+					nr.scope_mode,
+					COALESCE(nra.account_ids, '[]'::jsonb) as account_ids,
+					nr.exceptions,
+					nr.source_mode,
+					COALESCE(to_jsonb(nr.sources), jsonb_build_array(nr.source)) as sources,
+					COALESCE(nr.is_active, true) as is_active,
 					nr.tenant_id::text as tenant_id,
 					u.display_name as created_by_display_name,
 					COALESCE(nrm.mappings, '[]'::json) as notification_rule_mappings
 			FROM notification_rules nr
 			LEFT JOIN users u ON u.id = nr.created_by
+			LEFT JOIN (
+					SELECT rule_id, jsonb_agg(account_id::text ORDER BY account_id) as account_ids
+					FROM notification_rule_accounts
+					GROUP BY rule_id
+			) nra ON nra.rule_id = nr.id
 			LEFT JOIN (
 					SELECT
 							rule_id,
@@ -7037,6 +7154,7 @@ var table_metadata = map[string]TableDefinition{
 					GROUP BY rule_id
 			) nrm ON nrm.rule_id = nr.id
 	) as notification_rules_v2`,
+		AccountScope: notificationRuleAccountScope("notification_rules_v2"),
 		Columns: map[string]ColumnDefinition{
 			"id": {
 				Type: ColumnDefinitionTypeString,
@@ -7102,6 +7220,34 @@ var table_metadata = map[string]TableDefinition{
 				Type: ColumnDefinitionTypeString,
 				Def:  "frequency",
 			},
+			"event_types": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "event_types",
+			},
+			"scope_mode": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "scope_mode",
+			},
+			"account_ids": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "account_ids",
+			},
+			"exceptions": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "exceptions",
+			},
+			"source_mode": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "source_mode",
+			},
+			"sources": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "sources",
+			},
+			"is_active": {
+				Type: ColumnDefinitionTypeBoolean,
+				Def:  "is_active",
+			},
 			"tenant_id": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "tenant_id",
@@ -7135,10 +7281,26 @@ var table_metadata = map[string]TableDefinition{
 				nr.is_suppressed,
 				nr.severity,
 				nr.delivery_mode,
+				nr.scope_mode,
+				COALESCE(nra.account_ids, '[]'::jsonb) as account_ids,
 				nr.tenant_id::text as tenant_id
 			FROM notification_rules nr
+			LEFT JOIN (
+				SELECT rule_id, jsonb_agg(account_id::text ORDER BY account_id) as account_ids
+				FROM notification_rule_accounts
+				GROUP BY rule_id
+			) nra ON nra.rule_id = nr.id
 		) as notification_rules_grouping`,
+		AccountScope: notificationRuleAccountScope("notification_rules_grouping"),
 		Columns: map[string]ColumnDefinition{
+			"scope_mode": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "scope_mode",
+			},
+			"account_ids": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "account_ids",
+			},
 			"id": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "id",
@@ -7222,6 +7384,14 @@ var table_metadata = map[string]TableDefinition{
 				accountClause = " AND EXISTS (SELECT 1 FROM integrations_cloud_accounts ica_filter WHERE ica_filter.integration_id = i.id" + accountIdFilter + ")"
 			}
 
+			// Optional category filter — restricts the returned list to integrations
+			// whose type belongs to the specified category in integration_types.
+			categoryFilter := extractCategoryFilterSQL(&request, "LOWER(it_filter.category)")
+			categoryClause := ""
+			if categoryFilter != "" {
+				categoryClause = " AND EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type" + categoryFilter + ")"
+			}
+
 			def := `(
 			SELECT
 				i.id::text as id,
@@ -7303,7 +7473,7 @@ var table_metadata = map[string]TableDefinition{
 				JOIN integrations ii ON ii.id = icv.integration_id
 				GROUP BY icv.integration_id
 			) icv_agg ON icv_agg.integration_id = i.id
-			WHERE 1=1` + existsClause + accountClause + `
+			WHERE 1=1` + existsClause + accountClause + categoryClause + `
 		) as integrations_v2`
 			return def, request, nil
 		},
@@ -7377,13 +7547,21 @@ var table_metadata = map[string]TableDefinition{
 		PermissionModule:   "integrations",
 		Name:               "admin_get_integrations_grouping_v2",
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
-			// Mirror the cloud_account_id pushdown from admin_get_integrations_v2
+			// Mirror the cloud_account_id and category pushdown from admin_get_integrations_v2
 			// so the row count stays in sync with the filtered row set when the
-			// caller passes a cloud_account_id predicate.
+			// caller passes a cloud_account_id or category predicate.
 			accountIdFilter := extractFilterSQL(&request, "cloud_account_id", "ica_filter.cloud_account_id")
-			accountClause := ""
+			categoryFilter := extractCategoryFilterSQL(&request, "LOWER(it_filter.category)")
+			var whereClauses []string
 			if accountIdFilter != "" {
-				accountClause = " WHERE EXISTS (SELECT 1 FROM integrations_cloud_accounts ica_filter WHERE ica_filter.integration_id = i.id" + accountIdFilter + ")"
+				whereClauses = append(whereClauses, "EXISTS (SELECT 1 FROM integrations_cloud_accounts ica_filter WHERE ica_filter.integration_id = i.id"+accountIdFilter+")")
+			}
+			if categoryFilter != "" {
+				whereClauses = append(whereClauses, "EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type"+categoryFilter+")")
+			}
+			whereClause := ""
+			if len(whereClauses) > 0 {
+				whereClause = " WHERE " + strings.Join(whereClauses, " AND ")
 			}
 			def := `(
 			SELECT
@@ -7394,7 +7572,7 @@ var table_metadata = map[string]TableDefinition{
 				i.status,
 				i.created_at,
 				i.tenant_id::text as tenant_id
-			FROM integrations i` + accountClause + `
+			FROM integrations i` + whereClause + `
 		) as integrations_grouping`
 			return def, request, nil
 		},
@@ -7427,6 +7605,64 @@ var table_metadata = map[string]TableDefinition{
 				Type: ColumnDefinitionTypeString,
 				Def:  "tenant_id",
 			},
+			"count": {
+				Type:         ColumnDefinitionTypeInt,
+				Def:          "count(*)",
+				IsAggregated: true,
+			},
+		},
+	},
+	// Incoming webhook events for the per-integration Activity Log (Admin ->
+	// Integrations -> <webhook> -> Activity Log). This is the raw ingestion log,
+	// not the processed `events` surface. Tenant-scoped and gated on integrations
+	// like the integrations catalog itself (admin_get_integrations_v2); the caller
+	// always filters by integration_id, which is the real per-integration scope.
+	// Deliberately no AccountIdColumnName: a webhook routes to many accounts and
+	// unrouted events carry account_id IS NULL (V697), so an account filter would
+	// hide part of the integration's activity — and setting it would flip the
+	// integrations module into the account-scopable set (see AccountScopableModules).
+	"event_incoming_webhooks_v2": {
+		Type:               Normal,
+		Source:             database.Metastore,
+		TenantIdColumnName: "tenant_id",
+		PermissionModule:   "integrations",
+		Name:               "event_incoming_webhooks_v2",
+		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
+			return "event_incoming_webhooks", request, nil
+		},
+		Columns: map[string]ColumnDefinition{
+			"id":                {Type: ColumnDefinitionTypeString},
+			"integration_id":    {Type: ColumnDefinitionTypeString},
+			"account_id":        {Type: ColumnDefinitionTypeString},
+			"event_title":       {Type: ColumnDefinitionTypeString},
+			"event_type":        {Type: ColumnDefinitionTypeString},
+			"event_status":      {Type: ColumnDefinitionTypeString},
+			"event_priority":    {Type: ColumnDefinitionTypeString},
+			"event_url":         {Type: ColumnDefinitionTypeString},
+			"event_description": {Type: ColumnDefinitionTypeString},
+			"event_created_at":  {Type: ColumnDefinitionTypeDatetime},
+			"processing_status": {Type: ColumnDefinitionTypeString},
+			"raw":               {Type: ColumnDefinitionTypeString},
+			"tenant_id":         {Type: ColumnDefinitionTypeString},
+		},
+	},
+	// Count companion for the two Activity Log widgets: total events (filter on
+	// integration_id) and processed events (integration_id + processing_status).
+	"event_incoming_webhooks_grouping_v2": {
+		Type:               Aggregate,
+		Source:             database.Metastore,
+		TenantIdColumnName: "tenant_id",
+		PermissionModule:   "integrations",
+		Name:               "event_incoming_webhooks_grouping_v2",
+		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
+			return "event_incoming_webhooks", request, nil
+		},
+		Columns: map[string]ColumnDefinition{
+			"integration_id":    {Type: ColumnDefinitionTypeString},
+			"processing_status": {Type: ColumnDefinitionTypeString},
+			"account_id":        {Type: ColumnDefinitionTypeString},
+			"event_created_at":  {Type: ColumnDefinitionTypeDatetime},
+			"tenant_id":         {Type: ColumnDefinitionTypeString},
 			"count": {
 				Type:         ColumnDefinitionTypeInt,
 				Def:          "count(*)",
@@ -8976,6 +9212,50 @@ var table_metadata = map[string]TableDefinition{
 			},
 		},
 	},
+	// Credential-free view of the integrations wired to a cloud account, one
+	// row per (integration, account). Backs cloud_list_account_integrations so
+	// the VM fleet page can list its vm_agent / discovery integrations for
+	// account-scoped roles. integrations_list (admin_get_integrations_v2) stays
+	// tenant-admin-only because its rows carry integration_config_values, and
+	// it has no account column, so it cannot be account-scoped (#39858).
+	"cloud_account_integrations_v2": {
+		Type:               Normal,
+		Source:             database.Metastore,
+		Name:               "cloud_account_integrations_v2",
+		TenantIdColumnName: "tenant_id",
+		// Columns KEY, not the physical column (see cloud_vm_packages_v2).
+		AccountIdColumnName: "account_id",
+		// Filed under `cloud`, not `integrations`: this is per-account operational
+		// data (which agents serve this account), the same grant that reads the
+		// account's VMs and packages. Keep in sync with the action's classified
+		// module (cloud_list_account_integrations -> cloud:Read).
+		PermissionModule: "cloud",
+		Def: `(
+			SELECT
+				i.id::text as id,
+				i.name,
+				i.type,
+				i.source,
+				i.status,
+				i.created_at,
+				i.updated_at,
+				i.tenant_id::text as tenant_id,
+				ica.cloud_account_id::text as cloud_account_id
+			FROM integrations i
+			JOIN integrations_cloud_accounts ica ON ica.integration_id = i.id
+			) as cloud_account_integrations_v2`,
+		Columns: map[string]ColumnDefinition{
+			"id":         {Type: ColumnDefinitionTypeString},
+			"name":       {Type: ColumnDefinitionTypeString},
+			"type":       {Type: ColumnDefinitionTypeString},
+			"source":     {Type: ColumnDefinitionTypeString},
+			"status":     {Type: ColumnDefinitionTypeString},
+			"created_at": {Type: ColumnDefinitionTypeDatetime},
+			"updated_at": {Type: ColumnDefinitionTypeDatetime},
+			"tenant_id":  {Type: ColumnDefinitionTypeString},
+			"account_id": {Type: ColumnDefinitionTypeString, Def: "cloud_account_id"},
+		},
+	},
 	"resource_spend_trend_v2": {
 		Type:   Aggregate,
 		Source: database.Metastore,
@@ -10504,6 +10784,8 @@ var table_metadata = map[string]TableDefinition{
 				ua.credential as credential,
 				ua.tenant_id::text as auth_tenant_id,
 				ua.expires_at as expires_at,
+				ua.kind::text as kind,
+				to_jsonb(ua.scopes) as scopes,
 				ua.status::text as auth_status,
 				ua.provider::text as provider,
 				ua."user"::text as user_id,
@@ -10565,6 +10847,8 @@ var table_metadata = map[string]TableDefinition{
 			"credential":     {Type: ColumnDefinitionTypeString, Def: "credential"},
 			"auth_tenant_id": {Type: ColumnDefinitionTypeString, Def: "auth_tenant_id"},
 			"expires_at":     {Type: ColumnDefinitionTypeDatetime, Def: "expires_at"},
+			"kind":           {Type: ColumnDefinitionTypeString, Def: "kind"},
+			"scopes":         {Type: ColumnDefinitionTypeJson, Def: "scopes"},
 			"auth_status":    {Type: ColumnDefinitionTypeString, Def: "auth_status"},
 			"provider":       {Type: ColumnDefinitionTypeString, Def: "provider"},
 			"user_id":        {Type: ColumnDefinitionTypeString, Def: "user_id"},
@@ -10676,12 +10960,14 @@ var tableAliases = map[string]string{
 	"events_list":           "events_v2",
 	"agents_list_playbooks": "agent_playbook_v2",
 	// Tier 2: admin_get_*_v2 → <entity>_<verb>_*
-	"integrations_list":             "admin_get_integrations_v2",
-	"integrations_aggregate":        "admin_get_integrations_grouping_v2",
-	"notifications_list_rules":      "admin_get_notification_rules_v2",
-	"notifications_aggregate_rules": "admin_get_notification_rules_grouping_v2",
-	"usergroups_aggregate":          "admin_get_user_groups_grouping_v2",
-	"users_aggregate_by_tenant":     "admin_get_users_grouping_by_tenant_v2",
+	"integrations_list":                     "admin_get_integrations_v2",
+	"integrations_aggregate":                "admin_get_integrations_grouping_v2",
+	"integrations_list_webhook_events":      "event_incoming_webhooks_v2",
+	"integrations_aggregate_webhook_events": "event_incoming_webhooks_grouping_v2",
+	"notifications_list_rules":              "admin_get_notification_rules_v2",
+	"notifications_aggregate_rules":         "admin_get_notification_rules_grouping_v2",
+	"usergroups_aggregate":                  "admin_get_user_groups_grouping_v2",
+	"users_aggregate_by_tenant":             "admin_get_users_grouping_by_tenant_v2",
 	// Tier 3: user_*_v2 / usergroup_*_v2 → users_* / usergroups_*
 	"users_get_details":                "user_details_v2",
 	"users_get_by_provider_account":    "user_by_provider_account_v2",
@@ -10690,6 +10976,8 @@ var tableAliases = map[string]string{
 	"users_get_super_admin_role":       "user_super_admin_role_v2",
 	"usergroups_list_users":            "usergroup_users_v2",
 	"usergroups_aggregate_users":       "usergroup_users_grouping_v2",
+	// Verb-named read over a credential-free per-account integrations view.
+	"cloud_list_account_integrations": "cloud_account_integrations_v2",
 }
 
 func GetTableMetadata(name string) (TableDefinition, bool) {
@@ -10811,6 +11099,12 @@ func init() {
 // kubectl prints in its STATUS column -- from the container statuses the agent
 // ships in meta.status_info.
 //
+// It is now the FALLBACK, not the source: the collector writes the same value to
+// k8s_pods.container_status, which is what filters and counts read (a jsonb read
+// in a WHERE or GROUP BY runs for every row scanned, and is minutes over one
+// account's history). This expression stays for the pods table, where it runs for
+// the page on screen and covers rows last written before that collector shipped.
+//
 // It exists because k8s_pods.status holds the pod PHASE, and the phase cannot
 // express "running but broken": a pod in CrashLoopBackOff has phase Running and
 // one in ImagePullBackOff has phase Pending. Measured on a dev cluster, 402
@@ -10821,8 +11115,18 @@ func init() {
 // an init container is stuck the app containers have not started, and their
 // generic "PodInitializing" would mask the real reason. Within each group a
 // waiting reason wins over a terminated one, since waiting is the current state
-// and terminated is the last one. NULL when nothing is waiting or terminated --
-// i.e. a healthy pod -- so callers fall back to the phase.
+// and terminated is the last one. That is what the ORDER BY spells out: grp
+// (init before app), then waiting before terminated, then position in the array.
+// NULL when nothing is waiting or terminated -- i.e. a healthy pod -- so callers
+// fall back to the phase.
+//
+// One pass, and meta is read once. The obvious shape -- a COALESCE of four
+// scalar subqueries, one per (group, state) combination -- is what this was
+// until the Summary counts started using it, and each of those four subqueries
+// detoasts meta again. Measured on dev, that cost 3.2s over the 1810 pods the
+// Summary has to classify and 9.9s over a single 87k-pod account; folding it
+// into one subquery over a UNION ALL of both arrays took the same work to 277ms.
+// The two forms were verified to agree on all 94,591 active pods on dev.
 //
 // A container that exited 0 is not a problem and is skipped in BOTH groups. A
 // long-running pod alongside a completed sidecar or helper would otherwise read
@@ -10846,31 +11150,30 @@ func init() {
 // return first, and could report a different one on the next refresh. Ordering by
 // position means it always reports the first such container, matching the order the
 // pod spec lists them in.
-const podContainerStatusExpr = `COALESCE(
-	(SELECT cs.value->'state'->'waiting'->>'reason'
-	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'initContainerStatuses') = 'array'
-	                                  THEN meta->'status_info'->'initContainerStatuses' ELSE '[]'::jsonb END)
-	        WITH ORDINALITY AS cs(value, ord)
-	  WHERE cs.value->'state'->'waiting'->>'reason' IS NOT NULL
-	  ORDER BY cs.ord LIMIT 1),
-	(SELECT cs.value->'state'->'terminated'->>'reason'
-	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'initContainerStatuses') = 'array'
-	                                  THEN meta->'status_info'->'initContainerStatuses' ELSE '[]'::jsonb END)
-	        WITH ORDINALITY AS cs(value, ord)
-	  WHERE cs.value->'state'->'terminated'->>'reason' IS NOT NULL
-	    AND COALESCE(cs.value->'state'->'terminated'->>'exitCode', '') <> '0'
-	  ORDER BY cs.ord LIMIT 1),
-	(SELECT cs.value->'state'->'waiting'->>'reason'
-	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'containerStatuses') = 'array'
-	                                  THEN meta->'status_info'->'containerStatuses' ELSE '[]'::jsonb END)
-	        WITH ORDINALITY AS cs(value, ord)
-	  WHERE cs.value->'state'->'waiting'->>'reason' IS NOT NULL
-	  ORDER BY cs.ord LIMIT 1),
-	(SELECT cs.value->'state'->'terminated'->>'reason'
-	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'containerStatuses') = 'array'
-	                                  THEN meta->'status_info'->'containerStatuses' ELSE '[]'::jsonb END)
-	        WITH ORDINALITY AS cs(value, ord)
-	  WHERE cs.value->'state'->'terminated'->>'reason' IS NOT NULL
-	    AND COALESCE(cs.value->'state'->'terminated'->>'exitCode', '') <> '0'
-	  ORDER BY cs.ord LIMIT 1)
-)`
+//
+// metaColumn is the meta column to read, qualified when the caller's FROM has an
+// alias (the cluster-summary subquery says ksp.meta).
+func podContainerStatusExpr(metaColumn string) string {
+	return `(SELECT cs.reason
+	   FROM (SELECT ` + metaColumn + `->'status_info' AS si) src
+	   CROSS JOIN LATERAL (
+	     SELECT COALESCE(c.value->'state'->'waiting'->>'reason',
+	                     c.value->'state'->'terminated'->>'reason') AS reason
+	       FROM (
+	         SELECT value, ord, 0 AS grp
+	           FROM jsonb_array_elements(CASE WHEN jsonb_typeof(src.si->'initContainerStatuses') = 'array'
+	                                          THEN src.si->'initContainerStatuses' ELSE '[]'::jsonb END)
+	                WITH ORDINALITY AS t(value, ord)
+	         UNION ALL
+	         SELECT value, ord, 1 AS grp
+	           FROM jsonb_array_elements(CASE WHEN jsonb_typeof(src.si->'containerStatuses') = 'array'
+	                                          THEN src.si->'containerStatuses' ELSE '[]'::jsonb END)
+	                WITH ORDINALITY AS t(value, ord)
+	       ) c
+	      WHERE c.value->'state'->'waiting'->>'reason' IS NOT NULL
+	         OR (c.value->'state'->'terminated'->>'reason' IS NOT NULL
+	             AND COALESCE(c.value->'state'->'terminated'->>'exitCode', '') <> '0')
+	      ORDER BY c.grp, (c.value->'state'->'waiting'->>'reason') IS NULL, c.ord
+	      LIMIT 1
+	   ) cs)`
+}

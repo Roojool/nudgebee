@@ -69,4 +69,19 @@ describe('Input', () => {
     render(<Input value='' onChange={jest.fn()} placeholder='Enter text...' />);
     expect(screen.getByPlaceholderText('Enter text...')).toBeInTheDocument();
   });
+
+  it('defaults a password input to autoComplete="new-password"', () => {
+    const { container } = render(<Input value='' onChange={jest.fn()} type='password' label='Token' />);
+    expect(container.querySelector('input')).toHaveAttribute('autocomplete', 'new-password');
+  });
+
+  it('lets a caller override the password default', () => {
+    const { container } = render(<Input value='' onChange={jest.fn()} type='password' autoComplete='current-password' label='Password' />);
+    expect(container.querySelector('input')).toHaveAttribute('autocomplete', 'current-password');
+  });
+
+  it('leaves a non-password input without an autoComplete', () => {
+    const { container } = render(<Input value='' onChange={jest.fn()} label='Host' />);
+    expect(container.querySelector('input')).not.toHaveAttribute('autocomplete');
+  });
 });

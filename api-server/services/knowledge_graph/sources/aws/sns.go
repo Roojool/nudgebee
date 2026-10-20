@@ -251,3 +251,36 @@ func (s *AWSSource) fetchSNSSubscriptionsForRegion(reqCtx *security.RequestConte
 
 	return subscriptionsByTopic, nil
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	sNSRows := resourceKind{
+		Service:      "AmazonSNS",
+		NodeType:     core.NodeTypeTopic,
+		SpecificType: "SNSTopic",
+		Subtype:      "SNS",
+		Extract:      (*AWSSource).extractTopicMetadata,
+	}
+	registerKind(sNSRows)
+	registerKind(sNSRows.withTypes("topic"))
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// SNS topics publish to SQS queues, Lambda functions and other endpoints
+	// via their subscriptions.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeTopic, Name: "sns",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createSNSEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Topics can be created from their row.
+// Their subscription edges need a live SNS call and arrive with the account build.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"SNSTopic"},
+		Creatable:     true,
+	}, nil)
+}

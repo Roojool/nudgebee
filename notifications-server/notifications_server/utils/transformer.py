@@ -334,7 +334,10 @@ class Transformer:
         if not slack_text:
             return slack_text
 
-        result = slack_text
+        # Slack's mrkdwn parser tolerates a fence glued to the preceding line
+        # (e.g. "}```"), but CommonMark requires a closing fence on its own
+        # line, so it renders as literal text otherwise.
+        result = re.sub(r"([^\n`])```", r"\1\n```", slack_text)
 
         # Convert Slack links <URL|TEXT> to markdown [TEXT](URL)
         # This handles both bare URLs and URLs with display text

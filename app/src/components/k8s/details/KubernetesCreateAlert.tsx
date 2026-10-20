@@ -1,5 +1,7 @@
 import { Box, Stack, Typography } from '@mui/material';
-import { DragIndicator, DeleteOutline as DeleteIconMui } from '@mui/icons-material';
+import { DragIndicator } from '@mui/icons-material';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import React, { useEffect, useState, useMemo } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { PromQLExtension } from '@prometheus-io/codemirror-promql';
@@ -22,6 +24,8 @@ import apiAccount from '@api1/account';
 import observability from '@api1/observability';
 import ReorderableList, { type DragHandleProps } from '@shared/ReorderableList';
 import { addFormError, removeFormError, type FormErrors } from './formErrorUtils';
+import { alertRuleWarning } from './alertRuleControls';
+import { Banner } from '@ui/Banner';
 
 interface KubernetesCreateAlertProps {
   accountId: string;
@@ -636,6 +640,8 @@ const KubernetesCreateAlert: React.FC<KubernetesCreateAlertProps> = ({
 
     setIsSubmitting(true);
     const data: any = {
+      // Updates are routed by the stored rule, not by the form's source.
+      ...(!isCreateAlert && alertManagerObject?.id ? { id: alertManagerObject.id } : {}),
       annotations: {
         description: alertDescription,
         summary: alertSummary,
@@ -856,8 +862,11 @@ const KubernetesCreateAlert: React.FC<KubernetesCreateAlertProps> = ({
     { label: 'hour', value: 'h' },
   ];
 
+  const editWarning = isCreateAlert ? undefined : alertRuleWarning(alertManagerObject, 'edit_definition');
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
+      {editWarning && <Banner tone='warning' surface='section' message={editWarning} />}
       {isSubmitting && (
         <Box sx={{ width: '100%', position: 'absolute', top: 0, left: 0 }}>
           <ProgressLinear surface='page-top' />
@@ -1283,11 +1292,11 @@ const KubernetesCreateAlert: React.FC<KubernetesCreateAlertProps> = ({
                             />
                           </Box>
                           <DsButton
-                            tone='danger'
+                            tone='ghost'
                             size='sm'
                             composition='icon-only'
                             aria-label='Delete action'
-                            icon={<DeleteIconMui fontSize='small' />}
+                            icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                             onClick={() => handleDeleteAction(actionInstance.id)}
                           />
                         </Box>

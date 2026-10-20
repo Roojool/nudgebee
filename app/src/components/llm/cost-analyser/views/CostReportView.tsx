@@ -23,6 +23,7 @@ import FilterDropdown from '@ui/FilterDropdown';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import { Card } from '@ui/Card';
 import { Banner } from '@ui/Banner';
+import { Button } from '@ui/Button';
 import { Chip } from '@ui/Chip';
 import { CostCallout } from '@ui/CostCallout';
 import { EmptyState } from '@ui/EmptyState';
@@ -245,6 +246,10 @@ function toTopSourceRow(s: AiCostTopSourceRow) {
   ];
 }
 
+// UTC "today", matching CostAnalyser's own anchorToday() — the reference date is UTC-anchored
+// (see the state's initial value), so local-time shortcuts here could disagree with it near midnight.
+const isoUtc = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
 export function CostReportView({ accountId, onAccountChange, accountOptions, referenceDate, onReferenceDateChange }: CostReportViewProps) {
   const [sort, setSort] = React.useState<{ name: string; order: 'asc' | 'desc' }>({ name: '', order: 'asc' });
   const [scheduleModalOpen, setScheduleModalOpen] = React.useState(false);
@@ -367,16 +372,36 @@ export function CostReportView({ accountId, onAccountChange, accountOptions, ref
                 clearable
                 size='sm'
               />
-              <CustomDateTimePicker
-                id='accounts-as-of-date'
-                value={dayjs(referenceDate)}
-                onChange={(d) => d && onReferenceDateChange(d.format('YYYY-MM-DD'))}
-                views={['day']}
-                format='MM/DD/YYYY'
-                maxDateTime={dayjs()}
-                size='sm'
-                width='160px'
-              />
+              <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 'var(--ds-space-1)' }}>
+                <CustomDateTimePicker
+                  id='accounts-as-of-date'
+                  label='As of'
+                  value={dayjs(referenceDate)}
+                  onChange={(d) => d && onReferenceDateChange(d.format('YYYY-MM-DD'))}
+                  views={['day']}
+                  format='MM/DD/YYYY'
+                  maxDateTime={dayjs()}
+                  size='sm'
+                  width='160px'
+                />
+                <Button tone='ghost' size='sm' onClick={() => onReferenceDateChange(isoUtc(Date.now()))} id='cost-report-as-of-today'>
+                  Today
+                </Button>
+                <Button tone='ghost' size='sm' onClick={() => onReferenceDateChange(isoUtc(Date.now() - 86400000))} id='cost-report-as-of-yesterday'>
+                  Yesterday
+                </Button>
+                <Button
+                  tone='ghost'
+                  size='sm'
+                  onClick={() => {
+                    const now = new Date();
+                    onReferenceDateChange(isoUtc(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0)));
+                  }}
+                  id='cost-report-as-of-end-of-last-month'
+                >
+                  End of last month
+                </Button>
+              </Box>
               {(isTenantAdmin() || isSuperAdmin()) && (
                 <Tooltip title='Cost report schedule'>
                   <IconButton id='cost-report-schedule-btn' size='small' onClick={() => setScheduleModalOpen(true)}>

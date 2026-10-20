@@ -1,12 +1,10 @@
 package reports
 
 import (
-	"encoding/json"
 	"nudgebee/services/account"
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
-	"nudgebee/services/recommendation"
 	"nudgebee/services/security"
 	"nudgebee/services/tenant"
 	"time"
@@ -174,29 +172,8 @@ func SendRecommendationNudgeDigest(ctx *security.RequestContext) error {
 				highCount++
 			}
 
-			// Platform-neutral utm=digest — the formatter doesn't know which
-			// channel(s) this payload will be rendered for. Footer-button URLs
-			// are appended per platform in the notifications-server formatters
-			// where the platform IS known (utm=slack-digest, teams-digest, etc.).
-			ctaURL := config.Config.BaseUrl + "/optimise?id=" + rec.ID + "&utm=digest&d=" + digestDate + "#cost"
-			recMap := map[string]any{
-				"id":                    rec.ID,
-				"rule_name":             rec.RuleName,
-				"resource_name":         rec.ResourceName,
-				"finops_score":          rec.FinOpsScore,
-				"finops_band":           rec.FinOpsBand,
-				"estimated_savings":     rec.EstimatedSavings,
-				"severity":              rec.Severity,
-				"category":              rec.Category,
-				"cta_url":               ctaURL,
-				"wasted_since_detected": recommendation.WastedSinceDetected(rec.EstimatedSavings, rec.CreatedAt, time.Now().UTC()),
-			}
-			if len(rec.RecommendationRaw) > 0 {
-				recMap["recommendation"] = json.RawMessage(rec.RecommendationRaw)
-			}
-
 			accID := rec.CloudAccountID
-			recsByAccount[accID] = append(recsByAccount[accID], recMap)
+			recsByAccount[accID] = append(recsByAccount[accID], digestRecMap(rec, digestDate))
 			if rec.AccountName != "" && rec.AccountName != accID {
 				accountNameMap[accID] = rec.AccountName
 			}
@@ -214,6 +191,20 @@ func SendRecommendationNudgeDigest(ctx *security.RequestContext) error {
 				"recommendations": accRecs,
 			}
 		}
+
+		// Each account's own digest, so notifications can send every channel
+		// only the accounts its rules allow, with that account's numbers.
+		accountRecs, err := queryDigestAccountRecommendations(dbms.Db, t.Id)
+		if err != nil {
+			ctx.GetLogger().Error("recommendation digest: error querying per-account recommendations", "error", err, "tenant", t.Id)
+			continue
+		}
+		accountDeltas, err := queryDigestDeltasByAccount(dbms.Db, t.Id, cutoff)
+		if err != nil {
+			ctx.GetLogger().Error("recommendation digest: error querying per-account deltas", "error", err, "tenant", t.Id)
+			continue
+		}
+		accountSections := buildDigestAccountSections(accountRecs, accountDeltas, accountNameMap, digestDate)
 
 		message := map[string]any{
 			"kind":      "notification",
@@ -237,6 +228,7 @@ func SendRecommendationNudgeDigest(ctx *security.RequestContext) error {
 				"carryover_count":            carryoverCount,
 				"delta_window_hours":         24,
 				"digest_date":                digestDate,
+				"accounts":                   accountSections,
 			},
 		}
 
@@ -251,11 +243,9 @@ func SendRecommendationNudgeDigest(ctx *security.RequestContext) error {
 			continue
 		}
 
-		// Update last_nudged_at for all included recommendations
-		recIDs := make([]string, len(recs))
-		for i, rec := range recs {
-			recIDs[i] = rec.ID
-		}
+		// Update last_nudged_at for every recommendation in the tenant list or an
+		// account's list.
+		recIDs := digestRecommendationIDs(recs, accountRecs)
 		_, err = dbms.Db.Exec(`UPDATE recommendation SET last_nudged_at = now() WHERE id = ANY($1::uuid[])`, pq.Array(recIDs))
 		if err != nil {
 			ctx.GetLogger().Error("recommendation digest: error updating last_nudged_at", "error", err, "tenant", t.Id)

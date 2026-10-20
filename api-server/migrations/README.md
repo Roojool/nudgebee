@@ -61,7 +61,10 @@ Shell scripts run sequentially after RabbitMQ is healthy:
 
 ```
 001_remove_autopilot_queues.sh
+002_collector_queue_limits.sh
 ```
+
+They configure the broker and must be idempotent: they re-run on every deploy. The runner waits at most 3 minutes for the management API, then skips them with a warning, and a failing script is logged and skipped rather than failing the Job — the next deploy applies it.
 
 Skipped when `MIGRATE_SKIP_RABBITMQ=1` (used by local smoke-test flows).
 
@@ -75,8 +78,9 @@ The migration job is a Helm `pre-install,pre-upgrade` hook. On every deploy, the
    - Legacy `nudgebee.schema_migrations` present (first run after cutover) → read its version + dirty flag, refuse if `dirty=true` or if version is a phantom, then `atlas migrate set <version>` to seed revisions.
    - Neither present (fresh DB) → apply from scratch.
 3. `atlas migrate apply -c file://atlas.hcl --env default --url ... --tx-mode file` — applies pending migrations. Out-of-order arrivals are applied via `--exec-order non-linear` (atlas.hcl).
+   For the `nudgebee` database role, the job first moves the 15 known application tables created in the role schema on older upgrades into `public`. The move is atomic, preserves table OIDs and data, and uses a five-second lock timeout: if a running app holds a conflicting lock, the hook fails without a partial move and can be retried when traffic is quiet. It never moves migration bookkeeping tables or overwrites an object already in `public`. If the connection's first schema is not `public`, the job then puts `public` first on Atlas's connection only. It refuses when object names still overlap between schemas or a pending unqualified `CREATE TABLE` would duplicate a table in a later schema. The database role and application connections are unchanged. New migrations must schema-qualify `CREATE TABLE` statements; `validate_migrations.py` enforces this without changing historical files.
 4. Calls the API server to reload the agent playbook (skipped if `MIGRATE_SKIP_PLAYBOOK=1`).
-5. Waits for RabbitMQ, runs each `migrations/rabbitmq/*.sh` (skipped if `MIGRATE_SKIP_RABBITMQ=1`).
+5. Waits up to 3 minutes for RabbitMQ, then runs each `migrations/rabbitmq/*.sh`; neither an unreachable broker nor a failing script fails the Job (skipped if `MIGRATE_SKIP_RABBITMQ=1`).
 
 CI in `nudgebee-infra` builds + pushes the migration image and runs `helm upgrade ... --wait --wait-for-jobs`, which blocks until the Job exits 0.
 

@@ -1,16 +1,16 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import Tooltip from '@ui/Tooltip';
 import PropTypes from 'prop-types';
-import { Box, Typography, Alert, Collapse, Stack } from '@mui/material';
+import { Box, Typography, Collapse, Stack } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { Divider } from '@ui/Divider';
 import { Chip } from '@ui/Chip';
 import { Input } from '@ui/Input';
 import { Switch } from '@ui/Switch';
 import { Select } from '@ui/Select';
-import EditIcon from '@mui/icons-material/Edit';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
-import { DeleteIconRed as DeleteIcon } from '@assets';
+import { DeleteIconRed as DeleteIcon, EditIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import apiBudget from '@api1/budget';
 import Loader from '@shared/Loader';
@@ -21,24 +21,17 @@ import { getUserSession, isTenantAdmin } from '@lib/auth';
 import { ds } from '@utils/colors';
 import { useTenantBranding, toAssistantLabel } from '@hooks/useTenantBranding';
 import apiUser from '@api1/user';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ProgressBar } from '@ui/ProgressBar';
 import { Label } from '@ui/Label';
 import ScopeChip from '@components/llm/ScopeChip';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
+import BudgetHistoryTable from '@components/llm/BudgetHistoryTable';
+import { formatCurrency, formatCount } from 'src/utils/common';
 
 const renderAccountGroupIcon = (provider) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
-
-const formatCurrency = (amount) => {
-  if (amount == null || amount === 0) return '$0.00';
-  if (amount >= 1000) return `$${(amount / 1000).toFixed(2)}K`;
-  if (amount >= 1) return `$${amount.toFixed(2)}`;
-  return `$${amount.toFixed(4)}`;
-};
-
-const formatCount = (n) => (n != null ? n.toLocaleString() : '0');
 
 const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -745,8 +738,11 @@ const BudgetEditModal = ({ open, onClose, onSaved, config, maxCaps, systemDefaul
               checked={enabled}
               onChange={(_e, next) => setEnabled(next)}
               label={
+                // span, not <p>: ds/Switch wraps its label in a <label>.
                 <Typography
+                  component='span'
                   sx={{
+                    display: 'block',
                     fontSize: 'var(--ds-text-body)',
                     fontWeight: 'var(--ds-font-weight-medium)',
                     minWidth: ds.space.mul(0, 60),
@@ -812,16 +808,23 @@ const BudgetEditModal = ({ open, onClose, onSaved, config, maxCaps, systemDefaul
     >
       <Box sx={{ p: ds.space[2] }}>
         {error && (
-          <Alert severity='error' sx={{ mb: ds.space[4] }}>
-            {error}
-          </Alert>
+          <Box sx={{ mb: ds.space[4] }}>
+            <Banner tone='critical' message={error} />
+          </Box>
         )}
 
         {hasConflict && (
-          <Alert severity='warning' sx={{ mb: ds.space[4], fontSize: 'var(--ds-text-caption)' }}>
-            A budget already exists for {conflictingModules.map((m) => moduleLabels[m] || m).join(' and ')} on this {entityType}. Edit the existing
-            budget from the Active Budgets section instead of adding a new one.
-          </Alert>
+          <Box sx={{ mb: ds.space[4] }}>
+            <Banner
+              tone='warning'
+              message={
+                <>
+                  A budget already exists for {conflictingModules.map((m) => moduleLabels[m] || m).join(' and ')} on this {entityType}. Edit the
+                  existing budget from the Active Budgets section instead of adding a new one.
+                </>
+              }
+            />
+          </Box>
         )}
 
         <Box sx={{ display: 'flex', gap: 2, mb: ds.space[4] }}>
@@ -889,7 +892,9 @@ const BudgetEditModal = ({ open, onClose, onSaved, config, maxCaps, systemDefaul
               onChange={(_e, next) => setBudgetDisabled(next)}
               label={
                 <Typography
+                  component='span'
                   sx={{
+                    display: 'block',
                     fontSize: 'var(--ds-text-body)',
                     fontWeight: 'var(--ds-font-weight-semibold)',
                     color: budgetDisabled ? 'var(--ds-red-600)' : 'var(--ds-gray-700)',
@@ -1031,7 +1036,7 @@ const ActiveConfigChip = ({ moduleLabel, cfg, onEdit, onDelete }) => {
         <Button
           tone='ghost'
           size='sm'
-          icon={<EditIcon sx={{ fontSize: 'var(--ds-text-body-lg)', color: 'var(--ds-gray-700)' }} />}
+          icon={<SafeIcon src={EditIcon} alt='edit' width={14} height={14} />}
           onClick={() => onEdit(cfg)}
           aria-label='Edit budget config'
         />
@@ -1125,7 +1130,7 @@ ActiveConfigsCompact.propTypes = {
 
 // ─── main component ──────────────────────────────────────────────────────────
 
-const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
+const LLMConsumptionTab = ({ accountId, readOnly = false, cardElevation = 'raised' }) => {
   // Tenant-wide mode: when Settings is opened from the global sidebar
   // there's no current account. Budget status is per-account, so we skip
   // the KPI strip + Usage matrix entirely and show only the Active
@@ -1404,7 +1409,7 @@ const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
   return (
     <Box sx={{ p: 0, pb: ds.space[5] }}>
       {/* Header row: title + period + Manage Budgets action */}
-      <WidgetCard sx={{ py: ds.space[3], px: ds.space[4], mt: 0, mb: ds.space[3] }}>
+      <Card size='sm' elevation={cardElevation} sx={{ mb: ds.space[3] }}>
         <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: ds.space[4] }}>
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <Stack direction='row' spacing={1} alignItems='center' sx={{ mb: ds.space[0] }}>
@@ -1444,7 +1449,7 @@ const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
             </Button>
           )}
         </Box>
-      </WidgetCard>
+      </Card>
 
       {/* "Contact support" banner fires only on TENANT exhaustion — the
           tenant cap is the only limit operators can't raise themselves.
@@ -1452,9 +1457,12 @@ const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
           so it surfaces via the Exhausted status pill instead, without
           this banner. */}
       {kpi?.tenantExhausted && (
-        <Alert severity='warning' sx={{ mb: ds.space[3], fontSize: 'var(--ds-text-small)' }}>
-          {`Tenant budget exhausted. Please contact ${baseTitle} support to enable ${assistantName} and LLM-based Event Analysis.`}
-        </Alert>
+        <Box sx={{ mb: ds.space[3] }}>
+          <Banner
+            tone='warning'
+            message={`Tenant budget exhausted. Please contact ${baseTitle} support to enable ${assistantName} and LLM-based Event Analysis.`}
+          />
+        </Box>
       )}
 
       {/* KPI strip + Usage matrix. In tenant-wide mode the per-account
@@ -1600,6 +1608,8 @@ const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
         </Box>
       )}
 
+      {isAdmin && <BudgetHistoryTable accountId={accountId} isTenantWide={isTenantWide} />}
+
       <Modal
         open={!!deleteConfirm}
         handleClose={() => setDeleteConfirm(null)}
@@ -1717,6 +1727,9 @@ LLMConsumptionTab.propTypes = {
   // read view, Decision F) uses this; Admin's Budgets & Limits mount
   // (canonical editing) doesn't pass it.
   readOnly: PropTypes.bool,
+  // Card elevation: 'flat' when mounted inside a modal (b-Cortex), where a raised
+  // shadow would stack on the modal surface; 'raised' on a page (Admin).
+  cardElevation: PropTypes.oneOf(['raised', 'flat']),
 };
 
 export default LLMConsumptionTab;

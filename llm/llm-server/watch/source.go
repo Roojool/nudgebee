@@ -300,7 +300,45 @@ func (toolSource) Observe(ctx *security.RequestContext, w Watch) (Observation, e
 	if resp.Status == toolcore.NBToolResponseStatusError {
 		return Observation{}, fmt.Errorf("tool source: tool %q returned error: %s", cfg.ToolName, truncate(resp.Data, 500))
 	}
-	return Observation{Data: resp.Data}, nil
+	return Observation{Data: normalizeToolObservation(resp.Data)}, nil
+}
+
+// normalizeToolObservation turns a tool response into the plain text a
+// predicate is written against.
+//
+// The *_execute tools do not agree on a wire shape: github_execute returns
+// raw stdout ("0\n"), while shell_execute and kubectl_execute wrap it in a
+// JSON envelope ({"stdout":"...","cluster":"..."}) whose newlines are
+// backslash-escaped. Agents are instructed to write predicates against the
+// command's output, so matching the envelope is never what they mean — an
+// anchored predicate such as "^0$" cannot match {"stdout":"...0\n"} under
+// any regex flags, which made every anchored kubectl/shell watch run to
+// EXPIRED.
+//
+// Unwrapping is conservative: only a JSON *object* carrying a string
+// "stdout" key is unwrapped, so raw output that merely happens to be JSON
+// (github_execute --json) is left exactly as-is. Trailing whitespace is
+// stripped last so "^0$" matches a newline-terminated "0".
+func normalizeToolObservation(data string) string {
+	// CRLF -> LF first: Go's (?m)$ matches before "\n" but not before "\r\n",
+	// so a CRLF-terminated line silently defeats every "^...$" predicate.
+	trimmed := strings.TrimSpace(strings.ReplaceAll(data, "\r\n", "\n"))
+	if !strings.HasPrefix(trimmed, "{") {
+		return trimmed
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
+		return trimmed
+	}
+	raw, ok := envelope["stdout"]
+	if !ok {
+		return trimmed
+	}
+	var stdout string
+	if err := json.Unmarshal(raw, &stdout); err != nil {
+		return trimmed
+	}
+	return strings.TrimSpace(strings.ReplaceAll(stdout, "\r\n", "\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +523,19 @@ func userIDString(u *uuid.UUID) string {
 		return ""
 	}
 	return u.String()
+}
+
+// DescribeTarget returns the command a watch polls, for display; "" for sql sources.
+// Server-side so the UI can't re-derive it with precedence the poller doesn't use.
+func DescribeTarget(w Watch) string {
+	if w.SourceKind != SourceKindTool {
+		return ""
+	}
+	var cfg toolSourceConfig
+	if err := json.Unmarshal([]byte(w.SourceConfig), &cfg); err != nil {
+		return ""
+	}
+	return pickCommandFromConfig(&cfg)
 }
 
 // pickCommandFromConfig returns the most likely "command string" the

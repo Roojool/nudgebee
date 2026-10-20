@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import asyncio
-from datetime import datetime, timedelta
-from typing import Dict, Any
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import requests
+
+from server.metrics.api_server_metrics import METRIC_PROVIDER_DATADOG, query_metrics_via_api_server
 
 from server.recommendation.vertical_rightsizing.models.config import Config
 from server.recommendation.vertical_rightsizing.models.objects import K8sObjectData, PodData
@@ -18,28 +20,95 @@ from server.recommendation.vertical_rightsizing.services.metric_base_service imp
 logger = logging.getLogger("rightsizing")
 
 
-def pods_from_series(data: Dict[str, Any], live_cutoff: float) -> list[PodData]:
-    """Map Datadog series to PodData, marking a pod live only when its series
-    has a datapoint at or after live_cutoff. Pure, so the liveness semantics —
-    the input to the estimated-savings replica multiplier — stay unit-testable.
+def entries_from_datadog_response(data: Dict[str, Any]) -> List[dict]:
+    """Datadog's own response in the shape api-server returns for every provider:
+    labels in ``metric``, and timestamps (seconds) aligned with values.
+
+    Only used when the direct-Datadog fallback is enabled; the api-server transport
+    already returns this shape. Both feed the same parsers, so there is one shape to
+    reason about rather than two.
+    """
+    entries: List[dict] = []
+    for series in data.get("series") or []:
+        tags: Dict[str, str] = {}
+        for part in (series.get("scope") or "").split(","):
+            part = part.strip()
+            if ":" in part:
+                key, value = part.split(":", 1)
+                tags[key] = value
+        timestamps: List[float] = []
+        values: List[Any] = []
+        for point in series.get("pointlist") or []:
+            # A null is a gap, not a zero: Datadog reports one for every interval the
+            # series had no data in.
+            if len(point) >= 2 and point[1] is not None:
+                timestamps.append(point[0] / 1000.0)  # Datadog timestamps are in ms
+                values.append(point[1])
+        entries.append({"metric": tags, "timestamps": timestamps, "values": values})
+    return entries
+
+
+def pods_from_series(entries: List[dict], live_cutoff: float) -> list[PodData]:
+    """Map series to PodData, marking a pod live only when its series has a
+    datapoint at or after live_cutoff. Pure, so the liveness semantics — the input
+    to the estimated-savings replica multiplier — stay unit-testable.
     """
     last_seen: Dict[str, float] = {}
-    for series in data.get("series") or []:
-        scope = series.get("scope", "")
-        pod_name = ""
-        for part in scope.split(","):
-            part = part.strip()
-            if part.startswith("pod_name:"):
-                pod_name = part.split(":", 1)[1]
-                break
+    for series in entries or []:
+        pod_name = (series.get("metric") or {}).get("pod_name", "")
         if not pod_name:
             continue
-        for point in series.get("pointlist") or []:
-            if len(point) >= 2 and point[1] is not None:
-                ts = point[0] / 1000.0  # Datadog timestamps are in ms
-                if ts > last_seen.get(pod_name, 0.0):
-                    last_seen[pod_name] = ts
+        for ts in series.get("timestamps") or []:
+            # A timestamp that cannot be read is skipped rather than raised: it
+            # would otherwise take down the whole scan for one unreadable point,
+            # and a pod's liveness is decided by its latest READABLE observation.
+            try:
+                seen = float(ts)
+            except (TypeError, ValueError):
+                continue
+            if seen > last_seen.get(pod_name, 0.0):
+                last_seen[pod_name] = seen
     return [PodData(name=name, deleted=seen < live_cutoff) for name, seen in last_seen.items()]
+
+
+# The strategy's points_required floor is expressed in Prometheus steps: 50 points at
+# the 75s step the loaders use is "about an hour of observed data". Datadog scales its
+# rollup with the window — measured against the dev account, 5-minute buckets over 24
+# hours and 2-hour buckets over the 14 days rightsizing asks for — so the same 50 would
+# demand that a pod have lived for more than four days. Rather than give each provider
+# its own threshold — three numbers that have to be kept in step with one setting — the
+# counts Datadog reports are converted into the same unit: how many 75s steps the
+# observed data covers. The floor then means the same thing on every provider.
+PROMETHEUS_EQUIVALENT_STEP_SECONDS = 75.0
+
+
+def bucket_seconds(arrays: Dict[str, np.ndarray]) -> float:
+    """The width of one Datadog bucket, from the timestamps it actually returned.
+
+    Taken across every pod in the response, and as a median, because a single pod's
+    gaps (an interval it did not exist in is simply absent) leave jumps that a mean
+    would follow. Returns 0 when there is nothing to measure from.
+    """
+    deltas: List[float] = []
+    for arr in arrays.values():
+        timestamps = arr[:, 0]
+        deltas.extend(float(d) for d in np.diff(timestamps) if d > 0)
+    if not deltas:
+        return 0.0
+    return float(np.median(deltas))
+
+
+def equivalent_points(arr: np.ndarray, bucket: float) -> float:
+    """How many 75s steps this pod's readings cover.
+
+    A Datadog reading stands for its whole bucket, so N readings cover N * bucket
+    seconds of observation. With no bucket to measure (one reading, one pod) the
+    reading counts for itself, which keeps the old behaviour rather than inventing
+    coverage that was not measured.
+    """
+    if bucket <= 0:
+        return float(len(arr))
+    return len(arr) * bucket / PROMETHEUS_EQUIVALENT_STEP_SECONDS
 
 
 # Datadog metric names
@@ -69,11 +138,19 @@ class DatadogMetricsService(MetricsService):
         config: Config,
         account_id: str,
         executor: ThreadPoolExecutor,
-        api_key: str,
-        app_key: str,
-        site: str,
+        api_key: str = "",
+        app_key: str = "",
+        site: str = "",
+        tenant_id: str = "",
+        via_api_server: bool = True,
     ) -> None:
         super().__init__(config, account_id, executor)
+        self.account_id = account_id
+        self.tenant_id = tenant_id
+        # The queries are the same either way; only who holds the credentials differs.
+        # Through api-server nothing here knows the keys, which is the point: they used
+        # to arrive in the request body and be logged with it.
+        self.via_api_server = via_api_server
         self.api_key = api_key
         self.app_key = app_key
         self.site = site
@@ -85,6 +162,10 @@ class DatadogMetricsService(MetricsService):
 
     def check_connection(self):
         """Verify Datadog API connectivity."""
+        if self.via_api_server:
+            # api-server holds the connection; a broken one surfaces on the first query
+            # with its own error, the same way the Prometheus path behaves.
+            return
         try:
             now = datetime.utcnow()
             resp = requests.get(
@@ -101,8 +182,23 @@ class DatadogMetricsService(MetricsService):
         except Exception as e:
             raise ConnectionError(f"Datadog API connection failed: {e}") from e
 
-    def _query_datadog(self, query: str, from_ts: int, to_ts: int) -> dict:
-        """Execute a Datadog metrics query and return raw response JSON."""
+    def _metrics_timeout(self) -> Optional[int]:
+        """The caller's own budget, so an abandoned workload does not leave api-server
+        working on a request nobody will read."""
+        return getattr(self._config, "metrics_fetch_timeout", None)
+
+    def _query_datadog(self, query: str, from_ts: int, to_ts: int) -> List[dict]:
+        """Run one Datadog query and return series as {metric, timestamps, values}."""
+        if self.via_api_server:
+            return query_metrics_via_api_server(
+                account_id=self.account_id,
+                tenant_id=self.tenant_id,
+                query=query,
+                start_time=datetime.fromtimestamp(from_ts, tz=timezone.utc),
+                end_time=datetime.fromtimestamp(to_ts, tz=timezone.utc),
+                metric_provider=METRIC_PROVIDER_DATADOG,
+                timeout=self._metrics_timeout(),
+            )
         resp = requests.get(
             self._base_url,
             headers=self._headers,
@@ -114,9 +210,9 @@ class DatadogMetricsService(MetricsService):
             timeout=60,
         )
         resp.raise_for_status()
-        return resp.json()
+        return entries_from_datadog_response(resp.json())
 
-    async def _async_query_datadog(self, query: str, from_ts: int, to_ts: int) -> dict:
+    async def _async_query_datadog(self, query: str, from_ts: int, to_ts: int) -> List[dict]:
         """Async wrapper around _query_datadog using the thread pool executor."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
@@ -129,43 +225,36 @@ class DatadogMetricsService(MetricsService):
         tag_key = KIND_TO_TAG.get(kind, "kube_deployment")
         return f"{agg}:{metric}{{kube_namespace:{namespace},{tag_key}:{name}}}" f" by {{pod_name,kube_container_name}}"
 
-    def _parse_series_by_pod_container(self, data: dict) -> Dict[str, Dict[str, list]]:
+    def _parse_series_by_pod_container(self, entries: List[dict]) -> Dict[str, Dict[str, list]]:
         """
-        Parse Datadog response into nested dict: container -> pod -> [values].
+        Parse series into a nested dict: container -> pod -> [(timestamp, value)].
 
-        Each series in Datadog response has a scope like
-        'pod_name:xxx,kube_container_name:yyy' and a pointlist.
+        Series are grouped by pod_name and kube_container_name, which the query asks
+        for; anything missing either label is not a per-container reading.
         """
         result: Dict[str, Dict[str, list]] = {}
-        for series in data.get("series") or []:
-            scope = series.get("scope", "")
-            tag_map = {}
-            for part in scope.split(","):
-                part = part.strip()
-                if ":" in part:
-                    k, v = part.split(":", 1)
-                    tag_map[k] = v
-
+        for series in entries or []:
+            tag_map = series.get("metric") or {}
             pod_name = tag_map.get("pod_name", "")
             container_name = tag_map.get("kube_container_name", "")
             if not pod_name or not container_name:
                 continue
 
-            if container_name not in result:
-                result[container_name] = {}
-            if pod_name not in result[container_name]:
-                result[container_name][pod_name] = []
-
-            for point in series.get("pointlist", []):
-                if len(point) >= 2 and point[1] is not None:
-                    result[container_name][pod_name].append(
-                        (point[0] / 1000.0, point[1])  # Datadog timestamps are in ms
-                    )
+            samples = result.setdefault(container_name, {}).setdefault(pod_name, [])
+            timestamps = series.get("timestamps") or []
+            values = series.get("values") or []
+            for ts, value in zip(timestamps, values):
+                if value is None:
+                    continue
+                # api-server formats values as strings; the direct path leaves them
+                # numeric. Both end up in numpy arrays, so settle it here. An
+                # unreadable point is dropped like a gap — one of them must not cost
+                # the workload its recommendation.
+                try:
+                    samples.append((float(ts), float(value)))
+                except (TypeError, ValueError):
+                    logger.warning(f"Datadog: unreadable sample for pod {pod_name}, skipping")
         return result
-
-    async def get_cluster_summary(self) -> Dict[str, Any]:
-        """Datadog doesn't provide cluster-level summary the same way Prometheus does."""
-        return {}
 
     async def load_pods(self, object: K8sObjectData, period: timedelta) -> list[PodData]:
         """
@@ -280,15 +369,17 @@ class DatadogMetricsService(MetricsService):
 
             elif metric_name == "CPUAmountLoader":
                 pods_data = {}
+                cpu_bucket = bucket_seconds(cpu_arrays)
                 for pod_name, arr in cpu_arrays.items():
-                    count = float(len(arr))
+                    count = equivalent_points(arr, cpu_bucket)
                     pods_data[pod_name] = np.array([[arr[-1, 0], count]], dtype=np.float64)
                 result[metric_name] = pods_data
 
             elif metric_name == "MemoryAmountLoader":
                 pods_data = {}
+                mem_bucket = bucket_seconds(mem_arrays)
                 for pod_name, arr in mem_arrays.items():
-                    count = float(len(arr))
+                    count = equivalent_points(arr, mem_bucket)
                     pods_data[pod_name] = np.array([[arr[-1, 0], count]], dtype=np.float64)
                 result[metric_name] = pods_data
 

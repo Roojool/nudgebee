@@ -8,6 +8,15 @@ export function generateWorkflowName(baseName: string): string {
   return `${baseName} ${suffix}`;
 }
 
+export async function leaveWorkflowEditor(page: Page, locators: WorkflowLocators): Promise<void> {
+  await locators.backBtn.click();
+  const leavePageBtn = page.getByRole("button", { name: "Leave page" });
+  await leavePageBtn
+    .waitFor({ state: "visible", timeout: 3000 })
+    .then(() => leavePageBtn.click())
+    .catch(() => {});
+}
+
 export async function deleteCreatedWorkflow(
   page: Page,
   locators: WorkflowLocators,
@@ -20,12 +29,7 @@ export async function deleteCreatedWorkflow(
     workflowId = undefined;
   }
 
-  await locators.backBtn.click();
-  const leavePageBtn = page.getByRole("button", { name: "Leave page" });
-  await leavePageBtn
-    .waitFor({ state: "visible", timeout: 3000 })
-    .then(() => leavePageBtn.click())
-    .catch(() => {});
+  await leaveWorkflowEditor(page, locators);
 
   await locators.nameSearchInput
     .waitFor({ state: "visible", timeout: 15000 })
@@ -409,7 +413,12 @@ export async function selectAssignee(
     console.log("GITHUB_ASSIGNEE is not assignable on this repo - fell back to a repo-offered assignee");
   }
 
-  await page.keyboard.press("Escape");
+  // Escape only while the options popup is still open; with it already closed, Escape dismisses the whole action dialog.
+  if (await locators.assigneeSearchInput.isVisible()) {
+    await page.keyboard.press("Escape");
+    await expect(locators.assigneeSearchInput).toBeHidden({ timeout: 10000 });
+  }
+  await expect(locators.dialog).toBeVisible();
   await expect(locators.assigneeDropdown).toContainText(selected, { timeout: 10000 });
   console.log(`Selected assignee from ${source}`);
 }

@@ -1,11 +1,13 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -34,6 +36,7 @@ type WorkspaceExecuteRequest struct {
 	Command    string         `json:"command"`
 	Arguments  map[string]any `json:"arguments"`
 	ConfigName string         `json:"config_name"`
+	TargetName string         `json:"target_name"`
 }
 
 type WorkspaceListFilesRequest struct {
@@ -189,26 +192,73 @@ func authorizeWorkspaceRequest(c *gin.Context, requestedAccountId string, tracer
 		return nil, fmt.Errorf("invalid account id")
 	}
 
-	if claims, ok := token.Claims.(*workspace.WorkspaceTokenClaims); ok && token.Valid {
-		if _, found := common.CacheGet(workspace.CacheNamespaceWorkspaceTokens, tokenString); found {
-			return nil, fmt.Errorf("token has been revoked")
-		}
-		allowedTarget := claims.AccountId
-		if claims.TargetAccountId != "" {
-			allowedTarget = claims.TargetAccountId
-		}
-		c.Set("workspace_allowed_target", allowedTarget)
-		if claims.AccountId != requestedAccountId {
-			return nil, fmt.Errorf("token does not match account")
-		}
-		if claims.TenantId != "" && claims.TenantId != tenantId {
-			return nil, fmt.Errorf("token does not match tenant")
-		}
-	} else {
+	claims, ok := token.Claims.(*workspace.WorkspaceTokenClaims)
+	if !ok || !token.Valid {
 		return nil, fmt.Errorf("invalid token claims")
 	}
+	if _, found := common.CacheGet(workspace.CacheNamespaceWorkspaceTokens, tokenString); found {
+		return nil, fmt.Errorf("token has been revoked")
+	}
+	if claims.AccountId != requestedAccountId {
+		return nil, fmt.Errorf("token does not match account")
+	}
+	if claims.TenantId != "" && claims.TenantId != tenantId {
+		return nil, fmt.Errorf("token does not match tenant")
+	}
 
-	return security.NewRequestContextForTenantAdmin(tenantId), nil
+	isExecutionToken := slices.Contains(claims.Audience, workspace.AudienceWorkspaceExecute)
+	if isExecutionToken != (claims.Grants != nil) {
+		return nil, fmt.Errorf("invalid token claims")
+	}
+	if !isExecutionToken {
+		// The pod's own token (or one issued before audiences existed).
+		c.Set("workspace_allowed_target", claims.AccountId)
+		c.Set(workspaceTokenAudienceKey, workspace.AudienceWorkspacePod)
+		return security.NewRequestContextForTenantAdmin(tenantId), nil
+	}
+	c.Set(workspaceTokenAudienceKey, workspace.AudienceWorkspaceExecute)
+	if claims.TenantId == "" {
+		return nil, fmt.Errorf("token does not match tenant")
+	}
+	sc, err := security.NewSecurityContextFromWorkspaceGrants(tenantId, *claims.Grants)
+	if err != nil {
+		return nil, fmt.Errorf("invalid token grants: %w", err)
+	}
+	if claims.TargetAccountId != "" && !sc.HasAccountAccess(claims.TargetAccountId, security.SecurityAccessTypeRead) {
+		return nil, fmt.Errorf("token does not permit its target")
+	}
+	if claims.TargetAccountId != "" {
+		c.Set("workspace_allowed_target", claims.TargetAccountId)
+	}
+	return security.NewRequestContext(c.Request.Context(), sc, slog.Default(), tracer, meter), nil
+}
+
+// workspaceTokenAudienceKey records which kind of workspace token
+// authenticated the request (set only on the workspace-token path).
+const workspaceTokenAudienceKey = "workspace_token_audience"
+
+// requireExecutionToken enforces, and counts, that tool execution through the
+// workspace token path uses a per-command execution token rather than the
+// pod's own token. Requests authenticated another way (action gateway, global
+// token) carry no workspace token and are not affected. It reports whether the
+// request may continue.
+func requireExecutionToken(c *gin.Context, ctx *security.RequestContext, accountId string) bool {
+	value, viaWorkspaceToken := c.Get(workspaceTokenAudienceKey)
+	if !viaWorkspaceToken {
+		return true
+	}
+	audience, _ := value.(string)
+	enforced := config.Config.LlmServerWorkspaceExecuteRequireScopedToken
+	allowed := audience == workspace.AudienceWorkspaceExecute || !enforced
+	recordWorkspaceExecuteAuth(c.Request.Context(), audience, enforced, allowed)
+	if audience == workspace.AudienceWorkspaceExecute {
+		return true
+	}
+	ctx.GetLogger().Warn("workspace: execute called with the pod token", "account_id", accountId, "enforced", enforced)
+	if !allowed {
+		c.JSON(http.StatusUnauthorized, common.ErrorActionBadRequest("workspace execution requires a per-command execution token; run the command through a Nudgebee tool"))
+	}
+	return allowed
 }
 
 func handleWorkspaceListFilesWithPayload(c *gin.Context, payload map[string]any, ctx *security.RequestContext) {
@@ -346,48 +396,52 @@ func handleWorkspaceExecute(c *gin.Context, tracer trace.Tracer, meter metric.Me
 
 	var req WorkspaceExecuteRequest
 	_ = common.DecodeMapToStruct(payload, &req)
+	if !requireExecutionToken(c, ctx, req.AccountId) {
+		return
+	}
 
 	var relayJob tools.RelayJob
 	var registeredToolName string
 	toolName := strings.ToLower(req.Tool)
-
-	switch toolName {
-	case "kubectl":
-		relayJob = tools.RelayJobKubectl
-		registeredToolName = tools.ToolExecuteKubectlCommand
-	case "helm":
-		relayJob = tools.RelayJobHelm
-		registeredToolName = tools.ToolExecuteHelmCommand
-	case "psql", "postgres":
-		relayJob = tools.RelayJobPostgres
-		registeredToolName = tools.ToolExecutePostgresQuery
-	case "mysql":
-		relayJob = tools.RelayJobMysql
-		registeredToolName = tools.ToolExecuteMySQLQuery
-	case "redis", "redis-cli":
-		relayJob = tools.RelayJobRedis
-		registeredToolName = tools.ToolExecuteRedisCommand
-	case "argocd":
-		relayJob = tools.RelayJobArgoCD
-		registeredToolName = tools.ToolExecuteArgoCDCommand
-	case "clickhouse", "clickhouse-client":
-		relayJob = tools.RelayJobClickhouse
-		registeredToolName = tools.ToolExecuteClickhouseQuery
-	case "rabbitmq", "rabbitmqadmin", "rabbitmq-api":
-		relayJob = tools.RelayJobRabbitmq
-		registeredToolName = tools.ToolExecuteRabbitCommand
-	case "mssql", "sqlcmd":
-		relayJob = tools.RelayJobMssql
-		registeredToolName = tools.ToolExecuteMSSQLQuery
-	case "oracle", "sqlplus":
-		relayJob = tools.RelayJobOracle
-		registeredToolName = tools.ToolExecuteOracleQuery
-	case "ssh":
-		relayJob = tools.RelayJobSSH
-		registeredToolName = tools.ToolExecuteServerCommand
-	default:
-		c.JSON(http.StatusBadRequest, common.ErrorActionBadRequest(fmt.Sprintf("unsupported tool: %s", req.Tool)))
-		return
+	handler, specialized := workspaceCommandHandlers[toolName]
+	if specialized {
+		registeredToolName = handler.RegisteredToolName()
+	} else {
+		switch toolName {
+		case "helm":
+			relayJob = tools.RelayJobHelm
+			registeredToolName = tools.ToolExecuteHelmCommand
+		case "psql", "postgres":
+			relayJob = tools.RelayJobPostgres
+			registeredToolName = tools.ToolExecutePostgresQuery
+		case "mysql":
+			relayJob = tools.RelayJobMysql
+			registeredToolName = tools.ToolExecuteMySQLQuery
+		case "redis", "redis-cli":
+			relayJob = tools.RelayJobRedis
+			registeredToolName = tools.ToolExecuteRedisCommand
+		case "argocd":
+			relayJob = tools.RelayJobArgoCD
+			registeredToolName = tools.ToolExecuteArgoCDCommand
+		case "clickhouse", "clickhouse-client":
+			relayJob = tools.RelayJobClickhouse
+			registeredToolName = tools.ToolExecuteClickhouseQuery
+		case "rabbitmq", "rabbitmqadmin", "rabbitmq-api":
+			relayJob = tools.RelayJobRabbitmq
+			registeredToolName = tools.ToolExecuteRabbitCommand
+		case "mssql", "sqlcmd":
+			relayJob = tools.RelayJobMssql
+			registeredToolName = tools.ToolExecuteMSSQLQuery
+		case "oracle", "sqlplus":
+			relayJob = tools.RelayJobOracle
+			registeredToolName = tools.ToolExecuteOracleQuery
+		case "ssh":
+			relayJob = tools.RelayJobSSH
+			registeredToolName = tools.ToolExecuteServerCommand
+		default:
+			c.JSON(http.StatusBadRequest, common.ErrorActionBadRequest(fmt.Sprintf("unsupported tool: %s", req.Tool)))
+			return
+		}
 	}
 
 	var nbTool core.NBTool
@@ -414,82 +468,423 @@ func handleWorkspaceExecute(c *gin.Context, tracer trace.Tracer, meter metric.Me
 	}
 
 	toolCtx := core.NewNbToolContext(ctx, nbTool, req.AccountId, "system", "", "", "", req.Command, nil, "", queryConfig, "")
-
-	go func() {
-		// Resolve identity once, defensively: this runs in a background goroutine
-		// with no panic recovery, so a nil security context must not deref-panic
-		// and crash the server.
-		var tenantId, userId string
-		if sc := ctx.GetSecurityContext(); sc != nil {
-			tenantId = sc.GetTenantId()
-			userId = sc.GetUserId()
+	if specialized {
+		plan, prepareErr := handler.Prepare(ctx, toolCtx, req)
+		if prepareErr != nil {
+			writeWorkspaceHandlerAudit(ctx, req, toolName, req.AccountId, false)
+			c.JSON(http.StatusBadRequest, gin.H{"error": prepareErr.Error()})
+			return
 		}
-		auditReq := &audit.AuditRequest{
-			Audits: []audit.Audit{
-				{
-					AccountId: req.AccountId,
-					TenantId:  tenantId,
-					// Attribute to the human user when the request carries one; agent /
-					// internal (super-admin) calls leave this empty, which is fine —
-					// EventActor still records that the K8s agent performed the task.
-					UserId:        userId,
-					EventTime:     time.Now(),
-					EventCategory: audit.EventCategoryK8sRelay,
-					EventType:     audit.EventTypeK8sRelayTask,
-					EventActor:    audit.EventActorK8sAgent,
-					EventAction:   audit.EventActionCreate,
-					EventTarget:   toolName,
-					EventStatus:   audit.EventStatusSuccess,
-					EventState:    map[string]any{"command": req.Command},
-					EventAttr: map[string]any{
-						"command":   req.Command,
-						"tool":      req.Tool,
-						"arguments": req.Arguments,
-						"source":    "workspace-shim",
-					},
-				},
-			},
+		if plan.Virtual {
+			writeWorkspaceHandlerAudit(ctx, plan.Request, toolName, plan.TargetAccountID, true)
+			c.JSON(http.StatusOK, gin.H{"result": plan.VirtualResult})
+			return
 		}
-		_ = audit.CreateAudit(ctx, auditReq)
-	}()
+		if allowed, bound := c.Get("workspace_allowed_target"); bound && plan.TargetAccountID != allowed {
+			writeWorkspaceHandlerAudit(ctx, plan.Request, toolName, plan.TargetAccountID, false)
+			c.JSON(http.StatusForbidden, gin.H{"error": "workspace token does not permit the selected target"})
+			return
+		}
+		result, executeErr := handler.Execute(ctx, toolCtx, plan)
+		writeWorkspaceHandlerAudit(ctx, plan.Request, toolName, plan.TargetAccountID, executeErr == nil)
+		c.JSON(workspaceExecuteReply(result, executeErr))
+		return
+	}
 
 	// The pod/token remains bound to req.AccountId; Kubernetes execution uses
 	// the selected cluster account, not the workspace's account.
-	targetAccountId, targetErr := workspaceRelayTarget(toolCtx, relayJob, req.ConfigName, req.Command)
+	if toolName == "helm" {
+		if normalizeErr := normalizeHelmProxyRequest(&req); normalizeErr != nil {
+			writeWorkspaceExecuteAudit(ctx, req, toolName, req.AccountId, false)
+			c.JSON(http.StatusBadRequest, gin.H{"error": normalizeErr.Error()})
+			return
+		}
+	}
+	requestedTarget := req.TargetName
+	if requestedTarget == "" {
+		requestedTarget = req.ConfigName
+	}
+	targetAccountId, targetErr := workspaceRelayTarget(toolCtx, relayJob, requestedTarget, req.Command)
 	if targetErr != nil {
+		writeWorkspaceExecuteAudit(ctx, req, toolName, req.AccountId, false)
 		c.JSON(http.StatusForbidden, gin.H{"error": targetErr.Error()})
 		return
 	}
 	if allowed, bound := c.Get("workspace_allowed_target"); bound && targetAccountId != allowed {
+		writeWorkspaceExecuteAudit(ctx, req, toolName, targetAccountId, false)
 		c.JSON(http.StatusForbidden, gin.H{"error": "workspace token does not permit the selected target"})
 		return
 	}
 	result, err := tools.ExecuteContainerJob(toolCtx, relayJob, req.Command, targetAccountId, req.Arguments, true)
+	writeWorkspaceExecuteAudit(ctx, req, toolName, targetAccountId, err == nil)
+	c.JSON(workspaceExecuteReply(result, err))
+}
+
+func writeWorkspaceHandlerAudit(ctx *security.RequestContext, req WorkspaceExecuteRequest, toolName, targetAccountId string, success bool) {
+	// Cloud-collector owns cloud-command outcome auditing. Retain the existing
+	// Kubernetes audit exactly once and avoid duplicate records when more cloud
+	// handlers are added.
+	if toolName == "kubectl" {
+		writeWorkspaceExecuteAudit(ctx, req, toolName, targetAccountId, success)
+	}
+}
+
+func writeWorkspaceExecuteAudit(ctx *security.RequestContext, req WorkspaceExecuteRequest, toolName, targetAccountId string, success bool) {
+	auditReq := workspaceExecuteAudit(ctx, req, toolName, targetAccountId, success)
+	go func() { _ = audit.CreateAudit(ctx, auditReq) }()
+}
+
+func workspaceExecuteAudit(ctx *security.RequestContext, req WorkspaceExecuteRequest, toolName, targetAccountId string, success bool) *audit.AuditRequest {
+	var tenantId, userId string
+	if sc := ctx.GetSecurityContext(); sc != nil {
+		tenantId = sc.GetTenantId()
+		userId = sc.GetUserId()
+	}
+	status := audit.EventStatusSuccess
+	if !success {
+		status = audit.EventStatusFailure
+	}
+	return &audit.AuditRequest{Audits: []audit.Audit{{
+		AccountId:     targetAccountId,
+		TenantId:      tenantId,
+		UserId:        userId,
+		EventTime:     time.Now(),
+		EventCategory: audit.EventCategoryK8sRelay,
+		EventType:     audit.EventTypeK8sRelayTask,
+		EventActor:    audit.EventActorK8sAgent,
+		EventAction:   audit.EventActionCreate,
+		EventTarget:   toolName,
+		EventStatus:   status,
+		EventState:    map[string]any{"command": req.Command},
+		EventAttr: map[string]any{
+			"command":              req.Command,
+			"tool":                 req.Tool,
+			"arguments":            req.Arguments,
+			"source":               "workspace-shim",
+			"workspace_account_id": req.AccountId,
+			"target_context":       req.TargetName,
+		},
+	}}}
+}
+
+func virtualKubectlConfig(ctx *security.RequestContext, req WorkspaceExecuteRequest, defaultContext string) (string, bool, error) {
+	argv, err := kubectlCommandArgs(req.Command)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "result": result})
-		return
+		return "", true, err
+	}
+	configIndex := kubectlConfigIndex(argv)
+	if configIndex < 0 {
+		return "", false, nil
+	}
+	if configIndex+1 >= len(argv) {
+		return "", true, fmt.Errorf("kubectl config requires a subcommand")
+	}
+	subcommand := argv[configIndex+1]
+	if subcommand != "current-context" && subcommand != "get-contexts" && subcommand != "get-clusters" && subcommand != "view" {
+		return "", true, fmt.Errorf("kubectl config %s is unavailable: workspace kubeconfig is virtual and read-only", subcommand)
+	}
+	contexts, err := tools.ListKubernetesTargets(ctx, req.AccountId)
+	if err != nil {
+		return "", true, fmt.Errorf("unable to list Kubernetes contexts: %w", err)
+	}
+	aliases := tools.KubernetesTargetAliases(contexts)
+	current := req.TargetName
+	if current == "" {
+		current = req.ConfigName
+	}
+	if current == "" {
+		current = defaultContext
+	}
+	if current != "" {
+		found := false
+		for _, target := range aliases {
+			if strings.EqualFold(target.Config.Name, current) {
+				current = target.Name
+				found = true
+				break
+			}
+		}
+		if !found {
+			for _, target := range aliases {
+				if strings.EqualFold(target.Name, current) {
+					current = target.Name
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			return "", true, fmt.Errorf("kubernetes context %q is not connected or you do not have access", current)
+		}
+	}
+	if subcommand == "current-context" {
+		if current == "" {
+			return "", true, fmt.Errorf("current-context is not set")
+		}
+		return current + "\n", true, nil
+	}
+	if subcommand == "get-contexts" {
+		if outputFlag(argv) == "name" {
+			var names []string
+			for _, target := range aliases {
+				names = append(names, target.Name)
+			}
+			return strings.Join(names, "\n") + trailingNewline(names), true, nil
+		}
+		var b strings.Builder
+		b.WriteString("CURRENT   NAME   CLUSTER   AUTHINFO   NAMESPACE\n")
+		for _, target := range aliases {
+			marker := " "
+			if strings.EqualFold(target.Name, current) {
+				marker = "*"
+			}
+			fmt.Fprintf(&b, "%s         %s   %s   nubi-user   \n", marker, target.Name, target.Name)
+		}
+		return b.String(), true, nil
+	}
+	if subcommand == "get-clusters" {
+		var names []string
+		for _, target := range aliases {
+			names = append(names, target.Name)
+		}
+		return "NAME\n" + strings.Join(names, "\n") + trailingNewline(names), true, nil
 	}
 
-	c.JSON(http.StatusOK, gin.H{"result": result})
+	config := map[string]any{"apiVersion": "v1", "kind": "Config", "current-context": current}
+	var entries []map[string]any
+	var clusters []map[string]any
+	for _, target := range aliases {
+		entries = append(entries, map[string]any{"name": target.Name, "context": map[string]string{"cluster": target.Name, "user": "nubi-user"}})
+		clusters = append(clusters, map[string]any{"name": target.Name, "cluster": map[string]string{"server": "nubi://" + target.Name}})
+	}
+	config["contexts"] = entries
+	config["clusters"] = clusters
+	config["users"] = []map[string]any{{"name": "nubi-user", "user": map[string]any{}}}
+	if outputFlag(argv) == "json" {
+		encoded, marshalErr := json.MarshalIndent(config, "", "  ")
+		return string(encoded) + "\n", true, marshalErr
+	}
+	encoded, marshalErr := common.EncodeYaml(config)
+	return string(encoded), true, marshalErr
+}
+
+func resolveKubectlContext(ctx *security.RequestContext, accountID, requested string) (core.ToolConfig, error) {
+	return tools.KubernetesTargetByName(ctx, accountID, requested)
+}
+
+// normalizeKubectlProxyRequest parses the concrete kubectl command forwarded
+// by the shim, removes the context selector used for server-side target
+// resolution, and safely reconstructs the single command sent to relay.
+func normalizeKubectlProxyRequest(req *WorkspaceExecuteRequest) error {
+	argv, err := kubectlCommandArgs(req.Command)
+	if err != nil {
+		return err
+	}
+	stripped, target, err := extractKubectlContextArgs(argv)
+	if err != nil {
+		return err
+	}
+	req.TargetName = target
+	req.Command = buildProxyCommand("kubectl", stripped)
+	return nil
+}
+
+// Helm's --kube-context selects a Nudgebee cluster, not a kubeconfig entry in
+// the relay pod. Resolve it server-side and remove it before relay execution.
+func normalizeHelmProxyRequest(req *WorkspaceExecuteRequest) error {
+	argv, err := commandArgs("helm", req.Command)
+	if err != nil {
+		return err
+	}
+	stripped := make([]string, 0, len(argv))
+	requested := ""
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		for _, forbidden := range []string{"--kubeconfig", "--kube-apiserver", "--kube-token", "--kube-ca-file", "--kube-as-user", "--kube-as-group", "--kube-insecure-skip-tls-verify"} {
+			if arg == forbidden || strings.HasPrefix(arg, forbidden+"=") {
+				return fmt.Errorf("helm %s is not allowed via workspace proxy", forbidden)
+			}
+		}
+		var value string
+		switch {
+		case arg == "--kube-context":
+			if i+1 >= len(argv) || argv[i+1] == "" || strings.HasPrefix(argv[i+1], "-") {
+				return fmt.Errorf("helm --kube-context requires a value")
+			}
+			value = argv[i+1]
+			i++
+		case strings.HasPrefix(arg, "--kube-context="):
+			value = strings.TrimPrefix(arg, "--kube-context=")
+			if value == "" || strings.HasPrefix(value, "-") {
+				return fmt.Errorf("helm --kube-context requires a value")
+			}
+		default:
+			stripped = append(stripped, arg)
+			continue
+		}
+		if requested != "" && !strings.EqualFold(requested, value) {
+			return fmt.Errorf("helm command names more than one cluster")
+		}
+		requested = value
+	}
+	if requested != "" {
+		req.TargetName = requested
+	}
+	req.Command = buildProxyCommand("helm", stripped)
+	return nil
+}
+
+func kubectlCommandArgs(command string) ([]string, error) {
+	return commandArgs("kubectl", command)
+}
+
+func extractKubectlContextArgs(argv []string) ([]string, string, error) {
+	stripped := make([]string, 0, len(argv))
+	target := ""
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		switch {
+		case arg == "--context":
+			if i+1 >= len(argv) || argv[i+1] == "" {
+				return nil, "", fmt.Errorf("kubectl --context requires a value")
+			}
+			if target != "" && !strings.EqualFold(target, argv[i+1]) {
+				return nil, "", fmt.Errorf("kubectl command names more than one context")
+			}
+			target = argv[i+1]
+			i++
+		case strings.HasPrefix(arg, "--context="):
+			value := strings.TrimPrefix(arg, "--context=")
+			if value == "" {
+				return nil, "", fmt.Errorf("kubectl --context requires a value")
+			}
+			if target != "" && !strings.EqualFold(target, value) {
+				return nil, "", fmt.Errorf("kubectl command names more than one context")
+			}
+			target = value
+		default:
+			stripped = append(stripped, arg)
+		}
+	}
+	return stripped, target, nil
+}
+
+func buildProxyCommand(tool string, argv []string) string {
+	parts := make([]string, 0, len(argv)+1)
+	parts = append(parts, tool)
+	for _, arg := range argv {
+		parts = append(parts, common.ShellEscape(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+var kubectlConfigGlobalFlagsWithValue = map[string]bool{
+	"--as": true, "--as-group": true, "--as-uid": true, "--cache-dir": true,
+	"--certificate-authority": true, "--client-certificate": true, "--client-key": true,
+	"--cluster": true, "--context": true, "--kubeconfig": true, "--namespace": true,
+	"--password": true, "--profile": true, "--profile-output": true, "--request-timeout": true,
+	"--server": true, "--tls-server-name": true, "--token": true, "--user": true,
+	"-n": true, "-v": true, "--v": true, "--vmodule": true,
+}
+
+func kubectlConfigIndex(argv []string) int {
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		if !strings.HasPrefix(arg, "-") {
+			if arg == "config" {
+				return i
+			}
+			return -1
+		}
+		if strings.Contains(arg, "=") || arg == "--help" || arg == "-h" || arg == "--version" {
+			continue
+		}
+		if kubectlConfigGlobalFlagsWithValue[arg] && i+1 < len(argv) {
+			i++
+		}
+	}
+	return -1
+}
+
+func outputFlag(argv []string) string {
+	for i, arg := range argv {
+		if strings.HasPrefix(arg, "--output=") {
+			return strings.TrimPrefix(arg, "--output=")
+		}
+		if strings.HasPrefix(arg, "-o=") {
+			return strings.TrimPrefix(arg, "-o=")
+		}
+		if (arg == "--output" || arg == "-o") && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
+}
+
+func trailingNewline(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return "\n"
+}
+
+// workspaceExecuteReply maps a relay execution result to the shim's HTTP reply.
+// The shim prints `result`, then exits 1 when `error` is set; a non-200 makes it
+// print the raw body instead of the output.
+//
+// A command that ran and exited non-zero therefore gets 200 with both fields:
+// the output still reaches the caller, and the workspace (and kubectl_execute's
+// status) sees a failure instead of a success.
+func workspaceExecuteReply(result any, err error) (int, gin.H) {
+	var exitErr *tools.RelayCommandExitError
+	if errors.As(err, &exitErr) {
+		return http.StatusOK, gin.H{"result": result, "error": exitErr.Error()}
+	}
+	if err != nil {
+		return http.StatusInternalServerError, gin.H{"error": err.Error(), "result": result}
+	}
+	return http.StatusOK, gin.H{"result": result}
 }
 
 func workspaceRelayTarget(ctx core.NbToolContext, job tools.RelayJob, requestedConfig string, command string) (string, error) {
-	if job != tools.RelayJobKubectl {
+	if job != tools.RelayJobKubectl && job != tools.RelayJobHelm {
 		return ctx.AccountId, nil
 	}
+	selected := ctx.ToolConfig
 	if requestedConfig == "" {
-		return ctx.AccountId, nil
-	}
-	if ctx.ToolConfig.Name != requestedConfig {
-		return "", fmt.Errorf("selected cluster configuration is unavailable")
+		// The workspace's own cluster: still checked, so a read-only user's
+		// write is refused here and not only by the planner's approval gate.
+		selected = core.ToolConfig{Values: []core.ToolConfigValue{{Name: "id", Value: ctx.AccountId}}}
+	} else if selected.Name != requestedConfig {
+		// The per-account config list is narrowed to the workspace's own
+		// cluster, so a per-call target on another cluster is looked up by name
+		// across the tenant. The caller still checks the result against the
+		// token's bound target.
+		if ctx.Ctx == nil || ctx.Ctx.GetSecurityContext() == nil {
+			return "", fmt.Errorf("target cluster access denied")
+		}
+		found, err := resolveKubectlContext(ctx.Ctx, ctx.AccountId, requestedConfig)
+		if err != nil {
+			return "", fmt.Errorf("selected cluster configuration is unavailable")
+		}
+		selected = found
 	}
 	requiredAccess := security.SecurityAccessTypeRead
-	if command != "" && tools.InferKubectlVerbType(command) != core.ToolRequestTypeRead {
-		requiredAccess = security.SecurityAccessTypeCreate
+	if command != "" {
+		if job == tools.RelayJobKubectl && tools.InferKubectlVerbType(command) != core.ToolRequestTypeRead ||
+			job == tools.RelayJobHelm && tools.InferHelmRequestType(command) != core.ToolRequestTypeRead {
+			requiredAccess = security.SecurityAccessTypeCreate
+		}
 	}
-	for _, value := range ctx.ToolConfig.Values {
+	for _, value := range selected.Values {
 		if value.Name == "id" && value.Value != "" {
-			if ctx.Ctx == nil || ctx.Ctx.GetSecurityContext() == nil || !ctx.Ctx.GetSecurityContext().HasAccountAccess(value.Value, requiredAccess) {
+			if ctx.Ctx == nil || ctx.Ctx.GetSecurityContext() == nil {
+				return "", fmt.Errorf("target cluster access denied")
+			}
+			// Same union that admits the user to run Nubi (and remediation) on
+			// the account: a built-in role, or a custom-role grant to run AI.
+			sc := ctx.Ctx.GetSecurityContext()
+			if !sc.HasAccountAccess(value.Value, requiredAccess) && !grantedRun(sc, value.Value, moduleAiMisc) {
 				return "", fmt.Errorf("target cluster access denied")
 			}
 			return value.Value, nil

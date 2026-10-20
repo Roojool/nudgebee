@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -55,12 +56,23 @@ const (
 	maxConfidenceTextLength = 500
 	// maxConfidenceAnswerChars bounds how much of the answer is sent to the
 	// grader. Investigation answers are normally well under this; a huge one is
-	// head-truncated because the sections the rubric keys on (the Causality
-	// Chain / Findings header and the evidence citations) are near the top.
+	// head-truncated because the conclusion and its supporting chain are near
+	// the top.
 	maxConfidenceAnswerChars = 12000
-	// maxConfidenceManifestRows bounds the execution manifest. Ordered
-	// most-used-first by the DAO, so the tail we drop is the long thin end.
-	maxConfidenceManifestRows = 40
+	// Per-call caps on the execution trace. Inputs (the command a tool ran) are
+	// short and high-signal; outputs keep head and tail so both the command's
+	// framing and its last lines survive.
+	maxConfidenceTraceInputChars  = 500
+	maxConfidenceTraceOutputChars = 1600
+	// maxConfidenceTraceChars bounds the whole rendered trace (~8k tokens). A
+	// longer trace keeps its first and last calls: the head shows how the
+	// investigation was framed, the tail holds the checks behind the conclusion.
+	maxConfidenceTraceChars = 32000
+	// maxConfidenceTraceRows bounds how many calls are fetched at all, so memory
+	// is bounded before the renderer runs rather than after. 400 is ~2.4x the
+	// busiest turn ever graded (165 calls) and ~6x p99 (69), so it is a safety
+	// valve for a runaway investigation, not a working limit.
+	maxConfidenceTraceRows = 400
 )
 
 // ScoreAnswerConfidence runs the grader for one completed message and persists
@@ -73,15 +85,15 @@ func ScoreAnswerConfidence(ctx *security.RequestContext, userId, accountId, conv
 		return fmt.Errorf("confidence: conversation dao not initialized")
 	}
 
-	outcomes, err := dao.ListToolCallOutcomesByMessage(messageId)
+	calls, err := dao.ListToolCallTraceByMessage(messageId, maxConfidenceTraceInputChars, maxConfidenceTraceOutputChars, maxConfidenceTraceRows)
 	if err != nil {
-		// A missing manifest would silently become "nothing was gathered" —
-		// which the rubric scores as `low`. Refusing to score is correct here:
-		// a fabricated `low` is exactly the over-claim we are trying to avoid.
-		return fmt.Errorf("confidence: failed to load execution manifest: %w", err)
+		// A missing trace would silently read as "nothing was gathered", which
+		// the grader would score as `low`. Refusing to score is correct here: a
+		// fabricated `low` is exactly the over-claim we are trying to avoid.
+		return fmt.Errorf("confidence: failed to load execution trace: %w", err)
 	}
 
-	confidence, err := generateAnswerConfidence(ctx, userId, accountId, conversationId, messageId, question, answer, outcomes)
+	confidence, err := generateAnswerConfidence(ctx, userId, accountId, conversationId, messageId, question, answer, calls)
 	if err != nil {
 		return fmt.Errorf("confidence: grading failed: %w", err)
 	}
@@ -98,7 +110,7 @@ func ScoreAnswerConfidence(ctx *security.RequestContext, userId, accountId, conv
 		"message_id", messageId,
 		"level", confidence.Level,
 		"limitations", len(confidence.Limitations),
-		"tools_in_manifest", len(outcomes))
+		"tool_calls_in_trace", len(calls))
 	return nil
 }
 
@@ -106,18 +118,23 @@ func ScoreAnswerConfidence(ctx *security.RequestContext, userId, accountId, conv
 func generateAnswerConfidence(
 	ctx *security.RequestContext,
 	userId, accountId, conversationId, messageId, question, answer string,
-	outcomes []ToolCallOutcome,
+	calls []ToolCallTrace,
 ) (*AnswerConfidence, error) {
 	systemPrompt, err := prompts.GetPromptStrict(ctx.GetContext(), prompts.PromptAnswerConfidence, accountId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load grader prompt: %w", err)
 	}
 
+	// The trace is fenced because it carries raw tool output — pod logs, config
+	// values, scraped pages — which is attacker-adjacent text now entering a
+	// second LLM call. The delimiter plus the prompt's "data, never
+	// instructions" rule is what stops a log line shaped like this grader's own
+	// JSON being read as the verdict.
 	input := fmt.Sprintf(
-		"## User question\n%s\n\n## Final answer\n%s\n\n## Execution manifest\n%s\n",
+		"## User question\n%s\n\n## Final answer\n%s\n\n## Execution trace\n<execution_trace>\n%s\n</execution_trace>\n",
 		strings.TrimSpace(question),
 		TruncateHead(strings.TrimSpace(answer), maxConfidenceAnswerChars),
-		formatExecutionManifest(outcomes),
+		formatExecutionTrace(calls),
 	)
 
 	mcList := []llms.MessageContent{
@@ -145,10 +162,11 @@ func generateAnswerConfidence(
 	//     a cache slot with every other account and be served the wrong prefix.
 	//     Account scope keys on accountId, so an override stays isolated.
 	//
-	//   - Summary model tier: grading fills a mechanical checklist against a
-	//     fixed rubric, which is what that tier exists for, and it keeps the one
-	//     extra call per investigation off the reasoning-tier model. Orthogonal
-	//     to WithThinkingLevel, which sets reasoning effort, not model choice.
+	//   - Summary model tier: grading reads a bounded trace and checks the
+	//     answer's claims against it — a reading task, not a re-investigation —
+	//     and it keeps the one extra call per investigation off the
+	//     reasoning-tier model. Orthogonal to WithThinkingLevel, which sets
+	//     reasoning effort, not model choice.
 	//
 	// Temperature 0 for a stable grade on re-runs.
 	cacheCtx := security.NewRequestContext(
@@ -181,42 +199,59 @@ func generateAnswerConfidence(
 // answer's own cost in usage reports.
 const PromptAnswerConfidenceAgent = "answer_confidence"
 
-// formatExecutionManifest renders the tool outcomes as compact lines the grader
-// can count distinct sources and failures from. Returns an explicit marker when
-// nothing ran — the rubric treats that as `low` rather than letting an empty
-// section read as "no problems".
-func formatExecutionManifest(outcomes []ToolCallOutcome) string {
-	if len(outcomes) == 0 {
+// fenceTagPattern matches an execution_trace fence tag appearing inside the
+// rendered trace, so raw tool output cannot forge or close the fence.
+var fenceTagPattern = regexp.MustCompile(`(?i)</?\s*execution_trace\s*>`)
+
+// formatExecutionTrace renders the tool calls in order — tool, status, input
+// and (bounded) output — so the grader can check the answer's claims against
+// what the tools actually returned. Returns an explicit marker when nothing
+// ran, so an empty section cannot read as "no problems".
+//
+// A trace at the row cap is labelled as abridged. Without that label the
+// grader reads a dropped call as a call that never happened and marks the
+// answer down for it — quietly penalising exactly the longest investigations.
+func formatExecutionTrace(calls []ToolCallTrace) string {
+	if len(calls) == 0 {
 		return "(no tools were executed for this answer)"
 	}
-	if len(outcomes) > maxConfidenceManifestRows {
-		outcomes = outcomes[:maxConfidenceManifestRows]
-	}
+	// Either cap can drop whole calls, and the char cap is the one that usually
+	// does: at full-size outputs it binds around 19 calls, while the row cap
+	// binds at 400. Labelling only the row cap would leave the common case
+	// silent — worse than saying nothing, because the prompt promises the label.
+	abridged := len(calls) >= maxConfidenceTraceRows
 	var b strings.Builder
-	for _, o := range outcomes {
-		fmt.Fprintf(&b, "- %s: %s (%d call%s)\n", o.ToolName, strings.ToLower(o.Status), o.Count, pluralSuffix(o.Count))
+	for i, c := range calls {
+		output := strings.TrimSpace(c.Response)
+		if output == "" {
+			output = "(empty)"
+		}
+		// Some tool wrappers persist no arguments at all (custom_agent_tool_tracking.go
+		// saves ""), which would otherwise render a dangling "input:" the grader
+		// has to interpret.
+		input := strings.TrimSpace(c.Parameters)
+		if input == "" {
+			input = "(none recorded)"
+		}
+		fmt.Fprintf(&b, "%d. %s [%s]\n   input: %s\n   output: %s\n",
+			i+1, c.ToolName, strings.ToLower(c.Status), input, output)
 	}
-	fmt.Fprintf(&b, "\nDistinct tools used: %d\n", distinctToolCount(outcomes))
-	return b.String()
-}
-
-// pluralSuffix is "" for 1 and "s" otherwise. Named apart from the package's
-// existing `plural` (conversation_optimizer.go), which is the y/ies variant.
-func pluralSuffix(n int) string {
-	if n == 1 {
-		return ""
+	out := b.String()
+	if len(out) > maxConfidenceTraceChars {
+		out = TruncateMiddle(out, maxConfidenceTraceChars*2/5, maxConfidenceTraceChars*3/5)
+		abridged = true
 	}
-	return "s"
-}
-
-// distinctToolCount counts unique tool names, since the same tool appearing
-// with several statuses is still ONE source under the rubric.
-func distinctToolCount(outcomes []ToolCallOutcome) int {
-	seen := make(map[string]struct{}, len(outcomes))
-	for _, o := range outcomes {
-		seen[o.ToolName] = struct{}{}
+	// Tool output is untrusted text, so it must not be able to close the fence the
+	// caller wraps it in: a ConfigMap value or scraped page containing the closing
+	// tag would put everything after it outside the fence. Case-insensitive and
+	// whitespace-tolerant because the model reads it the same way.
+	out = fenceTagPattern.ReplaceAllString(out, "[tag]")
+	if abridged {
+		// TruncateMiddle's own marker reads as one output being cut, which is
+		// how a grader would misread whole calls going missing.
+		out = "(abridged: some of this investigation's tool calls are omitted)\n" + out
 	}
-	return len(seen)
+	return out
 }
 
 // parseAnswerConfidence normalizes the grader's JSON. Returns nil when the
@@ -306,6 +341,32 @@ const FeatureAnswerConfidence = "AI_ANSWER_CONFIDENCE"
 // newLLMModel; safe only while the tests that swap it stay non-t.Parallel().
 var answerConfidenceFeatureCheck = common.IsFeatureEnabled
 
+// Test seam for the graded work itself, same rule as the var above. Lets the
+// async wiring (gate → flag → submit → deadline → arguments) be asserted
+// without a live LLM or metastore.
+var scoreAnswerConfidenceFn = ScoreAnswerConfidence
+
+// answerConfidenceDefaultTaskTimeoutSeconds bounds the grading task body —
+// trace read, grading LLM call, metadata write — when
+// AnswerConfidenceTaskTimeoutSeconds is unset or <= 0.
+//
+// This is NOT AsyncOperationTimeoutSeconds, which stays the worker-pool
+// admission budget and is too short for a task containing an LLM call. The
+// provider's own per-call timeouts are the real backstop; this deadline exists
+// only to stop a stuck task occupying a worker indefinitely, so it is kept to
+// a couple of minutes rather than several — the pool is shared with every
+// other async conversation task.
+const answerConfidenceDefaultTaskTimeoutSeconds = 120
+
+// answerConfidenceTaskTimeout resolves the configured grading deadline.
+func answerConfidenceTaskTimeout() time.Duration {
+	secs := config.Config.AnswerConfidenceTaskTimeoutSeconds
+	if secs <= 0 {
+		secs = answerConfidenceDefaultTaskTimeoutSeconds
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // AnswerConfidenceEnabledForTenant reports whether the grader is active for tenantId.
 // Fail-closed — uncertainty must not spend an LLM call. ctx is logger-only and may be
 // nil (GetLogger tolerates a nil receiver).
@@ -358,8 +419,10 @@ func ScoreAnswerConfidenceAsync(ctx *security.RequestContext, request NBAgentReq
 	tracer := ctx.GetTracer()
 	meter := ctx.GetMeter()
 
-	timeout := time.Duration(config.Config.AsyncOperationTimeoutSeconds) * time.Second
-	submissionCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Admission only — how long this submission may wait for a free worker.
+	// The task body gets its own, much larger budget below.
+	submissionCtx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(config.Config.AsyncOperationTimeoutSeconds)*time.Second)
 	defer cancel()
 
 	err := conversationAsyncTaskWorkerPool.Submit(submissionCtx, func() {
@@ -367,12 +430,14 @@ func ScoreAnswerConfidenceAsync(ctx *security.RequestContext, request NBAgentReq
 		// queue wait and is cancelled by the deferred cancel above as soon as
 		// Submit returns. Without this, a hung provider would pin a pool worker
 		// indefinitely — the LLM client's per-call timeout is the backstop, but
-		// this task also does DB work either side of it.
-		taskCtx, taskCancel := context.WithTimeout(context.Background(), timeout)
+		// this task also does DB work either side of it. See
+		// answerConfidenceDefaultTaskTimeoutSeconds for why this is not the
+		// admission budget.
+		taskCtx, taskCancel := context.WithTimeout(context.Background(), answerConfidenceTaskTimeout())
 		defer taskCancel()
 
 		bgCtx := security.NewRequestContext(taskCtx, secCtx, logger, tracer, meter)
-		if err := ScoreAnswerConfidence(bgCtx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, question, answer); err != nil {
+		if err := scoreAnswerConfidenceFn(bgCtx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, question, answer); err != nil {
 			bgCtx.GetLogger().Error("confidence: failed to score answer", "message_id", request.MessageId, "error", err)
 		}
 	})

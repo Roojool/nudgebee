@@ -233,6 +233,17 @@ npm run build           # Production build succeeds
 
 For the complete design system reference (typography classes, component catalog with props/variants/examples, format components, charts, and utilities), see [`design-system.md`](design-system.md).
 
+**Which sections to read when.** The doc is ~1,600 lines — don't read it end to end. §1 "Component index" (which primitive for which purpose) and §1.8 "Design system tokens" (the colour/spacing/radius/type scales) are the two you want before writing any UI; §3 "Decision rules" settles cases where two components could fit; §4 is a per-component API reference to look up only for the primitive you're actually using.
+
+**The gate:** `npm run lint2` runs `check-ds` (`scripts/check-ds.js`), which fails when your change **adds** drift, in two classes.
+
+- _Imports_ — a raw MUI component that has a `ds/*` replacement (`Divider`, `Alert`, `Dialog`, `IconButton`, …) or a legacy component (`CustomStepper`, `CustomTextField`, …). Also the app's single Edit and Delete icons: a MUI `Edit*`/`Delete*` icon, a react-icons pencil or trash, or the superseded `@assets` exports (`writeIcon`, `writeIconLight`, `EditNewIcon`) is flagged in favour of `@assets` `EditIcon` / `DeleteIconRed` through `SafeIcon`.
+- _Tokens_ (`scripts/ds-tokens.js`) — a hardcoded value that lands exactly on a `--ds-*` scale: `padding: '16px'` → `ds.space[4]`, `mt: 2` (MUI's 8px unit) → `ds.space[4]`, `borderRadius: '8px'` → `ds.radius.lg`, `color: '#6f6f6f'` → `ds.gray[600]`, and the same values passed as JSX props. Off-scale values, box dimensions, icon `fontSize` and chart files are out of scope. The table is parsed from `src/styles/theme-tokens.css`, so it tracks the tokens rather than a copy of them.
+
+Nothing a file already had is flagged — each changed file is compared against its own version at the merge base. Fix it by using the named replacement; if the design system genuinely cannot do what the code needs, put `// ds-allow: <reason>` above the line (for imports one marker covers one component — split `import { Dialog, Menu }` if only one is justified). Locally it diffs against `enterprise/main` (or `origin/main`); set `DS_BASE=<ref>` if neither is current.
+
+A `PostToolUse` hook in [`.claude/settings.json`](../.claude/settings.json) runs the same check on each `app/src` file an agent edits (`node scripts/check-ds.js --file <path>`), so drift is reported while the code is still being written rather than at commit time. It reports; `lint2` is what blocks.
+
 ### Keeping the spec in sync (REQUIRED)
 
 The DS has two parallel artifacts that **must stay in sync**:

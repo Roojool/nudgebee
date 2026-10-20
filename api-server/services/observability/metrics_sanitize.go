@@ -13,7 +13,16 @@ const (
 	nonFinitePosInf      = "+inf"
 	nonFiniteNegInf      = "-inf"
 	nonFiniteUnparseable = "unparseable"
+	// nonFiniteGap is a sample the provider reported as absent rather than
+	// unreadable: Datadog's [ts, null], which means "no data in this interval".
+	// Distinct from "nan", which is a number the provider computed.
+	nonFiniteGap = "gap"
 )
+
+// nonFinitePlaceholderKinds are the reasons a parser records before marshalling,
+// storing the sample itself as a NaN placeholder. They are discounted from the
+// "nan" tally below so the counts do not overlap.
+var nonFinitePlaceholderKinds = []string{nonFiniteUnparseable, nonFiniteGap}
 
 // MarshalJSON sends non-finite samples as JSON `null` and reports what each one
 // was in `non_finite`.
@@ -83,19 +92,28 @@ func (r Result) MarshalJSON() ([]byte, error) {
 		for k, v := range found {
 			merged[k] += v
 		}
-		// Unreadable samples were stored as NaN placeholders, so they have just been
-		// counted a second time under "nan". The parser's label is the more specific
-		// fact about them, so discount it here — otherwise the counts overlap and a
-		// caller reporting them adds up to more nulls than the series contains.
-		if placeholders := r.NonFinite[nonFiniteUnparseable]; placeholders > 0 {
-			if merged[nonFiniteNaN] -= placeholders; merged[nonFiniteNaN] <= 0 {
-				delete(merged, nonFiniteNaN)
-			}
-		}
+		discountNonFinitePlaceholders(merged, r.NonFinite)
 		out.NonFinite = merged
 	}
 
 	return json.Marshal(out)
+}
+
+// discountNonFinitePlaceholders removes from the "nan" tally the samples a parser
+// had already labelled. They were stored as NaN placeholders, so marshalling has
+// just counted them a second time; the parser's label is the more specific fact
+// about them. Without this the counts overlap and a caller reporting them adds up
+// to more nulls than the series contains.
+func discountNonFinitePlaceholders(merged, parserCounts map[string]int) {
+	for _, kind := range nonFinitePlaceholderKinds {
+		placeholders := parserCounts[kind]
+		if placeholders <= 0 {
+			continue
+		}
+		if merged[nonFiniteNaN] -= placeholders; merged[nonFiniteNaN] <= 0 {
+			delete(merged, nonFiniteNaN)
+		}
+	}
 }
 
 // nonFiniteKind names v when JSON cannot carry it, and returns "" when it can.

@@ -484,5 +484,246 @@
       ],
       "VpcEndpointType": "Interface"
     }
+  },
+  {
+    "id": "efs-a",
+    "resourse_id": "fs-0aaa",
+    "name": "app-efs",
+    "type": "filesystem",
+    "service_name": "AmazonEFS",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "efs-a",
+    "meta": {
+      "Name": "app-efs",
+      "FileSystemId": "fs-0aaa",
+      "Encrypted": true,
+      "PerformanceMode": "generalPurpose",
+      "LifeCycleState": "available",
+      "NumberOfMountTargets": 2,
+      "SizeInBytes": {
+        "Value": 1024
+      }
+    }
+  },
+  {
+    "id": "eni-a",
+    "resourse_id": "eni-0aaa",
+    "name": "app-eni",
+    "type": "network-interface",
+    "service_name": "AmazonVPC",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "eni-a",
+    "meta": {
+      "NetworkInterfaceId": "eni-0aaa",
+      "VpcId": "vpc-1",
+      "SubnetId": "subnet-1",
+      "Description": "app eni",
+      "Status": "in-use",
+      "PrivateIpAddress": "10.0.1.20"
+    }
+  },
+  {
+    "id": "nat-legacy",
+    "resourse_id": "nat-2",
+    "name": "legacy-nat",
+    "type": "natgateway",
+    "service_name": "AmazonEC2",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "nat-legacy",
+    "meta": {
+      "NatGatewayId": "nat-2",
+      "VpcId": "vpc-1",
+      "SubnetId": "subnet-1"
+    }
+  },
+  {
+    "id": "iam-group",
+    "resourse_id": "app-group",
+    "name": "app-group",
+    "type": "Group",
+    "service_name": "AWSIAM",
+    "account": "123456789012",
+    "region": "global",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "iam-group",
+    "arn": "arn:aws:iam::123456789012:group/app-group",
+    "meta": {
+      "GroupName": "app-group",
+      "Arn": "arn:aws:iam::123456789012:group/app-group"
+    }
+  },
+  {
+    "id": "ecs-task",
+    "resourse_id": "task-1",
+    "name": "app-task",
+    "type": "task",
+    "service_name": "AmazonECS",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "ecs-task",
+    "meta": {
+      "TaskArn": "arn:aws:ecs:us-east-1:123456789012:task/task-1"
+    }
+  },
+  {
+    "id": "backup-rp",
+    "resourse_id": "rp-1",
+    "name": "app-recovery-point",
+    "type": "recovery-point",
+    "service_name": "AWSBackup",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "backup-rp",
+    "meta": {
+      "RecoveryPointArn": "arn:aws:backup:us-east-1:123456789012:recovery-point:rp-1"
+    }
+  },
+  {
+    "id": "sns-bad-arn",
+    "resourse_id": "odd-topic",
+    "name": "odd-topic",
+    "type": "topic",
+    "service_name": "AmazonSNS",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "sns-bad-arn",
+    "arn": "arn:aws:sns:us-east-1:123456789012:odd-topic:sub",
+    "meta": {
+      "TopicName": "odd-topic",
+      "TopicArn": "arn:aws:sns:us-east-1:123456789012:odd-topic:sub"
+    }
+  },
+  {
+    "id": "ssm-a",
+    "resourse_id": "i-0aaa",
+    "name": "app-ec2",
+    "type": "managedinstance",
+    "service_name": "AWSSystemsManager",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "ssm-a",
+    "meta": {
+      "InstanceId": "i-0aaa",
+      "PingStatus": "Online",
+      "PlatformName": "Amazon Linux"
+    }
+  },
+  {
+    "id": "cache-a",
+    "resourse_id": "app-cache",
+    "name": "app-cache",
+    "type": "cluster",
+    "service_name": "AmazonElastiCache",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "cache-a",
+    "meta": {
+      "CacheClusterId": "app-cache",
+      "Engine": "redis",
+      "CacheNodeType": "cache.t3.micro",
+      "ConfigurationEndpoint": {
+        "Address": "app-cache.abc.cache.amazonaws.com",
+        "Port": 6379
+      }
+    }
+  },
+  {
+    "id": "msk-a",
+    "resourse_id": "app-msk",
+    "name": "app-msk",
+    "type": "cluster",
+    "service_name": "AmazonMSK",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "msk-a",
+    "arn": "arn:aws:kafka:us-east-1:123456789012:cluster/app-msk/1",
+    "meta": {
+      "ClusterName": "app-msk",
+      "State": "ACTIVE"
+    }
+  },
+  {
+    "id": "ddb-a",
+    "resourse_id": "app-table",
+    "name": "app-table",
+    "type": "table",
+    "service_name": "AmazonDynamoDB",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "ddb-a",
+    "meta": {
+      "TableName": "app-table",
+      "TableStatus": "ACTIVE"
+    }
+  },
+  {
+    "id": "rds-snap",
+    "resourse_id": "app-snap",
+    "name": "app-snap",
+    "type": "cluster-snapshot",
+    "service_name": "AmazonRDS",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "rds-snap",
+    "meta": {
+      "DBClusterSnapshotIdentifier": "app-snap",
+      "Status": "available"
+    }
+  },
+  {
+    "id": "bedrock-a",
+    "resourse_id": "foundation-model/meta.llama3",
+    "name": "llama3",
+    "type": "foundation-model/meta.llama3",
+    "service_name": "AmazonBedrock",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "bedrock-a",
+    "meta": {
+      "modelId": "meta.llama3"
+    }
+  },
+  {
+    "id": "unknown-a",
+    "resourse_id": "unknown-1",
+    "name": "unknown-thing",
+    "type": "widget",
+    "service_name": "AmazonUnmapped",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "cloud_provider": "AWS",
+    "is_active": true,
+    "external_resource_id": "unknown-a",
+    "meta": {
+      "Widget": "yes"
+    }
   }
 ]

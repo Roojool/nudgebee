@@ -25,6 +25,10 @@ definition:
       type: "string"
       description: "New storage size in GB"
       required: true
+    - id: "region"
+      type: "string"
+      description: "AWS region (e.g. us-east-1)"
+      required: true
     - id: "account_id"
       type: "string"
       description: "Cloud account ID"
@@ -39,14 +43,14 @@ definition:
     - id: "scale_storage"
       type: "cloud.aws.cli"
       params:
-        command: "aws rds modify-db-instance --db-instance-identifier {{ Inputs.db_instance_id }} --allocated-storage {{ Inputs.new_storage_gb }} --apply-immediately"
+        command: "aws rds modify-db-instance --db-instance-identifier {{ Inputs.db_instance_id }} --allocated-storage {{ Inputs.new_storage_gb }} --apply-immediately --region {{ Inputs.region }}"
         account_id: "{{ Inputs.account_id }}"
       depends_on:
         - "approve"
     - id: "verify"
       type: "cloud.aws.cli"
       params:
-        command: "aws rds describe-db-instances --db-instance-identifier {{ Inputs.db_instance_id }} --query DBInstances[0].{Status:DBInstanceStatus,Storage:AllocatedStorage}"
+        command: "aws rds describe-db-instances --db-instance-identifier {{ Inputs.db_instance_id }} --query DBInstances[0].{Status:DBInstanceStatus,Storage:AllocatedStorage} --region {{ Inputs.region }}"
         account_id: "{{ Inputs.account_id }}"
       depends_on:
         - "scale_storage"
@@ -63,6 +67,12 @@ template_variables:
     required: true
     type: "string"
     placeholder: "100"
+  - id: "region"
+    input_ref: "region"
+    display_name: "AWS Region"
+    required: true
+    type: "string"
+    placeholder: "us-east-1"
   - id: "account_id"
     input_ref: "account_id"
     display_name: "Account"

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"nudgebee/llm/agents/core"
 	"nudgebee/llm/common"
+	"nudgebee/llm/security"
 	"os"
 	"strings"
 	"testing"
@@ -789,4 +790,12 @@ func joinErrors(errors []string) string {
 		result += e
 	}
 	return result
+}
+
+func TestCodeAnalyzerLegacyNameIsPickerAlias(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	_, ok := core.GetNBAgent(ctx, agentCodeAnalyzerLegacyName, "account-1", "")
+	require.True(t, ok, "legacy name must still resolve")
+	assert.True(t, core.IsSystemAgentAlias(agentCodeAnalyzerLegacyName), "legacy name must not be listed as its own picker entry")
+	assert.False(t, core.IsSystemAgentAlias(AgentCodeAnalyzer))
 }

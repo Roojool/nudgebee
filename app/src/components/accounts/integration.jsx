@@ -1,4 +1,5 @@
-import { Box, Divider, Stack, Typography } from '@mui/material';
+import { Box, Stack, Typography } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import apiAccount from '@api1/account';
@@ -36,7 +37,7 @@ export const DISABLED_PROVIDERS = new Set([
   'GRAFANA-TEMPO',
   'BITBUCKET',
   'LAST9',
-  'OPENOBSERVE',
+  'HIVE',
 ]);
 // Constants moved to top level for better organization
 const PROVIDERS = {
@@ -862,6 +863,10 @@ const Integrations = () => {
       setLoading(true);
       try {
         const res = await apiAccount.getAllAccount();
+        // `getAllAccount` returns its error rather than rejecting. Route it into
+        // the catch below, so a failed lookup reads as a failure rather than as
+        // a tenant with no integrations at all.
+        if (res instanceof Error) throw res;
         const dataMap = normalizeApiResponse(res?.data);
         const processedSections = generateSectionData(dataMap);
         setSectionsData(processedSections);
@@ -1019,11 +1024,11 @@ const Integrations = () => {
             <Box width='100%' mt={ds.space[4]}>
               <Box sx={{ marginBottom: ds.space[4] }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[3], mb: ds.space[2] }}>
-                  <Divider orientation='vertical' flexItem sx={{ borderRightWidth: ds.space[1], my: ds.space[1] }} />
+                  <Divider orientation='vertical' thickness={4} sx={{ my: ds.space[1], mx: 0 }} />
                   <Skeleton shape='rect' width={ds.space.mul(0, 60)} height={ds.space[5]} />
                   <Skeleton shape='circle' width={ds.space[5]} />
                 </Box>
-                <Divider />
+                <Divider sx={{ my: 0 }} />
               </Box>
               <Box
                 sx={{

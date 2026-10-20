@@ -488,3 +488,56 @@ func (s *K8sSource) isIngressControllerService(node *core.DbNode) bool {
 		strings.Contains(nameLower, "nginx") ||
 		strings.Contains(nameLower, "traefik")
 }
+
+// extractIngressFields keeps an ingress's class, the load balancer it was given and the hosts it routes.
+func (s *K8sSource) extractIngressFields(properties, spec, metaMap map[string]interface{}) {
+	// Ingress class (important for routing)
+	if ingressClass, ok := spec["ingressClassName"].(string); ok {
+		properties["ingress_class"] = ingressClass
+	}
+
+	// Extract load balancer hostname from status (for connecting to AWS ELB)
+	if status, ok := metaMap["status"].(map[string]interface{}); ok {
+		if loadBalancer, ok := status["loadBalancer"].(map[string]interface{}); ok {
+			if ingresses, ok := loadBalancer["ingress"].([]interface{}); ok && len(ingresses) > 0 {
+				if firstIngress, ok := ingresses[0].(map[string]interface{}); ok {
+					// AWS ELBs use "hostname" field
+					if hostname, ok := firstIngress["hostname"].(string); ok && hostname != "" {
+						properties["load_balancer_hostname"] = hostname
+					}
+					// Some ingress controllers use "ip" field instead
+					if ip, ok := firstIngress["ip"].(string); ok && ip != "" {
+						properties["load_balancer_ip"] = ip
+					}
+				}
+			}
+		}
+	}
+
+	// Extract ingress rules (hosts and paths)
+	if rules, ok := spec["rules"].([]interface{}); ok && len(rules) > 0 {
+		hosts := make([]string, 0)
+		for _, rule := range rules {
+			if ruleMap, ok := rule.(map[string]interface{}); ok {
+				if host, ok := ruleMap["host"].(string); ok && host != "" {
+					hosts = append(hosts, host)
+				}
+			}
+		}
+		if len(hosts) > 0 {
+			properties["ingress_hosts"] = hosts
+		}
+	}
+}
+
+// The workload kind this file builds (see kinds.go). Ingress rows build a
+// generic Workload node — the typed ingress nodes come from the relay, which
+// also decides their backends, so a single row is not patchable.
+func init() {
+	registerWorkloadKind(workloadKind{
+		Kind:      "Ingress",
+		NodeType:  core.NodeTypeWorkload,
+		Inventory: true,
+		Extract:   (*K8sSource).extractIngressFields,
+	})
+}

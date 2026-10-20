@@ -70,6 +70,12 @@ jest.mock('@lib/auth', () => ({
   // Optimize's two flag-gated flyout rows (LLM Analyser / AI Gateway) are off by
   // default so the baseline flyout only carries the always-registered sections.
   isUiFeatureEnabled: jest.fn(() => false),
+  // Pre-existing gap, unrelated to this change: PageLayout resolves the
+  // LLM_ANALYSER nav entry via this (a per-tenant flag, async, separate from
+  // isUiFeatureEnabled's deployment-level toggle above), and this mock never
+  // grew a stub for it — every test in this file was failing with
+  // "hasFeatureAccess is not a function" before this line existed.
+  hasFeatureAccess: jest.fn(() => Promise.resolve(false)),
   // Nav gating: default to "not a grants-only user" so no product icon is
   // disabled, preserving the all-icons-enabled baseline (which is also what a
   // deployment with the CUSTOM_ROLES feature off always sees). Tests exercising
@@ -135,20 +141,23 @@ jest.mock(
   { virtual: true }
 );
 
-// The two tour launchers render nothing but call useTour, which throws outside a
-// <TourProvider>. They're not what this suite is about, so stub them out.
+// The two tour launchers call useTour, which throws outside a <TourProvider>,
+// and aren't what this suite is about — stub them out. They render a marker
+// (rather than null) so the "sub-section hover flyout"-style tests below can
+// assert on whether PageLayout even mounts them, which is the actual thing
+// under test for the /setup route guard.
 jest.mock(
   '@components/onboarding/FirstLoginTour',
   () =>
     function MockFirstLoginTour() {
-      return null;
+      return <div data-testid='mock-first-login-tour' />;
     }
 );
 jest.mock(
   '@components/onboarding/SectionFirstVisitTour',
   () =>
     function MockSectionFirstVisitTour() {
-      return null;
+      return <div data-testid='mock-section-first-visit-tour' />;
     }
 );
 
@@ -291,7 +300,7 @@ jest.mock('@context/DataContext', () => ({
 
 // Mock colors
 const { isRenderedInIframe } = require('src/utils/common');
-const { hasReadAccess, isTenantAdmin, isUiFeatureEnabled, isGrantsOnlyUser, hasPermission } = require('@lib/auth');
+const { hasReadAccess, isTenantAdmin, isUiFeatureEnabled, isGrantsOnlyUser, hasPermission, hasFeatureAccess } = require('@lib/auth');
 const { useTenantBranding } = require('@hooks/useTenantBranding');
 const { snackbar: _snackbar } = require('@shared/snackbarService');
 
@@ -974,6 +983,9 @@ describe('sub-section hover flyout', () => {
 
   it('includes the flag-gated Optimize sections when the feature is on', async () => {
     isUiFeatureEnabled.mockReturnValue(true);
+    // LLM Analyser is gated on this per-tenant flag too (see the comment above
+    // its menuItems entry) — isUiFeatureEnabled alone isn't enough for it.
+    hasFeatureAccess.mockResolvedValue(true);
     await renderAndHover('optimize-sidenavbutton');
     expect(screen.getByText('LLM Analyser')).toBeInTheDocument();
     expect(screen.getByText('AI Gateway')).toBeInTheDocument();
@@ -1004,5 +1016,73 @@ describe('sub-section hover flyout', () => {
     await renderAndHover('infra-sidenavbutton');
     expect(document.getElementById('sidenav-infra-k8s')).not.toHaveAttribute('aria-disabled', 'true');
     expect(document.getElementById('sidenav-infra-cloud')).toHaveAttribute('aria-disabled', 'true');
+  });
+});
+
+describe('tour auto-triggers vs /setup', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isRenderedInIframe.mockReturnValue(false);
+    hasReadAccess.mockReturnValue(false);
+    isTenantAdmin.mockReturnValue(false);
+    mockGetUserSession.mockReturnValue({
+      user: { name: 'Test User', email: 'test@example.com' },
+      hasMultipleTenantAccess: false,
+      onPrem: false,
+    });
+    useTenantBranding.mockReturnValue({
+      baseTitle: 'Nudgebee',
+      logoFallbacks: ['/logo.svg'],
+      faviconUrl: '/favicon.ico',
+      partnerKey: null,
+      tenantKey: 'test',
+      isDefaultTenant: true,
+      loading: false,
+    });
+  });
+
+  it('mounts both auto-trigger tours on an ordinary route', async () => {
+    mockUseRouter.mockReturnValue({
+      push: mockPush,
+      replace: jest.fn(),
+      pathname: '/home',
+      query: {},
+      asPath: '/home',
+      prefetch: jest.fn().mockResolvedValue(null),
+    });
+    await act(async () => {
+      render(
+        <PageLayoutWrapped>
+          <div>child</div>
+        </PageLayoutWrapped>
+      );
+    });
+    expect(screen.getByTestId('mock-first-login-tour')).toBeInTheDocument();
+    expect(screen.getByTestId('mock-section-first-visit-tour')).toBeInTheDocument();
+  });
+
+  it('holds both auto-trigger tours off the Setup Center route, even though navLocked reads false there', async () => {
+    // SetupGateContext isn't mocked in this file, so PageLayout reads its real
+    // default context value (`locked: false`) absent a provider — the exact
+    // case the route guard exists for: navLocked alone would let these mount
+    // right on top of the Setup Center's own UI (see the comment above the
+    // guard in layout/index.jsx).
+    mockUseRouter.mockReturnValue({
+      push: mockPush,
+      replace: jest.fn(),
+      pathname: '/setup',
+      query: {},
+      asPath: '/setup',
+      prefetch: jest.fn().mockResolvedValue(null),
+    });
+    await act(async () => {
+      render(
+        <PageLayoutWrapped>
+          <div>child</div>
+        </PageLayoutWrapped>
+      );
+    });
+    expect(screen.queryByTestId('mock-first-login-tour')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('mock-section-first-visit-tour')).not.toBeInTheDocument();
   });
 });

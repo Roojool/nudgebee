@@ -1,10 +1,12 @@
 package aws
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"nudgebee/services/cloud"
 	"nudgebee/services/common"
+	"nudgebee/services/config"
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
 	"nudgebee/services/security"
@@ -206,9 +208,80 @@ func (s *AWSSource) findCloudFormationManagedResource(resource CloudFormationSta
 	return nil
 }
 
+// stackResourcesMetaKey is written on the STACK's own cloud_resourses row by
+// collector-server/cloud-collector/providers/aws/aws_cloudformation.go. The two
+// live in separate Go modules, so the compiler cannot catch a rename -- the
+// paired tests (cloudformation_from_db_test.go here, aws_cloudformation_test.go
+// there) are the contract.
+//
+// On the stack's row and not on each managed resource's row, because
+// etl_resources.go's upsert replaces meta wholesale per resource type: a second
+// writer enriching an SQS queue's row would be clobbered by the next SQS
+// discovery run.
+const stackResourcesMetaKey = "StackResourceSummaries"
+
+// stackResourcesFromDBEnabled is the kill switch, read in exactly one place --
+// the first line of stackResourcesFromRow. A disabled flag makes that lookup a
+// permanent miss, so no call site needs an `if flag` of its own and every caller
+// falls through to its CLI path, the same way NewCloudTopologyStore returning nil
+// does for the topology lookups (flow_sources/cloud_topology_store.go).
+func stackResourcesFromDBEnabled() bool {
+	return config.Config.FeatureKGCFNStackResourcesFromDB
+}
+
+// stackResourcesFromRow returns the stack's managed-resource list from the row
+// the collector wrote, and whether the key was there at all.
+//
+// Presence is a different question from emptiness and the two must not be
+// collapsed (the same rule as metaField in flow_sources/cloud_topology_store.go):
+// an absent key means no collector ever captured the list -- an older collector,
+// an on-prem deployment, or a ListStackResources call that failed -- so the
+// caller falls back to the CLI. An empty array means the collector DID capture it
+// and the stack genuinely manages nothing; falling back there would put a
+// zero-resource stack on the CLI every build forever.
+func (s *AWSSource) stackResourcesFromRow(node *core.DbNode) ([]CloudFormationStackResource, bool) {
+	if !stackResourcesFromDBEnabled() {
+		return nil, false
+	}
+	resourceID, _ := node.Properties["resource_id"].(string) // the StackId ARN
+	if resourceID == "" {
+		return nil, false
+	}
+	row, ok := s.metaByTypeAndID["stack"][resourceID]
+	if !ok || len(row.Meta) == 0 {
+		return nil, false
+	}
+	// Shallow probe, so Parameters/Outputs/Tags/DriftInformation are never decoded
+	// and presence is answerable without parsing the value.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(row.Meta, &probe); err != nil {
+		return nil, false
+	}
+	raw, present := probe[stackResourcesMetaKey]
+	if !present {
+		return nil, false
+	}
+	// The writer's contract is "omit the key or write an array", so a literal null
+	// is evidence it misbehaved and is treated as absent rather than trusted.
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, false
+	}
+	var summaries []CloudFormationStackResource
+	if err := json.Unmarshal(raw, &summaries); err != nil {
+		s.logger.Warn("stored CloudFormation stack resources are malformed, falling back to the CLI",
+			"stack_id", resourceID, "error", err)
+		return nil, false
+	}
+	if summaries == nil {
+		summaries = []CloudFormationStackResource{}
+	}
+	return summaries, true
+}
+
 // createCloudFormationEdges creates edges from CloudFormation stacks to their managed resources
 func (s *AWSSource) createCloudFormationEdges(reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
 	edges := make([]*core.DbEdge, 0)
+	fromTable, fromCLI, cliFailed := 0, 0, 0
 
 	for _, node := range nodes {
 		// Get stack name from properties
@@ -219,37 +292,51 @@ func (s *AWSSource) createCloudFormationEdges(reqCtx *security.RequestContext, n
 			continue
 		}
 
-		// A stack name only identifies a stack within its own region, so the lookup
-		// needs the region the node was discovered in. Skipping beats falling back to
-		// a region-less command, which silently resolves to the collector's default
-		// region and reports the stack as non-existent (#36573).
-		region := nodeRegion(node)
-		if region == "" {
-			s.logger.Warn("CloudFormation stack has no region, skipping resource lookup",
-				"stack_name", stackName,
-				"node_id", node.ID)
-			continue
-		}
+		// The collector captures this list once per discovery run and stores it on
+		// the stack's own row. Reading it here is what removes one CLI process per
+		// stack per build.
+		stackResources, fromRow := s.stackResourcesFromRow(node)
+		if fromRow {
+			fromTable++
+		} else {
+			// CLI fallback, for an older collector, an on-prem deployment, or a
+			// stack whose ListStackResources call failed.
+			//
+			// The region and stack-name guards live in this branch, not above it:
+			// they exist only because those values are interpolated into a shell
+			// command (#36573), and the table lookup builds no command. A stack with
+			// no resolvable region, or a name the CLI validator rejects, still gets
+			// its edges when the row can answer.
+			region := nodeRegion(node)
+			if region == "" {
+				s.logger.Warn("CloudFormation stack has no region, skipping resource lookup",
+					"stack_name", stackName,
+					"node_id", node.ID)
+				continue
+			}
 
-		// Fetch stack resources from AWS
-		stackResources, err := s.fetchCloudFormationStackResources(reqCtx, req.CloudAccountID, region, stackName)
-		if err != nil {
-			if strings.Contains(err.Error(), "Stack with id") && strings.Contains(err.Error(), "does not exist") {
-				// Logged at Warn, not Debug: now that the command carries the stack's
-				// own region this genuinely means the stack is gone, and the count is
-				// the signal that cloud resources need retiring from the graph.
-				s.logger.Warn("CloudFormation stack not found, skipping resource processing",
+			var err error
+			stackResources, err = s.fetchCloudFormationStackResources(reqCtx, req.CloudAccountID, region, stackName)
+			if err != nil {
+				cliFailed++
+				if strings.Contains(err.Error(), "Stack with id") && strings.Contains(err.Error(), "does not exist") {
+					// Logged at Warn, not Debug: now that the command carries the stack's
+					// own region this genuinely means the stack is gone, and the count is
+					// the signal that cloud resources need retiring from the graph.
+					s.logger.Warn("CloudFormation stack not found, skipping resource processing",
+						"stack_name", stackName,
+						"region", region,
+						"error", err)
+					continue
+				}
+
+				s.logger.Warn("failed to fetch CloudFormation stack resources",
 					"stack_name", stackName,
 					"region", region,
 					"error", err)
 				continue
 			}
-
-			s.logger.Warn("failed to fetch CloudFormation stack resources",
-				"stack_name", stackName,
-				"region", region,
-				"error", err)
-			continue
+			fromCLI++
 		}
 
 		s.logger.Debug("Processing CloudFormation stack resources",
@@ -292,5 +379,48 @@ func (s *AWSSource) createCloudFormationEdges(reqCtx *security.RequestContext, n
 		}
 	}
 
+	// Counts stacks served from the table against those that fell back to the CLI.
+	// Without this a broken mapper is invisible: the fallback keeps the graph
+	// correct while the CPU saving silently never arrives.
+	s.logger.Info("CloudFormation stack resources resolved",
+		"cloud_account_id", req.CloudAccountID,
+		"stacks", len(nodes),
+		"from_table", fromTable,
+		"from_cli", fromCLI,
+		"cli_failed", cliFailed,
+		"edges", len(edges))
+
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:  "AWSCloudFormation",
+		NodeType: core.NodeTypeInfraStack,
+		Extract:  (*AWSSource).extractCloudFormationMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AWSCloudFormation",
+		Types:        []string{"stack"},
+		NodeType:     core.NodeTypeInfraStack,
+		SpecificType: "CloudFormationStack",
+		Extract:      (*AWSSource).extractCloudFormationMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// CloudFormation stacks manage the resources they created.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeInfraStack, Name: "cloudformation",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createCloudFormationEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}
+
+// A stack MANAGES the resources it created, so those edges leave the stack but
+// are only discoverable from the stack's own expansion.
+func init() {
+	registerEdgesBuiltElsewhere(core.EdgeKind{Relationship: core.RelationshipManages})
 }

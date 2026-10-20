@@ -97,7 +97,7 @@ class PerformanceInsightsCard {
               value={sqlText}
               sx={{
                 fontSize: ds.text.small,
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 maxWidth: '600px',
                 wordBreak: 'break-word',
               }}

@@ -7,7 +7,7 @@ import { Button } from '@ui/Button';
 import { DropdownMenu } from '@ui/DropdownMenu';
 import { Modal } from '@ui/Modal';
 import { toast as snackbar } from '@ui/Toast';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ds } from '@utils/colors';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { NUDGEBEE_DEFAULT_TEMPLATE_ID, NAMED_RCA_FORMAT_TEMPLATES } from './rcaFormatTemplates';
@@ -134,10 +134,9 @@ const RCAFormatTab = ({ accountId }) => {
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[4], py: ds.space[4] }}>
-      <WidgetCard
+      <Card
         sx={{
           p: `${ds.space[4]} ${ds.space.mul(1, 5)}`,
-          mt: 0,
           mb: ds.space[4],
           display: 'flex',
           justifyContent: 'space-between',
@@ -189,7 +188,7 @@ const RCAFormatTab = ({ accountId }) => {
             Save Changes
           </Button>
         </Box>
-      </WidgetCard>
+      </Card>
 
       {loading ? (
         <Skeleton shape='rect' height={ds.space.mul(1, 100)} sx={{ display: 'block' }} />

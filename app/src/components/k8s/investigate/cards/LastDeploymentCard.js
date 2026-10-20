@@ -1,6 +1,13 @@
 import React, { useRef, useState } from 'react';
 import PropTypes from 'prop-types';
-import Datetime from '@shared/format/Datetime';
+import Datetime, { formatClockCompact } from '@shared/format/Datetime';
+import {
+  describeChangeTiming,
+  isPathAncestor,
+  isRolloutOnlyKey,
+  normalizePath,
+  shiftsListPosition,
+} from '@components/k8s/investigate/changeRollback';
 import { Modal } from '@ui/Modal';
 import { Box, Typography } from '@mui/material';
 import { Divider } from '@ui/Divider';
@@ -25,6 +32,51 @@ const revertTargetName = (resourceName) => {
   return parts[parts.length - 1] || withoutExt;
 };
 
+const isSingleDiff = (e) => e?.type === 'diff' && e?.additional_info?.action_name !== 'deployment_history';
+
+// foldRepeatedChanges groups an event's diff evidences by the object they changed. The collector now
+// sends one block per object, but events recorded before that carry one block per edit — five
+// rewrites of an operator-managed ConfigMap rendered five identical cards and five Revert rows.
+// Blocks arrive newest first, so the first block of each object is the one kept; the rest are
+// skipped and carried along as that card's earlier edits, diff included, so each one can still be
+// opened. A block with no resource_name is never folded.
+export const foldRepeatedChanges = (evidences) => {
+  const skip = new Set();
+  const changes = new Map();
+  const firstIndexByObject = new Map();
+  (Array.isArray(evidences) ? evidences : []).forEach((e, index) => {
+    if (!isSingleDiff(e)) return;
+    const key = typeof e?.data?.resource_name === 'string' ? e.data.resource_name.trim().toLowerCase() : '';
+    if (!key) return;
+    if (!firstIndexByObject.has(key)) {
+      firstIndexByObject.set(key, index);
+      changes.set(index, [{ start_at: e.start_at, diff: e.data }]);
+      return;
+    }
+    skip.add(index);
+    changes.get(firstIndexByObject.get(key)).push({ start_at: e.start_at, diff: e.data });
+  });
+  return { skip, changes };
+};
+
+const WORKLOAD_KINDS = ['deployment', 'statefulset', 'daemonset', 'rollout', 'replicaset'];
+
+// canRevertDiff decides whether the "What you can do" list may offer to revert one diff block.
+//
+// The server reverts by writing the recorded old values onto the ALERT's workload. A ConfigMap or
+// Ingress edit is not a change to that workload, so reverting it there is wrong, and an operator-
+// managed ConfigMap would be rewritten again anyway. And an alert carrying several diff blocks must
+// name the change it means (change_event_id): without one the server would undo all of them at once.
+export const canRevertDiff = (evidence, event) => {
+  const parts = String(evidence?.data?.resource_name || '')
+    .replace(/\.yaml$/i, '')
+    .split('/');
+  if (parts.length !== 3 || !WORKLOAD_KINDS.includes(parts[0].toLowerCase())) return false;
+  if (event?.service_key && `${parts[1]}/${parts[2]}` !== event.service_key) return false;
+  if (evidence?.additional_info?.change_event_id) return true;
+  return (event?.evidences || []).filter(isSingleDiff).length === 1;
+};
+
 // isRevertableChange decides whether to offer a revert for one recorded change.
 //
 // The field summary is NOT required. It is a display convenience the server started sending
@@ -33,10 +85,27 @@ const revertTargetName = (resourceName) => {
 // server-side from the change's own event, and the dialog fetches and shows that change's real
 // diff before anything is dispatched — so the summary's absence costs a preview, not safety.
 //
-// What the summary DOES buy is knowing a change was only a restart, which is not worth reverting.
-// With no summary we cannot tell, so the option is offered and the operator sees the real diff in
-// the dialog; the server still refuses a revert that would clobber a later change.
-const isRevertableChange = (d) => !!d?.eventId && !(d.changedFields?.length > 0 && isRolloutOnlyChange(d.changedFields));
+// What the summary DOES buy is knowing a change was only a restart or a scale, neither of which is
+// a deploy to put back. With no summary we cannot tell, so the option is offered and the operator
+// sees the real diff in the dialog; the server still refuses a revert that would clobber a later
+// change.
+const isRevertableChange = (d) =>
+  !!d?.eventId &&
+  !changedObjectKind(d) &&
+  !(d.changedFields?.length > 0 && (isRolloutOnlyChange(d.changedFields) || isScaleOnlyChange(d.changedFields)));
+
+// changedObjectKind names the object a history entry changed when it is NOT the workload — a
+// ConfigMap the workload reads, say — and returns '' for the workload itself. The history lists those
+// changes too, linked to the workload's resource, so the server's same-resource check lets a revert
+// through and it writes the ConfigMap's `data.*` values onto the workload. Known from the title the
+// collector writes ("ConfigMap ns/name was changed") or, for older entries, from data-only paths.
+export const changedObjectKind = (d) => {
+  const titled = typeof d?.title === 'string' ? d.title.match(/^([A-Za-z]+) \S+ was changed$/) : null;
+  if (titled && !WORKLOAD_KINDS.includes(titled[1].toLowerCase())) return titled[1];
+  const paths = (Array.isArray(d?.changedFields) ? d.changedFields : []).map((f) => normalizePath(f?.path));
+  if (paths.length > 0 && paths.every((p) => /^(data|binaryData|stringData)\./.test(p))) return 'ConfigMap';
+  return '';
+};
 
 // hasRenderableHistory reports whether this event carries a deployment-history evidence with at
 // least one change on it — i.e. whether the list card will render.
@@ -46,20 +115,6 @@ const hasRenderableHistory = (event) => {
   const parsed = safeJSONParse(evidence.data);
   return Array.isArray(parsed?.deployments) && parsed.deployments.length > 0;
 };
-
-// Annotations that only mark a rollout. A change touching nothing but these restarted the
-// workload; it did not alter its configuration. Reverting one removes the marker, undoes nothing,
-// and writing to the pod template can trigger a further rollout — so the option is worse than
-// useless, it is misleading. On dev these are the two most-changed paths of all (rollme 1146,
-// restartedAt 239 over 7 days), so offering revert on them is the common case, not the edge.
-const ROLLOUT_ONLY_ANNOTATIONS = [
-  'kubectl.kubernetes.io/restartedAt',
-  'rollme',
-  'deployment.kubernetes.io/revision',
-  'kubectl.kubernetes.io/last-applied-configuration',
-];
-
-const isRolloutOnlyKey = (key) => ROLLOUT_ONLY_ANNOTATIONS.some((a) => key === a || key.endsWith(`/${a}`) || key.endsWith(`.${a}`));
 
 // A value may arrive as an object (raw evidence) or as a JSON string (the trimmed summary), and an
 // annotations-map change carries the annotation names inside the value rather than in the path.
@@ -92,6 +147,78 @@ const isRolloutOnlyChange = (fields) => {
     }
     return false;
   });
+};
+
+// isScaleOnlyChange reports whether a change moved nothing but the replica count. That is the work of
+// whatever scales the workload — an HPA, KEDA, a cron that parks an environment overnight, someone
+// running `kubectl scale` — not a deploy. Writing the old count back does not undo a deploy, and when
+// the old count was 0 it takes the workload down: on dev a quarter of all revert rows were exactly
+// that, offered as the fix.
+export const isScaleOnlyChange = (fields) => {
+  if (!Array.isArray(fields) || fields.length === 0) return false;
+  const paths = fields.map((f) => normalizePath(f?.path));
+  return paths.includes('spec.replicas') && paths.every((p) => p === 'spec.replicas' || (p && isRolloutOnlyKey(p)));
+};
+
+// markSupersededChanges annotates each change (newest first) with the nearest newer change that
+// conflicts with rolling it back: one that moved the same field (or a parent or child of it) to a
+// different value, or added or removed a list item at or before one of its positions — after which
+// that position names a different item. Rolling such a change back would undo the later change or
+// write into the wrong item, so the server refuses it — offering it anyway meant a click that could
+// only fail. This mirrors the server's rule (laterChangeConflict), rollout annotations included:
+// they are part of what a revert writes. A change whose field list was cut short (fields_omitted) cannot be judged
+// from here and is left to the server.
+// Mirrors the server's sameChangedValue: absent and null are the same, anything else by its JSON.
+const sameChangedValue = (a, b) => (a ?? null) === (b ?? null) || JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+export const markSupersededChanges = (deployments) =>
+  (Array.isArray(deployments) ? deployments : []).map((d, index, all) => {
+    if (!Array.isArray(d?.changedFields) || d.changedFields.length === 0 || d.fieldsOmitted > 0) return d;
+    const mine = new Map(d.changedFields.map((f) => [normalizePath(f?.path), f?.new]));
+    for (let j = index - 1; j >= 0; j--) {
+      const later = all[j];
+      const clash = (later?.changedFields || []).some((f) => {
+        const path = normalizePath(f?.path);
+        // The same change recorded twice is not a later change (the server skips these too). Compared
+        // by content, as the server does: an object value parsed twice is never ===.
+        if (mine.has(path) && sameChangedValue(mine.get(path), f?.new)) return false;
+        // An add or remove shows as one side of the item absent.
+        const addsOrRemoves = f?.old === null || f?.old === undefined || f?.new === null || f?.new === undefined;
+        return [...mine.keys()].some(
+          (p) => p === path || isPathAncestor(path, p) || isPathAncestor(p, path) || (addsOrRemoves && shiftsListPosition(path, p))
+        );
+      });
+      if (clash) return { ...d, supersededBy: later.timestamp || '' };
+    }
+    return d;
+  });
+
+// summarizeChangedFields names what a change touched in a few words, so a row can say "image" rather
+// than leaving the operator to open the dialog to learn what a rollback would undo.
+export const summarizeChangedFields = (fields) => {
+  const names = [];
+  (Array.isArray(fields) ? fields : []).forEach((f) => {
+    const path = normalizePath(f?.path);
+    if (!path || isRolloutOnlyKey(path)) return;
+    const short = path
+      .replace(/^spec\.template\.spec\./, '')
+      .replace(/^spec\.template\.metadata\./, '')
+      .replace(/^spec\.template\./, '')
+      .replace(/^spec\./, '')
+      .replace(/^(init)?[cC]ontainers\[\d+\]\./, '')
+      // The field, not the leaf: four resource values read as "resources", an env entry as "env".
+      .split(/[.[]/)[0];
+    if (short && !names.includes(short)) names.push(short);
+  });
+  if (names.length === 0) return '';
+  return names.length > 2 ? `${names.slice(0, 2).join(', ')} and ${names.length - 2} more` : names.join(', ');
+};
+
+// Hours are how the server sizes the history window; 168 of them is a week, and reads better as one.
+const describeWindow = (hours) => {
+  const h = Number(hours);
+  if (!Number.isFinite(h) || h <= 0) return '';
+  return h % 24 === 0 ? `${h / 24} day${h === 24 ? '' : 's'}` : `${h} hours`;
 };
 
 // ChangedField renders one changed path as `old -> new`. A null value means the field
@@ -130,7 +257,7 @@ ChangedField.propTypes = {
 // page's single resolve slot, because that slot reverts the alert's own attached change and there
 // is exactly one of it — the entire failure being fixed here is a page that could only ever act on
 // that one change.
-const DeploymentHistoryContent = ({ history, event, cardId }) => {
+const DeploymentHistoryContent = ({ history, event, cardId, changeChoices }) => {
   const [revertChangeId, setRevertChangeId] = useState('');
   const [expandedId, setExpandedId] = useState('');
   const [diffState, setDiffState] = useState({ loading: false, error: '', old: '', new: '' });
@@ -185,9 +312,9 @@ const DeploymentHistoryContent = ({ history, event, cardId }) => {
         {/* rollout_name is the workload the changes were made to; service_name is the alert's own
             subject, which for a pod-level alert is the pod. Naming the pod here says a pod was
             changed, which is not what happened. */}
-        {`${deployments.length} change${deployments.length === 1 ? '' : 's'} to ${
-          rolloutName || service
-        } in ${namespace} over the ${timeRangeHours} hours before this alert`}
+        {`${deployments.length} change${deployments.length === 1 ? '' : 's'} to ${rolloutName || service} in ${namespace}${
+          describeWindow(timeRangeHours) ? ` over the ${describeWindow(timeRangeHours)} before this alert` : ' before this alert'
+        }`}
       </Typography>
       {deployments.map((d, index) => (
         <Box key={d.eventId || index} sx={{ paddingBottom: 'var(--ds-space-3)' }}>
@@ -205,9 +332,14 @@ const DeploymentHistoryContent = ({ history, event, cardId }) => {
                   whiteSpace: 'nowrap',
                 }}
               >
-                {d.timeBeforeEvent ? `${d.timeBeforeEvent} before` : 'Change'}
+                {/* Computed from the alert's own start, not the server's "1 days" string. */}
+                {describeChangeTiming(d.timestamp, event?.starts_at) || (d.timeBeforeEvent ? `${d.timeBeforeEvent} before` : 'Change')}
               </Typography>
-              {d.timestamp && <Datetime value={d.timestamp} sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }} />}
+              {d.timestamp && (
+                <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', whiteSpace: 'nowrap' }}>
+                  {formatClockCompact(d.timestamp)}
+                </Typography>
+              )}
             </Box>
 
             <Box display={'flex'} flexDirection={'row'} alignItems={'center'} gap={ds.space.mul(0, 2)} sx={{ flexShrink: 0 }}>
@@ -216,16 +348,34 @@ const DeploymentHistoryContent = ({ history, event, cardId }) => {
                   {expandedId === d.eventId ? 'Hide diff' : 'Show diff'}
                 </Button>
               )}
-              {isRevertableChange(d) && (
+              {isRevertableChange(d) && d.supersededBy === undefined && (
                 <Button size='xs' tone='secondary' disabled={!canRevert} onClick={() => setRevertChangeId(d.eventId)}>
-                  {'Revert'}
+                  {'Roll back'}
                 </Button>
               )}
-              {/* Say "restart only" only where that is actually known. A change with no recorded id
-                  is equally unrevertible, and labelling it a restart would be a claim we cannot
-                  make from the data. */}
+              {/* Each label is said only where the data shows it. A change with no recorded field
+                  list is offered and left to the server, never labelled with a claim we cannot make. */}
               {d.changedFields.length > 0 && isRolloutOnlyChange(d.changedFields) && (
                 <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)', whiteSpace: 'nowrap' }}>{'Restart only'}</Typography>
+              )}
+              {changedObjectKind(d) && (
+                <Typography
+                  title='This change is to another object the workload uses, not to the workload itself, so it is not rolled back from here.'
+                  sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)', whiteSpace: 'nowrap' }}
+                >
+                  {`${changedObjectKind(d)} change`}
+                </Typography>
+              )}
+              {d.changedFields.length > 0 && isScaleOnlyChange(d.changedFields) && (
+                <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)', whiteSpace: 'nowrap' }}>{'Scale only'}</Typography>
+              )}
+              {isRevertableChange(d) && d.supersededBy !== undefined && (
+                <Typography
+                  title='A later change edited the same fields, so rolling this one back on its own would undo that change too.'
+                  sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)', whiteSpace: 'nowrap' }}
+                >
+                  {d.supersededBy ? `Replaced by the ${formatClockCompact(d.supersededBy)} change` : 'Replaced by a later change'}
+                </Typography>
               )}
             </Box>
           </Box>
@@ -273,7 +423,7 @@ const DeploymentHistoryContent = ({ history, event, cardId }) => {
         width='md'
         open={!!revertChangeId}
         handleClose={() => setRevertChangeId('')}
-        title={`Revert a change to ${rolloutName || service || event?.subject_name}`}
+        title={`Roll back a change to ${rolloutName || service || event?.subject_name}`}
         loader={false}
       >
         <InvestigateResolution
@@ -284,6 +434,7 @@ const DeploymentHistoryContent = ({ history, event, cardId }) => {
           isRevertTheDevelopment={!!revertChangeId}
           cardId={cardId}
           changeEventId={revertChangeId}
+          changeChoices={changeChoices}
         />
       </Modal>
     </Box>
@@ -294,11 +445,105 @@ DeploymentHistoryContent.propTypes = {
   history: PropTypes.object.isRequired,
   event: PropTypes.object,
   cardId: PropTypes.string,
+  changeChoices: PropTypes.arrayOf(PropTypes.object),
+};
+
+// changedPathsLabel names what an edit touched, so rows of one repeatedly-edited object can be told
+// apart without opening each diff.
+const changedPathsLabel = (diff) => {
+  const paths = (Array.isArray(diff?.updated_values) ? diff.updated_values.map((v) => v?.path) : diff?.updated_paths || []).filter(Boolean);
+  if (paths.length === 0) return '';
+  const shown = paths.slice(0, 3).join(', ');
+  return paths.length > 3 ? `${shown} and ${paths.length - 3} more` : shown;
+};
+
+// RepeatedChangesContent lists every edit folded into one card, newest first, each with its own diff.
+// A card that showed only the newest diff and the other edits as bare times gave no way to see what
+// those edits were. Diffs already on the page are shown directly; the collector keeps only the newest
+// one per object, so older edits are fetched from their own change event on demand.
+const RepeatedChangesContent = ({ changes, event }) => {
+  const [expanded, setExpanded] = useState(0);
+  // Keyed by change event id, so a slow response can only ever fill in its own row.
+  const [fetched, setFetched] = useState({});
+
+  const toggle = (index) => {
+    if (expanded === index) {
+      setExpanded(-1);
+      return;
+    }
+    setExpanded(index);
+    const change = changes[index];
+    if (change.diff || !change.eventId || fetched[change.eventId]) return;
+    setFetched((prev) => ({ ...prev, [change.eventId]: { loading: true } }));
+    apiKubernetes
+      .resolveEventRecord(change.eventId, event?.cloud_account_id)
+      .then((res) => {
+        const diff = (res?.data?.events?.[0]?.evidences || []).find((e) => e?.type === 'diff')?.data;
+        setFetched((prev) => ({
+          ...prev,
+          [change.eventId]: diff?.old || diff?.new ? { diff } : { error: 'No before/after manifest was recorded for this change.' },
+        }));
+      })
+      .catch(() => setFetched((prev) => ({ ...prev, [change.eventId]: { error: 'That change could not be loaded.' } })));
+  };
+
+  return (
+    <Box sx={{ marginTop: 'var(--ds-space-2)' }}>
+      {changes.map((change, index) => {
+        const state = change.eventId ? fetched[change.eventId] : null;
+        const diff = change.diff || state?.diff;
+        const paths = changedPathsLabel(diff);
+        return (
+          <Box key={change.eventId || `${change.startAt}_${index}`} sx={{ paddingBlock: 'var(--ds-space-2)' }}>
+            <Box display={'flex'} flexDirection={'row'} justifyContent={'space-between'} alignItems={'center'} gap={ds.space.mul(0, 3)}>
+              <Box display={'flex'} flexDirection={'row'} alignItems={'baseline'} gap={ds.space.mul(0, 2)} sx={{ minWidth: 0, flexWrap: 'wrap' }}>
+                <Typography sx={{ color: 'var(--ds-gray-900)', fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-medium)' }}>
+                  {index === 0 ? 'Latest' : `Edit ${changes.length - index}`}
+                </Typography>
+                {change.startAt && <Datetime value={change.startAt} sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }} />}
+                {paths && (
+                  <Typography
+                    sx={{ fontSize: 'var(--ds-text-small)', fontFamily: 'var(--ds-font-mono)', color: 'var(--ds-gray-700)', wordBreak: 'break-all' }}
+                  >
+                    {paths}
+                  </Typography>
+                )}
+              </Box>
+              {(change.diff || change.eventId) && (
+                <Button size='xs' tone='link' onClick={() => toggle(index)}>
+                  {expanded === index ? 'Hide diff' : 'Show diff'}
+                </Button>
+              )}
+            </Box>
+            {expanded === index && (
+              <Box sx={{ marginTop: 'var(--ds-space-2)' }}>
+                {state?.error ? (
+                  <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-red-600)' }}>{state.error}</Typography>
+                ) : diff ? (
+                  <DiffViewer originalCode={diff.old} newCode={diff.new} language='yaml' leftLabel='Before' rightLabel='After' />
+                ) : (
+                  <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>{'Loading the diff…'}</Typography>
+                )}
+              </Box>
+            )}
+            {index !== changes.length - 1 && <Divider sx={{ marginTop: 'var(--ds-space-2)' }} />}
+          </Box>
+        );
+      })}
+    </Box>
+  );
+};
+
+RepeatedChangesContent.propTypes = {
+  changes: PropTypes.arrayOf(PropTypes.object).isRequired,
+  event: PropTypes.object,
 };
 
 class LastDeploymentCard {
-  constructor(evidenceData, event, index) {
+  // foldedChanges: every edit foldRepeatedChanges folded into this block ({start_at, diff}), newest first.
+  constructor(evidenceData, event, index, foldedChanges) {
     this.id = `LastDeploymentCard_${index}`;
+    this.foldedChanges = foldedChanges;
     this.icon = LastDeploymentIcon;
     this.text = evidenceData.additional_info?.title || 'Last Deployment Change';
     this.resolveButton = true;
@@ -332,6 +577,7 @@ class LastDeploymentCard {
           timeRangeHours: parsedData.time_range_hours,
           deployments: deployments.map((d) => ({
             eventId: d.event_id,
+            title: d.title,
             timestamp: d.timestamp,
             timeBeforeEvent: d.time_before_event,
             deploymentStrategy: d.deployment_strategy,
@@ -340,14 +586,17 @@ class LastDeploymentCard {
             valueTruncated: !!d.value_truncated,
           })),
         };
-        // The card-level action targets the most recent change that is actually revertible, and
-        // the row names it. Suppressing the action outright — the first attempt at killing the
-        // duplicate row — left the Remediation tab saying "No fixes are available" directly above
-        // a card listing changes with Revert buttons on them. Naming the change is what removes
-        // the ambiguity; hiding the action threw away the answer along with the question.
-        this.primaryChange = this.deploymentHistory.deployments.find(isRevertableChange) || null;
-        this.resolveButton = !!this.primaryChange;
-        this.actionSubject = this.primaryChange?.timestamp ? new Date(this.primaryChange.timestamp).toLocaleString() : '';
+        this.deploymentHistory.deployments = markSupersededChanges(this.deploymentHistory.deployments);
+        // Every change that can be rolled back on its own is a choice in the rollback dialog, newest
+        // first. Only the newest used to be offered, so a workload with an image bump and a separate
+        // env change could act on one of them. A change a later one overwrote is not offered — the
+        // server refuses it, and a choice that cannot be chosen is noise; the Evidence tab still lists
+        // it as replaced. A restart, a scale or another object's change is not a deploy to put back.
+        this.setRollbackChoices(
+          this.deploymentHistory.deployments
+            .filter((d) => isRevertableChange(d) && d.supersededBy === undefined)
+            .map((d) => this.buildChoice(d.eventId, d.timestamp, d.changedFields))
+        );
         this.renderContent = true;
       }
       this.highlightsData = this.evidenceData.insight;
@@ -365,9 +614,26 @@ class LastDeploymentCard {
         this.renderContent = true;
         this.diff = this.evidenceData;
         this.highlightsData = this.evidenceData?.insight;
-        // Lets the action row name the change it reverts instead of "the last deployment change",
-        // which says nothing on a workload that changed several times.
-        this.actionSubject = this.evidenceData.start_at ? new Date(this.evidenceData.start_at).toLocaleString() : '';
+        // The collector folds repeat edits and says so in its title; for events recorded before
+        // that, the page folds them and the title has to say it here. Built from the stored title
+        // rather than appended to this.text: this runs more than once per card.
+        const info = this.evidenceData.additional_info || {};
+        this.changes = Array.isArray(info.changes)
+          ? info.changes.map((c) => ({ startAt: c?.start_at, eventId: c?.change_event_id }))
+          : (this.foldedChanges || []).map((c) => ({ startAt: c?.start_at, diff: c?.diff }));
+        if (this.changes.length > 0) this.changes[0] = { ...this.changes[0], diff: this.evidenceData.data };
+        const baseTitle = info.title || 'Last Deployment Change';
+        this.text = !info.change_count && this.changes.length > 1 ? `${baseTitle} · ${this.changes.length} times` : baseTitle;
+        this.revertChangeId = info.change_event_id || '';
+        // Decided here rather than when the dialog opens: the action row renders from resolveButton,
+        // so a restart- or scale-only change used to get a "Review & run" that opened nothing.
+        const fields = this.evidenceData.data?.updated_values;
+        this.resolveButton =
+          canRevertDiff(this.evidenceData, this.event) &&
+          !isRolloutOnlyChange(fields) &&
+          !isScaleOnlyChange(fields) &&
+          !!(this.evidenceData.data?.old && this.evidenceData.data?.new);
+        this.setRollbackChoices(this.resolveButton ? [this.buildChoice(this.revertChangeId, this.evidenceData.start_at, fields)] : []);
       }
     }
     return this.renderContent;
@@ -430,22 +696,56 @@ class LastDeploymentCard {
               </Box>
             )}
           </Box>
-          <Box sx={{ marginTop: 'var(--ds-space-3)', marginBottom: 'var(--ds-space-2)' }}>
-            <DiffViewer originalCode={this.diff?.data?.old} newCode={this.diff?.data?.new} language='yaml' leftLabel='Before' rightLabel='After' />
-          </Box>
+          {this.changes?.length > 1 ? (
+            <>
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', marginTop: 'var(--ds-space-2)' }}>
+                {`Changed ${this.changes.length} times before this alert.`}
+              </Typography>
+              <RepeatedChangesContent changes={this.changes} event={this.event} />
+            </>
+          ) : (
+            <Box sx={{ marginTop: 'var(--ds-space-3)', marginBottom: 'var(--ds-space-2)' }}>
+              <DiffViewer originalCode={this.diff?.data?.old} newCode={this.diff?.data?.new} language='yaml' leftLabel='Before' rightLabel='After' />
+            </Box>
+          )}
         </Box>
       );
     } else if (this.deploymentHistory?.deployments?.length > 0) {
-      return <DeploymentHistoryContent history={this.deploymentHistory} event={this.event} cardId={this.id} />;
+      return <DeploymentHistoryContent history={this.deploymentHistory} event={this.event} cardId={this.id} changeChoices={this.rollbackChoices} />;
     }
     return (
-      <Typography marginTop={ds.space.mul(0, 5)} fontSize={ds.text.bodyLg} fontWeight={500}>
+      <Typography marginTop={ds.space.mul(0, 5)} fontSize={ds.text.bodyLg} fontWeight={ds.weight.medium}>
         No diff available.
       </Typography>
     );
   };
 
-  RevertTheDeployment = (props) => {
+  // One change the rollback dialog can act on.
+  buildChoice = (changeEventId, at, fields) => {
+    const summary = summarizeChangedFields(fields);
+    return { changeEventId, at, when: formatClockCompact(at), timing: describeChangeTiming(at, this.event?.starts_at), summary };
+  };
+
+  // The action row names its change when there is exactly one; with several, it says how many and
+  // the dialog is where the operator picks — a picker in the row crowded it.
+  setRollbackChoices = (choices) => {
+    this.rollbackChoices = choices;
+    const newest = choices[0];
+    this.resolveButton = choices.length > 0;
+    this.choosesTarget = choices.length > 1;
+    this.actionSubject = this.choosesTarget ? '' : newest?.when || '';
+    this.actionDetail = !newest
+      ? ''
+      : this.choosesTarget
+      ? [`${choices.length} recent changes can be rolled back`, newest.timing ? `newest ${newest.timing}` : ''].filter(Boolean).join(' · ')
+      : [newest.timing, newest.summary ? `changes ${newest.summary}` : ''].filter(Boolean).join(' · ');
+  };
+
+  // A stable component: the page asks for it on every render, and a fresh one each time would remount
+  // the dialog and drop the change it had loaded.
+  RevertTheDeployment = (props) => this.renderRevertModal(props, this.rollbackChoices?.[0]?.changeEventId);
+
+  renderRevertModal = (props, changeEventId) => {
     const handleSnackbar = (type, message) => {
       if (['success', 'error'].includes(type)) {
         snackbar[type](message);
@@ -457,7 +757,7 @@ class LastDeploymentCard {
         width='md'
         open={props.open}
         handleClose={props.onCloseComponent}
-        title={`Revert the Deployment of ${
+        title={`Roll back a change to ${
           revertTargetName(this.diff?.data?.resource_name) || this.deploymentHistory?.rolloutName || this.event?.subject_name
         }`}
         loader={false}
@@ -469,29 +769,14 @@ class LastDeploymentCard {
           updateInvestigateSuccessSnackBar={handleSnackbar}
           isRevertTheDevelopment={props.open}
           cardId={this.id}
-          changeEventId={this.primaryChange?.eventId || ''}
+          changeEventId={changeEventId || ''}
+          changeChoices={this.rollbackChoices}
         />
       </Modal>
     );
   };
 
-  getResolveComponent = () => {
-    // History card: revert the change the action row names.
-    if (this.primaryChange) {
-      return this.RevertTheDeployment;
-    }
-    // Same rule for the card-level action, which is what the "What you can do" bar offers: a
-    // restart is not a change to put back.
-    if (isRolloutOnlyChange(this.diff?.data?.updated_values)) {
-      this.resolveButton = false;
-      return null;
-    }
-    if (this.diff?.data?.old && this.diff?.data?.new) {
-      return this.RevertTheDeployment;
-    }
-    this.resolveButton = false;
-    return null;
-  };
+  getResolveComponent = () => (this.rollbackChoices?.length > 0 ? this.RevertTheDeployment : null);
 }
 
 export default LastDeploymentCard;

@@ -7,6 +7,7 @@ import (
 	"nudgebee/services/query"
 	"nudgebee/services/security"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -333,17 +334,30 @@ func esUnknownQueryFields(fields []OutputMetricLabels, queryDSL string) []string
 	return unknown
 }
 
+// esDefaultMetricsIndex is the index pattern used when an account has
+// Elasticsearch connected but no metrics index configured.
+const esDefaultMetricsIndex = "metrics-*"
+
 // resolveESMetricsIndex settles the index a metrics query runs against: the
 // caller's explicit selection first, then the account's configured metrics index
 // (per-account index_account_mapping override -> top-level metrics_index, both
-// already folded into cfg.MetricsIndex by GetElasticsearchConfig). Returns "" when
-// neither is set, which the caller reports as a required-index error. Mirrors the
-// logs path in QueryLogs, which has always fallen back to cfg.LogIndex.
+// already folded into cfg.MetricsIndex by GetElasticsearchConfig), then the
+// conventional default. Mirrors the logs path in QueryLogs, which has always
+// fallen back to cfg.LogIndex.
+//
+// The default matters because an account can have Elasticsearch connected with no
+// metrics index configured: this path used to fail every such query with
+// "index is required", while fetchESMetricUtilisation and the noisy-neighbours
+// query both defaulted to metrics-* and worked. Same default here, so one
+// unconfigured field no longer decides which features an account gets.
 func resolveESMetricsIndex(requested string, cfg *ElasticsearchConfig) string {
 	if trimmed := strings.TrimSpace(requested); trimmed != "" {
 		return trimmed
 	}
-	return strings.TrimSpace(cfg.MetricsIndex)
+	if configured := strings.TrimSpace(cfg.MetricsIndex); configured != "" {
+		return configured
+	}
+	return esDefaultMetricsIndex
 }
 
 func (e *ElasticSaasMetricSource) FetchMetricsQuery(ctx *security.RequestContext, req FetchMetricsRequest) (OutputMetricQuery, error) {
@@ -357,16 +371,19 @@ func (e *ElasticSaasMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 		requested, _ = req.Request["metric_name"].(string)
 	}
 	index := resolveESMetricsIndex(requested, cfg)
-	if index == "" {
-		return OutputMetricQuery{}, fmt.Errorf("index is required for Elasticsearch metrics query")
-	}
 
 	var results []QueryResult
 	queryType, _ := req.Request["query_type"].(string)
+	// Batch callers (rightsizing, and any other non-interactive consumer) skip the
+	// two things that exist for a person reading a tool result: the unknown-field
+	// note, which costs a full _mapping fetch per request, and the rendered-body log
+	// line, which for those callers can carry a thousand pod names per query.
+	batch, _ := req.Request["batch"].(bool)
 
 	// Resolved at most once per request and shared by every query in it: the mapping
 	// lookup is a network round trip, and req.Queries can hold several entries.
 	var indexFields []OutputMetricLabels
+	var indexFieldsErr error
 	var fetchedIndexFields bool
 
 	for queryKey, queryDSL := range req.Queries {
@@ -390,10 +407,12 @@ func (e *ElasticSaasMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 		// resolved index, full URL, the window, and the rendered body — enough to
 		// replay the exact request by hand against the cluster.
 		esURL := fmt.Sprintf("%s/%s/_search", cfg.Url, index)
-		slog.Info("ES metrics query", "index", index, "url", esURL,
-			"query_key", queryKey, "query_type", queryType,
-			"start_ms", req.StartTime, "end_ms", req.EndTime,
-			"body", renderedQuery)
+		if !batch {
+			slog.Info("ES metrics query", "index", index, "url", esURL,
+				"query_key", queryKey, "query_type", queryType,
+				"start_ms", req.StartTime, "end_ms", req.EndTime,
+				"body", renderedQuery)
+		}
 
 		resp, err := esRequestJSON("POST", esURL, queryBody, cfg) //nolint:bodyclose
 		if err != nil {
@@ -456,16 +475,27 @@ func (e *ElasticSaasMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 			}
 			qr.Note += stats.GenericTruncation
 		}
+		if batch {
+			results = append(results, qr)
+			continue
+		}
 		// Flag clauses that name fields the index does not have. Absent fields fail
 		// silently and in opposite directions depending on where they sit: nothing
 		// matches inside a filter, nothing is excluded inside a must_not. The second
 		// returns a plausible row count from a query that filtered on nothing at all,
 		// so it is reported even when the payload is non-empty.
 		if !fetchedIndexFields {
-			indexFields, _ = esFetchMetricFields(cfg, index)
+			indexFields, indexFieldsErr = esFetchMetricFields(cfg, index)
 			fetchedIndexFields = true
 		}
-		if unknown := esUnknownQueryFields(indexFields, queryDSL); len(unknown) > 0 {
+		if indexFieldsErr != nil {
+			// Say the check did not run. Skipping it quietly reads as "every field in
+			// this query exists", which is the one thing we cannot tell.
+			if qr.Note != "" {
+				qr.Note += " "
+			}
+			qr.Note += fmt.Sprintf("Field names in this query were not checked against %s, because its fields could not be listed (%v).", index, indexFieldsErr)
+		} else if unknown := esUnknownQueryFields(indexFields, queryDSL); len(unknown) > 0 {
 			if qr.Note != "" {
 				qr.Note += " "
 			}
@@ -695,6 +725,18 @@ func (e *ElasticSaasMetricSource) FetchMetricsLabels(ctx *security.RequestContex
 // matching indices and carrying each field's type. Split from FetchMetricsLabels so the
 // merge can be tested against a stub Elasticsearch without a database-backed config.
 func esFetchMetricFields(cfg *ElasticsearchConfig, index string) ([]OutputMetricLabels, error) {
+	if esIndexIsRemote(index) {
+		fields, err := esFetchFieldCaps(cfg, index)
+		if err != nil {
+			return nil, err
+		}
+		output := make([]OutputMetricLabels, 0, len(fields))
+		for _, f := range fields {
+			output = append(output, OutputMetricLabels{Label: f.Field, Attributes: f.Attributes})
+		}
+		return esRequireMetricFields(output, index)
+	}
+
 	// Fetch field names from the index mapping.
 	resp, err := esRequest("GET", fmt.Sprintf("%s/%s/_mapping", cfg.Url, index), "", cfg) //nolint:bodyclose
 	if err != nil {
@@ -759,7 +801,19 @@ func esFetchMetricFields(cfg *ElasticsearchConfig, index string) ([]OutputMetric
 	// the order Elasticsearch happened to enumerate its indices in.
 	sort.Slice(output, func(i, j int) bool { return output[i].Label < output[j].Label })
 
-	return output, nil
+	return esRequireMetricFields(output, index)
+}
+
+// esRequireMetricFields turns an empty field list into an error. A metrics index with
+// no fields is not a real answer: it is a pattern that matched nothing, or a listing the
+// cluster could not serve. Returned as success, it told the agent the index had no
+// dimensions to filter on and switched off the unknown-field check, so every guessed
+// field name went out unchallenged.
+func esRequireMetricFields(fields []OutputMetricLabels, index string) ([]OutputMetricLabels, error) {
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no fields found for index %q: the pattern matched no index, or its fields could not be listed. Fetch a sample document from the index to see its fields", index)
+	}
+	return fields, nil
 }
 
 // normalizeESMetricsWhere rewrites string equality field names to use the .keyword
@@ -958,9 +1012,14 @@ const esAggTimeBucketMinMs = 1_000_000_000_000
 //	  -> {__name__: "avg_v", inst: "db-1", m: "CPUUtilization"} = 53.5
 //
 // Shapes it does not recognise produce an error naming them, never an empty result.
-func parseESAggregations(aggs map[string]any, fallbackTs int64) ([]Result, error) {
+//
+// The second return is the number of documents a terms aggregation left out
+// (sum_other_doc_count, summed over every terms bucket list in the response): zero
+// when the response is complete.
+func parseESAggregations(aggs map[string]any, fallbackTs int64) ([]Result, int, error) {
 	var out []Result
 	var unsupported []string
+	termsDocsDropped := 0
 
 	// walk reports whether it emitted anything beneath this node. A bucket that
 	// produced no value from a sub-aggregation is a leaf, and its value is its
@@ -981,6 +1040,14 @@ func parseESAggregations(aggs map[string]any, fallbackTs int64) ([]Result, error
 
 			// Bucket aggregation: recurse, extending the label set (or the timestamp).
 			if buckets, isBucket := esAggBuckets(agg); isBucket {
+				// sum_other_doc_count is the one piece of bucket-list metadata that
+				// changes what the result MEANS: non-zero says this terms aggregation
+				// returned fewer buckets than the field has values, so series are
+				// missing and nothing else in the response shows it. Recorded here,
+				// reported by the caller.
+				if dropped, isNum := agg["sum_other_doc_count"].(float64); isNum && dropped > 0 {
+					termsDocsDropped += int(dropped)
+				}
 				for _, b := range buckets {
 					childLabels := make(map[string]string, len(labels)+1)
 					for k, v := range labels {
@@ -1049,7 +1116,7 @@ func parseESAggregations(aggs map[string]any, fallbackTs int64) ([]Result, error
 
 	if len(unsupported) > 0 {
 		sort.Strings(unsupported)
-		return out, &esUnsupportedAggError{names: unsupported}
+		return out, termsDocsDropped, &esUnsupportedAggError{names: unsupported}
 	}
 	// Map iteration is random; sort so series order is stable across calls. Keys are
 	// built once rather than inside the comparator, which would format every label
@@ -1065,7 +1132,7 @@ func parseESAggregations(aggs map[string]any, fallbackTs int64) ([]Result, error
 	for i, idx := range order {
 		sorted[i] = out[idx]
 	}
-	return sorted, nil
+	return sorted, termsDocsDropped, nil
 }
 
 // esAggBuckets returns the buckets of a bucket aggregation. Elasticsearch renders them
@@ -1135,6 +1202,10 @@ func esAggValues(agg map[string]any) (map[string]float64, bool) {
 		}
 		return map[string]float64{"": f}, true
 	}
+	// percentiles: one number per requested percentile, under "values".
+	if vals, ok := agg["values"]; ok {
+		return esPercentileValues(vals)
+	}
 	// stats / extended_stats: several numbers under one name.
 	out := map[string]float64{}
 	for _, k := range []string{"count", "min", "max", "avg", "sum"} {
@@ -1146,6 +1217,41 @@ func esAggValues(agg map[string]any) (map[string]float64, bool) {
 		return out, true
 	}
 	return nil, false
+}
+
+// esPercentileValues reads a percentiles aggregation's results, keyed by the
+// percentile as Elasticsearch names it ("95.0"), which becomes the statistic label
+// on the series. Both response forms are handled: keyed (the default,
+// {"95.0": 1.5}) and keyed:false ([{"key": 95.0, "value": 1.5}]).
+//
+// A null value is a real answer — that percentile matched no documents — so it is
+// skipped rather than reported as a shape we do not understand. All-null therefore
+// returns an empty map, which reads the same as any other aggregation with no data.
+func esPercentileValues(vals any) (map[string]float64, bool) {
+	out := map[string]float64{}
+	switch v := vals.(type) {
+	case map[string]any:
+		for percentile, value := range v {
+			if f, ok := value.(float64); ok {
+				out[percentile] = f
+			}
+		}
+	case []any:
+		for _, entry := range v {
+			e, ok := entry.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			key, keyOK := e["key"].(float64)
+			value, valueOK := e["value"].(float64)
+			if keyOK && valueOK {
+				out[strconv.FormatFloat(key, 'f', -1, 64)] = value
+			}
+		}
+	default:
+		return nil, false
+	}
+	return out, true
 }
 
 // esSeriesPoint is one (labels, value) pair extracted from a single document.
@@ -1286,6 +1392,30 @@ var beatsLabelSkip = []string{
 }
 
 // esGenericTruncationNote describes which bound bit, for the caller to pass on.
+// esTermsTruncationNote states that a terms aggregation left buckets out, which is
+// invisible in the response itself: the series that came back look like the whole
+// answer. Callers that group by pod are the reason it matters — a workload with more
+// pods than the terms size would silently lose some.
+func esTermsTruncationNote(docsDropped int) string {
+	if docsDropped <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("Truncated: a terms aggregation left out buckets covering %d document(s). "+
+		"Raise its `size` or narrow the query to see the rest.", docsDropped)
+}
+
+// esJoinNotes joins the non-empty notes with a space, so a result carrying two
+// truncation reasons states both.
+func esJoinNotes(notes ...string) string {
+	present := make([]string, 0, len(notes))
+	for _, n := range notes {
+		if n != "" {
+			present = append(present, n)
+		}
+	}
+	return strings.Join(present, " ")
+}
+
 func esGenericTruncationNote(leafDocs int, seriesCapped bool) string {
 	switch {
 	case leafDocs > 0 && seriesCapped:
@@ -1641,6 +1771,7 @@ func parseESMetricsHits(bodyBytes []byte) ([]Result, error) {
 // (a bare `terms` agg is a single reading over the query window). Pass 0 when
 // there is no window; the current time is used.
 func parseESMetricsHitsWithStats(bodyBytes []byte, queryEndMs int64) ([]Result, esParseStats, error) {
+	termsDocsDropped := 0
 	var esResp struct {
 		Hits struct {
 			Hits []struct {
@@ -1918,7 +2049,8 @@ func parseESMetricsHitsWithStats(bodyBytes []byte, queryEndMs int64) ([]Result, 
 	// Aggregations, if any. A size:0 aggregation query has no hits by design, so
 	// without this the response looks identical to "matched nothing".
 	if len(esResp.Aggregations) > 0 {
-		aggResults, aggErr := parseESAggregations(esResp.Aggregations, queryEndMs)
+		aggResults, aggTermsDropped, aggErr := parseESAggregations(esResp.Aggregations, queryEndMs)
+		termsDocsDropped += aggTermsDropped
 		results = append(aggResults, results...)
 		if aggErr != nil {
 			// Surface it: an aggregation we executed and could not read is our defect,
@@ -1950,7 +2082,7 @@ func parseESMetricsHitsWithStats(bodyBytes []byte, queryEndMs int64) ([]Result, 
 		DroppedNoTimestamp: droppedNoTimestamp,
 		DroppedNoValue:     droppedNonNumericValue,
 		SampleSourceFields: sampleFields,
-		GenericTruncation:  esGenericTruncationNote(genericLeavesTruncated, genericSeriesTruncated),
+		GenericTruncation:  esJoinNotes(esGenericTruncationNote(genericLeavesTruncated, genericSeriesTruncated), esTermsTruncationNote(termsDocsDropped)),
 	}, nil
 }
 

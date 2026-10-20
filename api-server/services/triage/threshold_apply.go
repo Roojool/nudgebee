@@ -2,7 +2,9 @@ package triage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -72,6 +74,9 @@ type RewrittenRule struct {
 	NewThreshold      float64                // threshold actually written
 	ChangedThreshold  bool
 	ChangedDuration   bool
+	// Restore, when set, replaces threshold/duration: the exact provider values a
+	// previous cloud apply replaced (a revert).
+	Restore map[string]any
 }
 
 // ApplySuggestionRow holds the apply-relevant columns of a cached suggestion.
@@ -172,12 +177,19 @@ func getSuggestionForApply(ctx context.Context, db *sqlx.DB, alertRuleKey, cloud
 // event_rules per source, an alert the webhook reports and the rule Nudgebee (or
 // the sync) holds for it are two rows, and applying against the webhook row would
 // only update the local cache while reporting success.
-// LoadSourceRule loads the event_rules row that backs a suggestion, by (alert, account_id).
-// alert is the cached alert_name (the AlarmName the engine extracted) which is what
-// event_rules keys on for every source (including GCP, where alert_name is the policy name).
-func LoadSourceRule(ctx context.Context, db *sqlx.DB, accountID, alert string) (*SourceRule, error) {
+// LoadSourceRule loads the event_rules row that backs a suggestion, by (alert, account_id)
+// within the caller's tenant. alert is the cached alert_name (the AlarmName the engine
+// extracted) which is what event_rules keys on for every source (including GCP, where
+// alert_name is the policy name). A row stored under the suggestion's own source wins
+// over a same-named rule from another source.
+//
+// GCP suggestions may carry the policy resource name as their alert name (the rule
+// is stored under its display name); those fall back to the rule whose policy id
+// matches alertRuleKey.
+func LoadSourceRule(ctx context.Context, db *sqlx.DB, tenantID, accountID, alert, source, alertRuleKey string) (*SourceRule, error) {
 	var row struct {
 		ID                   string  `db:"id"`
+		Alert                string  `db:"alert"`
 		Source               *string `db:"source"`
 		Expr                 *string `db:"expr"`
 		Duration             *string `db:"duration"`
@@ -193,13 +205,27 @@ func LoadSourceRule(ctx context.Context, db *sqlx.DB, accountID, alert string) (
 		Enabled              *bool   `db:"enabled"`
 	}
 	err := db.GetContext(ctx, &row, `
-		SELECT id, source, expr, duration, severity, category, alert_type,
+		SELECT id, alert, source, expr, duration, severity, category, alert_type,
 		       metric_provider, metric_provider_source, external_rule_id, provider_config,
 		       annotations, labels, enabled
 		FROM event_rules
-		WHERE alert = $1 AND account_id = $2
-		ORDER BY (COALESCE(source, '') LIKE '%\_webhook') ASC, enabled DESC
-		LIMIT 1`, alert, accountID)
+		WHERE alert = $1 AND account_id = $2 AND tenant_id = $3
+		ORDER BY (COALESCE(source, '') = $4) DESC, (COALESCE(source, '') LIKE '%\_webhook') ASC, enabled DESC
+		LIMIT 1`, alert, accountID, tenantID, source)
+	if errors.Is(err, sql.ErrNoRows) && strings.HasPrefix(alertRuleKey, "projects/") {
+		err = db.GetContext(ctx, &row, `
+			SELECT id, alert, source, expr, duration, severity, category, alert_type,
+			       metric_provider, metric_provider_source, external_rule_id, provider_config,
+			       annotations, labels, enabled
+			FROM event_rules
+			WHERE account_id = $1 AND tenant_id = $2 AND source = 'GCP_Metric_Alert'
+			  AND (external_rule_id = $3 OR labels->>'gcp_policy_id' = $3)
+			ORDER BY enabled DESC
+			LIMIT 1`, accountID, tenantID, alertRuleKey)
+		if err == nil {
+			alert = row.Alert
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

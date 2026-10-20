@@ -655,7 +655,10 @@ func GenerateSLOEvent(dbms *database.DatabaseManager, sloConfig DBSLOConfig, acc
 		slog.Error("slo: error in fetching previous slo report", "error", err)
 		return err
 	}
-	evidences, err := collectEvidences(slo, sloConfig)
+	// Resolved once: the event's subject type and the workload metrics below both
+	// need the real kind.
+	subjectType := resolveSubjectType(dbms, sloConfig)
+	evidences, err := collectEvidences(slo, sloConfig, subjectType)
 	if err != nil {
 		slog.Error("slo: error collecting evidences", "error", err)
 		evidences = []any{}
@@ -681,7 +684,7 @@ func GenerateSLOEvent(dbms *database.DatabaseManager, sloConfig DBSLOConfig, acc
 		FindingId:        fingerprint,
 		AggregationKey:   "SLOViolation",
 		Description:      fmt.Sprintf("%s SLO violation for %s in namespace %s", sloConfig.Name, slo.WorkloadName, slo.WorkloadNamespace),
-		SubjectType:      resolveSubjectType(dbms, sloConfig),
+		SubjectType:      subjectType,
 		SubjectNode:      "",
 		Status:           "FIRING",
 		StartsAt:         slo.Timestamp,
@@ -802,7 +805,7 @@ func resolveSubjectType(dbms *database.DatabaseManager, sloConfig DBSLOConfig) s
 	return strings.ToLower(kind)
 }
 
-func collectEvidences(slo DBSLOReport, sloConfig DBSLOConfig) ([]any, error) {
+func collectEvidences(slo DBSLOReport, sloConfig DBSLOConfig, workloadKind string) ([]any, error) {
 	// 1 hour back time in utc
 	startTime := time.Now().UTC().Add(-time.Hour)
 	endTime := time.Now().UTC()
@@ -829,12 +832,12 @@ func collectEvidences(slo DBSLOReport, sloConfig DBSLOConfig) ([]any, error) {
 	logStep("add SLO report/config evidence", t0)
 
 	// Step 2: Collect workload metrics (memory, cpu, latency, cpu_throttling)
-	// through the metrics layer, so the account's own Prometheus answers.
+	// through the metrics layer, so the account's default metrics provider answers.
 	metricsCtx := security.NewRequestContextForTenantAdmin(sloConfig.TenantId, slog.Default(), nil, nil)
 	for _, metricName := range []string{"memory", "cpu", "latency", "cpu_throttling"} {
 		t := time.Now()
 		title := fmt.Sprintf("%s Metric", strings.ToTitle(strings.ReplaceAll(metricName, "_", " ")))
-		res, err := observability.WorkloadMetricEvidence(metricsCtx, sloConfig.CloudAccountId, sloConfig.WorkloadName, sloConfig.Namespace, metricName, title, startTime, endTime)
+		res, err := observability.WorkloadMetricEvidence(metricsCtx, sloConfig.CloudAccountId, sloConfig.WorkloadName, sloConfig.Namespace, workloadKind, metricName, title, startTime, endTime)
 		if err != nil {
 			slog.Error("slo: error getting workload ", "error", err, "metric", metricName, "workload", sloConfig.WorkloadName, "namespace", sloConfig.Namespace)
 			continue

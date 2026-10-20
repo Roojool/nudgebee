@@ -153,7 +153,7 @@ func TestBuildEdgesFromConns(t *testing.T) {
 
 	windowEnd := time.Now()
 	windowStart := windowEnd.Add(-time.Hour)
-	edges, nodes, err := s.buildEdgesFromConns(conns, ipIndex, "tenant-1", "acct-1", windowStart, windowEnd)
+	edges, nodes, unresolved, err := s.buildEdgesFromConns(conns, ipIndex, nil, "tenant-1", "acct-1", windowStart, windowEnd)
 	if err != nil {
 		t.Fatalf("buildEdgesFromConns error: %v", err)
 	}
@@ -205,13 +205,21 @@ func TestBuildEdgesFromConns(t *testing.T) {
 		t.Errorf("sync-gap edge src provenance = %v, want unresolved", syncGapCalls.Properties["resolution_source_src"])
 	}
 
-	// Exactly one sync-gap ExternalService node created (for 10.0.9.9); the
-	// both-unknown flow created none.
+	if got, _ := syncGapCalls.Properties["unresolved_src_ips"].([]string); len(got) != 1 || got[0] != "10.0.9.9" {
+		t.Errorf("sync-gap edge unresolved_src_ips = %v, want [10.0.9.9]", syncGapCalls.Properties["unresolved_src_ips"])
+	}
+
+	// Exactly one sync-gap ExternalService node created (standing in for
+	// 10.0.9.9); the both-unknown flow created none.
 	if len(nodes) != 1 {
 		t.Fatalf("got %d created nodes, want 1 sync-gap node", len(nodes))
 	}
-	if nodes[0].NodeType != core.NodeTypeExternalService || nodes[0].Properties["is_sync_gap"] != true {
-		t.Errorf("created node is not a sync-gap ExternalService: %+v", nodes[0])
+	if nodes[0].NodeType != core.NodeTypeExternalService || nodes[0].Properties["is_sync_gap"] != true ||
+		nodes[0].Properties["subtype"] != "vpc-unresolved-ip" {
+		t.Errorf("created node is not a vpc-unresolved-ip sync-gap ExternalService: %+v", nodes[0])
+	}
+	if len(unresolved) != 1 || unresolved[0].IP != "10.0.9.9" || !unresolved[0].Peers["orders-db"] {
+		t.Errorf("unresolved = %+v, want only 10.0.9.9 with peer orders-db", unresolved)
 	}
 
 	// No edge should reference the dropped ephemeral-return flow (port 41000).

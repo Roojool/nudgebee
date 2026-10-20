@@ -1,12 +1,4 @@
-import {
-  AgentIconTabBlue,
-  ToolsIconTabBlue,
-  LLMFunctionIconTabBlue,
-  LLMConsumptionIcon,
-  FileOutlineIcon,
-  InMemoryIcon,
-  DocumentationIcon,
-} from '@assets';
+import { AgentIconTabBlue, ToolsIconTabBlue, LLMConsumptionIcon, FileOutlineIcon, InMemoryIcon, DocumentationIcon } from '@assets';
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
 import HubOutlinedIcon from '@mui/icons-material/HubOutlined';
 import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined';
@@ -14,7 +6,6 @@ import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 import withBrandBlue from '@shared/icons/withBrandBlue';
 import AgentsAdminTab from './AgentsAdminTab';
 import ToolsAndMCPAdminTab from './ToolsAndMCPAdminTab';
-import FunctionsAdminTab from './FunctionsAdminTab';
 import ProvidersAdminTab from './ProvidersAdminTab';
 import GatewayAdminTab from './GatewayAdminTab';
 import EgressFilterAdminTab from './EgressFilterAdminTab';
@@ -42,8 +33,8 @@ const MemoryPolicyIcon = withBrandBlue(LockOutlinedIcon);
  *
  * `module` values reuse the dynamic-RBAC modules the underlying actions
  * already normalize to (permissionCatalog.ts's token-0 heuristic) rather
- * than inventing new ones: every `ai_*` action (agents, tools, functions,
- * budget, rca-format) shares one module, `ai`; Providers reuses
+ * than inventing new ones: every `ai_*` action (agents, tools, budget,
+ * rca-format) shares one module, `ai`; Providers reuses
  * `integrations` (same integrations_list/_aggregate actions Admin →
  * Integrations already gates on); Gateway reuses `llm` (llm_gateway_* —
  * same module Settings' own hasPermission('llm', 'Read') check already
@@ -75,17 +66,6 @@ export const AI_TOOLS_SUB_TABS = [
     icon: ToolsIconTabBlue,
     Body: ToolsAndMCPAdminTab,
     module: 'ai',
-  },
-  {
-    id: 'functions',
-    fragment: 'functions',
-    text: 'Functions',
-    icon: LLMFunctionIconTabBlue,
-    Body: FunctionsAdminTab,
-    module: 'ai',
-    // Settings only ever pushed this tab after an async hasFeatureAccess('LLM_FUNCTION')
-    // check resolved true — same gate, now read via useFeatureAccess() by each caller.
-    requiresFeature: 'LLM_FUNCTION',
   },
   {
     id: 'providers',

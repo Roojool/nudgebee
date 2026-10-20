@@ -34,3 +34,14 @@ func (s *AzureSource) extractDNSZoneMetadata(properties map[string]interface{}, 
 	subtype, _ := properties["subtype"].(string)
 	properties["is_public_entry"] = !strings.HasPrefix(strings.ToLower(subtype), "privatednszone")
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:        []string{"dnszone", "dnszones", "privatednszone", "privatednszones"},
+		NodeType:     core.NodeTypeDNSZone,
+		SpecificType: "AzureDNSZone",
+		Extract:      (*AzureSource).extractDNSZoneMetadata,
+	})
+}

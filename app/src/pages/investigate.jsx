@@ -17,7 +17,7 @@ import AiGenerateWorkflowModal from '@components/workflow/components/AiGenerateW
 import RunAutomationMenu from '@components/workflow/components/RunAutomationMenu';
 import EventAutomationRunsList from '@components/workflow/components/EventAutomationRunsList';
 import apiWorkflow from '@api1/workflow';
-import { SparklesIconBG } from '@assets';
+import { EditIcon, SparklesIconBG } from '@assets';
 import { getNubiIconUrl, useTenantBranding, getBrandTitle, toAssistantLabel, DEFAULT_TITLE } from '@hooks/useTenantBranding';
 import { useNubiGlobalChat } from '@context/NubiGlobalChatContext';
 import { Label } from '@ui/Label';
@@ -29,6 +29,7 @@ import {
   describeUndo,
   describeActionTitle,
   describeUndoTarget,
+  describeChoiceTitle,
   cardOffersAction,
 } from '@components/k8s/investigate/resolutionStatus';
 import EventRaisePrPanel from '@components/k8s/investigate/cards/EventRaisePrPanel';
@@ -36,10 +37,9 @@ import { ANNOTATIONS } from '@lib/annotationKeys';
 import UndoConfirmDialog from '@components/k8s/investigate/UndoConfirmDialog';
 import RecurrenceSince from '@components/k8s/investigate/RecurrenceSince';
 import apiRecommendations from '@api1/recommendation';
-import apiTriage from '@api1/triage';
 import { hasReadAccess, hasWriteAccess, hasFeatureAccess } from '@lib/auth';
 import InvestigateResolution from '@components/k8s/investigate/InvestigateResolution';
-import CustomBorderCard from '@ui/CustomBorderCard';
+import { Card } from '@ui/Card';
 import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
@@ -49,10 +49,10 @@ import { Link } from '@ui/Link';
 // K8s card imports
 import MemoryAllocationCard from '@components/k8s/investigate/cards/MemoryAllocationCard';
 import NoisyNeighbourCard from '@components/k8s/investigate/cards/NoisyNeighbourCard';
-import LastDeploymentCard from '@components/k8s/investigate/cards/LastDeploymentCard';
+import LastDeploymentCard, { foldRepeatedChanges } from '@components/k8s/investigate/cards/LastDeploymentCard';
 import LogsCard from '@components/k8s/investigate/cards/LogsCard';
 import AskAiCard from '@components/k8s/investigate/cards/AskAiCard';
-import TracesCard from '@components/k8s/investigate/cards/TracesCard';
+import TracesCard, { isTracesCardId } from '@components/k8s/investigate/cards/TracesCard';
 import ServiceMapCard from '@components/k8s/investigate/cards/ServiceMapCard';
 import SVGImageCard from '@components/k8s/investigate/cards/SVGImageCard';
 import PrometheusCPUUsageCard from '@components/k8s/investigate/cards/PrometheusCPUUsageCard';
@@ -108,11 +108,11 @@ import TimelineCard from '@components/k8s/investigate/cards/TimelineCard';
 import ImpactCard from '@components/k8s/investigate/cards/ImpactCard';
 import UpdateEvent from '@components/events/UpdateEvent';
 import EventClassifyModal from '@components/events/EventClassifyModal';
-import { LiaEditSolid } from 'react-icons/lia';
 import { MdOutlineCategory } from 'react-icons/md';
 import DatadogMonitorSearch from '@components/k8s/investigate/cards/DatadogMonitorSearch';
 import SafeIcon from '@shared/icons/SafeIcon';
 import RemediationPanel from '@components/k8s/investigate/cards/RemediationPanel';
+import EventAlertControlsSection from '@components/k8s/investigate/EventAlertControlsSection';
 // Cloud-specific card imports
 import CloudTrailEventCard from '@components/cloudaccount/investigate/cards/CloudTrailEventCard';
 import EventBridgeEventCard from '@components/cloudaccount/investigate/cards/EventBridgeEventCard';
@@ -183,6 +183,11 @@ const K8S_TABLE_NAMES = [
   'Pod events',
   'Pods running on the node',
   'StatefulSet events',
+  // Cluster over-commitment cards. Matched as substrings, so these two cover
+  // the CPU and memory variants and the truncated "(top 15)" title.
+  'over-commitment',
+  'requests by namespace',
+  'Autoscaler status',
 ];
 
 const CLOUD_TABLE_NAMES = [
@@ -295,11 +300,19 @@ const remediationRunLabel = (run, options = []) => {
   const data = typeof run?.data === 'string' ? safeJSONParse(run.data) : run?.data;
   const cardId = data?.data?.card_id;
   if (cardId) {
+    // Named by what the run did, the same words as its row — the card's own title names the
+    // evidence ("Deployment Changes"), which says nothing about what was run.
     const card = options.find((option) => option?.id === cardId);
-    if (card?.text) return card.text;
     // The card is not on this event any more (rules change, evidence ages out); fall back to a
     // readable form of its id rather than showing the raw "MemoryAllocationCard".
-    return cardId.replace(/Card$/, '').replace(/([a-z])([A-Z])/g, '$1 $2');
+    return describeActionTitle(
+      cardId,
+      card?.text ||
+        cardId
+          .replace(/_\d+$/, '')
+          .replace(/Card$/, '')
+          .replace(/([a-z])([A-Z])/g, '$1 $2')
+    );
   }
   if (run?.type === 'CommandExecution') {
     const summary = commandSummary(run?.type_reference_id);
@@ -307,6 +320,9 @@ const remediationRunLabel = (run, options = []) => {
   }
   return REMEDIATION_TYPE_LABELS[run?.type] || run?.type || 'Run';
 };
+
+// Stable identity for a task card; matches the React key the list renders with.
+const getCardKey = (option) => option?.id || option?.text;
 
 const hasInProgressResolution = (resolutions) => Array.isArray(resolutions) && resolutions.some((r) => r?.status === 'InProgress');
 
@@ -438,6 +454,8 @@ const Investigate = () => {
   }, [selectedCluster?.cloud_provider, allCluster, router.query.accountId, router.query.source]);
 
   const [row, setRow] = useState({});
+  // Whether the Remediation tab's "Stop this alert" section rendered.
+  const [hasAlertControls, setHasAlertControls] = useState(false);
   const [queryParam, setQueryParam] = useState({
     aggregationKey: '',
     serviceKey: '',
@@ -453,8 +471,10 @@ const Investigate = () => {
   const [currentInvestigation, setCurrentInvestigation] = useState(null);
   const [isTroubleshootFormOpen, setIsTroubleshootFormOpen] = useState(false);
   const [isRenderInvestigationCard, setIsRenderInvestigationCard] = useState(false);
-  const [openCardIndex, setOpenCardIndex] = useState(-1);
-  const [collapsedObj, setCollapsedObj] = useState(Array.from({ length: matchedOptions?.length }, (_, index) => [index, false]));
+  // Keyed by card id, not list position: cards are appended and removed while the
+  // page is open, and a positional key hands one card's open state to its neighbour.
+  const [openCardKey, setOpenCardKey] = useState(null);
+  const [collapsedObj, setCollapsedObj] = useState({});
   const [generateRcaVisible, setGenerateRcaVisible] = useState(false);
   const [ticketData, setTicketData] = useState({ id: '', url: '' });
   const [hasRcaFeatureAccess, setHasRcaFeatureAccess] = useState(false);
@@ -473,7 +493,6 @@ const Investigate = () => {
   const [isTrendChartLoading, setIsTrendChartLoading] = useState(false);
   const [isUpdateEvent, setIsUpdateEvent] = useState(false);
   const [isClassifyModalOpen, setIsClassifyModalOpen] = useState(false);
-  const [recurrenceInfo, setRecurrenceInfo] = useState(null);
   const [eventResolutions, setEventResolutions] = useState([]);
   const [knowledgeBase, setKnowledgeBase] = useState([]);
   const [kbLoading, setKbLoading] = useState(false);
@@ -786,14 +805,14 @@ const Investigate = () => {
   };
 
   const handleTabChange = (_event, newValue) => {
-    setOpenCardIndex((prevOpenCardIndex) => {
-      if (prevOpenCardIndex !== -1) {
+    setOpenCardKey((prevOpenCardKey) => {
+      if (prevOpenCardKey !== null) {
         setCollapsedObj((prevCollapsedObj) => ({
           ...prevCollapsedObj,
-          [prevOpenCardIndex]: false,
+          [prevOpenCardKey]: false,
         }));
       }
-      return -1;
+      return null;
     });
     setTabValue(Number(newValue));
   };
@@ -809,6 +828,12 @@ const Investigate = () => {
       setShowDemoMessage(false);
     }
   }, [selectedCluster, isK8s]);
+
+  // tabValue 0 is set optimistically below, before the AskAiCard has necessarily arrived (or when it never
+  // does, e.g. the AI service is down). Tab 0 only exists once that card does, so until then show Evidence
+  // rather than pointing Tabs at a value it has no child for.
+  const hasAskAiTab = matchedOptions.some((option) => option?.id === 'AskAiCard');
+  const activeTab = tabValue === 0 && !hasAskAiTab ? 1 : tabValue;
 
   useEffect(() => {
     if (currentInvestigation) {
@@ -935,9 +960,12 @@ const Investigate = () => {
   }
 
   const loadedEventIdRef = useRef(null);
+  // A boolean, not the length: the header dropdown re-sets allCluster with the demo account
+  // appended, and a changed length re-ran the whole load while the first one was in flight.
+  const hasClusters = allCluster?.length > 0;
 
   useEffect(() => {
-    if (!id || !allCluster || allCluster.length === 0) return;
+    if (!id || !hasClusters) return;
 
     // Skip reload if we already loaded this event (URL rewrite just added accountId)
     if (String(loadedEventIdRef.current) === String(id) && router.query.accountId) return;
@@ -945,9 +973,6 @@ const Investigate = () => {
     let cancelled = false;
     resetState();
     loadData(id);
-    apiTriage.getRecurrenceInfo(id).then((info) => {
-      if (!cancelled && isMountedRef.current) setRecurrenceInfo(info);
-    });
     apiRecommendations.listEventResolutions(id).then((resolutions) => {
       // Only mark this id "loaded" once the fetch actually lands uncancelled —
       // setting it synchronously up front let React StrictMode's dev-mode
@@ -963,7 +988,7 @@ const Investigate = () => {
     return () => {
       cancelled = true;
     };
-  }, [id, k8sAutoInvestigate, router.query.accountId, allCluster?.length]);
+  }, [id, k8sAutoInvestigate, router.query.accountId, hasClusters]);
 
   // ── Live workflow-resolution status ──
   // The "Workflow Resolution Status" button reads from `eventResolutions`, which
@@ -1151,6 +1176,7 @@ const Investigate = () => {
     async function renderEvidenceCardAndRecommendations() {
       setIsGeneratingCards(true);
       const result = row?.evidences.filter((g) => g != null) || [];
+      const repeatedChanges = foldRepeatedChanges(result);
       const criticalCards = [];
       const highCards = [];
       const infoCards = [];
@@ -1325,8 +1351,8 @@ const Investigate = () => {
             const card = new GithubPRHistoryCard(d, row, i);
             if (await card.canRenderContent()) dynamicCards.push(card);
           }
-          if (actionType == 'diff' || actionType == 'deployment_history') {
-            const card = new LastDeploymentCard(d, row, i);
+          if ((actionType == 'diff' || actionType == 'deployment_history') && !repeatedChanges.skip.has(i)) {
+            const card = new LastDeploymentCard(d, row, i, repeatedChanges.changes.get(i));
             if (await card.canRenderContent()) dynamicCards.push(card);
           }
           if (
@@ -1485,7 +1511,10 @@ const Investigate = () => {
               if (cardExists) return old;
               return [...old, card];
             });
-            if (card.id === 'TracesCard') {
+            // Dynamic cards are id'd per evidence index ('TracesCard_3'), so the
+            // equality check this replaces never matched and CorrespondingEvents — the
+            // only reader of canTracesRender — could never render.
+            if (isTracesCardId(card.id)) {
               canTracesRender = true;
             }
             // Resume polling if RCA is still in progress (e.g., page refresh during analysis)
@@ -1526,11 +1555,13 @@ const Investigate = () => {
         let last7Days = response?.data?.similar_issue_on_same_service_in_7days?.aggregate?.count;
         let last1Days = response?.data?.similar_issue_on_same_service_in_1days?.aggregate?.count;
         const othersData = [];
+        // Not this problem repeating — every alert of this rule on this service in
+        // the window before it. Labelled in the sidebar as such.
         if (last7Days !== 0) {
-          othersData.push(`${last7Days} in Past 7 days`);
+          othersData.push(`${last7Days} in the week before`);
         }
         if (last1Days !== 0) {
-          othersData.push(`${last1Days} in Past 1 days`);
+          othersData.push(`${last1Days} in the day before`);
         }
         setOthersData(othersData);
         const result = row?.evidences;
@@ -1579,18 +1610,18 @@ const Investigate = () => {
     }
   }, [queryParam?.id, queryParam?.aggregationKey, queryParam?.serviceKey, queryParam?.start_at, source]);
 
-  const handleCardClick = useCallback((index) => {
-    setOpenCardIndex((prevOpenCardIndex) => {
-      const isCurrentlyOpen = prevOpenCardIndex === index;
+  const handleCardClick = useCallback((cardKey) => {
+    setOpenCardKey((prevOpenCardKey) => {
+      const isCurrentlyOpen = prevOpenCardKey === cardKey;
       setCollapsedObj((prevCollapsedObj) => {
         const newCollapsedObj = { ...prevCollapsedObj };
-        if (prevOpenCardIndex !== -1 && prevOpenCardIndex !== index) {
-          newCollapsedObj[prevOpenCardIndex] = false;
+        if (prevOpenCardKey !== null && prevOpenCardKey !== cardKey) {
+          newCollapsedObj[prevOpenCardKey] = false;
         }
-        newCollapsedObj[index] = !isCurrentlyOpen;
+        newCollapsedObj[cardKey] = !isCurrentlyOpen;
         return newCollapsedObj;
       });
-      return isCurrentlyOpen ? -1 : index;
+      return isCurrentlyOpen ? null : cardKey;
     });
   }, []);
 
@@ -1611,7 +1642,7 @@ const Investigate = () => {
 
     if (filteredIndex !== -1) {
       setTabValue(1);
-      handleCardClick(filteredIndex);
+      handleCardClick(getCardKey(tasksCards[filteredIndex]));
       trackTimeout(() => {
         const cardElement = document.querySelector(`[data-card-index="${filteredIndex}"]`);
         if (cardElement) {
@@ -1687,8 +1718,8 @@ const Investigate = () => {
     setLoading(false);
     setMatchedOptions([]);
     setCurrentInvestigation(null);
-    setOpenCardIndex(-1);
-    setCollapsedObj([]);
+    setOpenCardKey(null);
+    setCollapsedObj({});
     setGenerateRcaVisible(false);
     setEventResolutions([]);
   };
@@ -1830,7 +1861,8 @@ const Investigate = () => {
 
   // How many ways there are to act on this event right now. Drives the tab badge and the
   // signpost at the end of the analysis, so both agree without recomputing the filter.
-  const remediationActionCount = matchedOptions.filter(shouldShowResolveButton).length;
+  const remediationRows = matchedOptions.filter(shouldShowResolveButton);
+  const remediationActionCount = remediationRows.length;
 
   // Undo dispatches through the same apply endpoint as everything else, so it is recorded, audited
   // and polled exactly like the action it reverses — an undo is an action, not a special case.
@@ -2156,8 +2188,6 @@ const Investigate = () => {
             row={row}
             podDetails={podDetails}
             othersData={othersData}
-            matchedOptions={matchedOptions}
-            recurrenceInfo={recurrenceInfo}
             alertLabels={alertLabels}
             alertRules={alertRules}
             queryParam={queryParam}
@@ -2257,7 +2287,7 @@ const Investigate = () => {
                             '.MuiTab-root.Mui-selected': { color: ds.gray[700], bgcolor: ds.blue[100] },
                           }}
                         >
-                          <Tabs value={tabValue} onChange={handleTabChange} aria-label='basic tabs example'>
+                          <Tabs value={activeTab} onChange={handleTabChange} aria-label='basic tabs example'>
                             {!isGeneratingCards && matchedOptions.some((option) => option?.id === 'AskAiCard') && (
                               <Tab
                                 label={
@@ -2480,7 +2510,7 @@ const Investigate = () => {
                                 ? [
                                     {
                                       label: 'Update Event',
-                                      reactIcon: <LiaEditSolid color={ds.gray[700]} size={18} />,
+                                      icon: EditIcon,
                                       action: 'update-event',
                                     },
                                   ]
@@ -2527,7 +2557,7 @@ const Investigate = () => {
                           },
                         }}
                       >
-                        <TabPanel value={tabValue} index={0} className='ai-custom-panel'>
+                        <TabPanel value={activeTab} index={0} className='ai-custom-panel'>
                           {raisedPrResolution &&
                             (() => {
                               const url = raisedPrResolution.type_reference_id;
@@ -2646,7 +2676,7 @@ const Investigate = () => {
                           )}
                           {aiAnalysisFeedback()}
                         </TabPanel>
-                        <TabPanel value={tabValue} index={3} className='custom-panel'>
+                        <TabPanel value={activeTab} index={3} className='custom-panel'>
                           <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[6] }}>
                             {/* What has already been done, before what can be done next. The only record of
                                 it was History, at the very bottom of the tab under the plan and the
@@ -2706,7 +2736,7 @@ const Investigate = () => {
                                 );
                               })()}
 
-                            {remediationActionCount === 0 && previousRuns.length === 0 && (
+                            {remediationActionCount === 0 && previousRuns.length === 0 && !hasAlertControls && (
                               <Text value='No fixes are available for this event yet.' sx={{ fontSize: ds.text.bodyLg, color: ds.gray[600] }} />
                             )}
 
@@ -2723,7 +2753,7 @@ const Investigate = () => {
                                     overflow: 'hidden',
                                   }}
                                 >
-                                  {matchedOptions.filter(shouldShowResolveButton).map((resolvableOption, actionIndex) => {
+                                  {remediationRows.map((resolvableOption, actionIndex) => {
                                     const resolution = isK8s ? getResolutionForCard(resolvableOption.id) : undefined;
                                     const outcome = resolution ? describeResolution(resolution) : null;
                                     const settled = resolution && resolution.status !== 'Failed';
@@ -2749,25 +2779,38 @@ const Investigate = () => {
                                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: 0 }}>
                                           <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], flexWrap: 'wrap' }}>
                                             <Text
-                                              value={describeActionTitle(resolvableOption.id, resolvableOption.text, resolvableOption.actionSubject)}
+                                              value={
+                                                resolvableOption.choosesTarget
+                                                  ? describeChoiceTitle(resolvableOption.id, resolvableOption.text)
+                                                  : describeActionTitle(resolvableOption.id, resolvableOption.text, resolvableOption.actionSubject)
+                                              }
                                               sx={{ fontSize: ds.text.bodyLg, fontWeight: ds.weight.medium }}
                                             />
                                             {/* Whether this removes the cause or only restores service —
                                                 the distinction the remediation panel already draws for
                                                 Nubi's actions, applied to these too. */}
                                             {(() => {
-                                              const kind = describeActionKind(resolvableOption.id);
+                                              // Once it has run, what happened (Done, recurred since) is the answer; a
+                                              // "Fix" chip beside "this did not stop it" contradicts it.
+                                              const kind = settled ? null : describeActionKind(resolvableOption.id);
                                               return kind ? <Label tone={kind.tone} text={kind.text} size='sm' tooltip={kind.help} /> : null;
                                             })()}
                                           </Box>
-                                          {/* What it will do, before it is done — the confirmation dialog
-                                              shows a diff but never mentions the rolling restart. */}
-                                          {!settled && describeActionEffect(resolvableOption.id) && (
-                                            <Text
-                                              value={describeActionEffect(resolvableOption.id)}
-                                              sx={{ fontSize: ds.text.caption, color: ds.gray[600] }}
-                                            />
-                                          )}
+                                          {/* What it acts on and what it will do, before it is done — the
+                                              confirmation dialog shows a diff but never mentions the
+                                              rolling restart. The subject line (when the change landed,
+                                              what it touched) stays once the action has run. */}
+                                          {(() => {
+                                            // With several changes to pick from, the dialog states the effect beside the pick.
+                                            const effect =
+                                              settled || resolvableOption.choosesTarget ? null : describeActionEffect(resolvableOption.id);
+                                            const detail = resolvableOption.actionDetail;
+                                            // The effect is a sentence on its own; after the detail it continues the line.
+                                            const line = [detail, effect && detail ? effect.charAt(0).toLowerCase() + effect.slice(1) : effect]
+                                              .filter(Boolean)
+                                              .join(' · ');
+                                            return line ? <Text value={line} sx={{ fontSize: ds.text.caption, color: ds.gray[600] }} /> : null;
+                                          })()}
                                           {outcome?.isSlow && (
                                             <Text
                                               value='Taking longer than expected — it may still complete.'
@@ -2881,6 +2924,28 @@ const Investigate = () => {
                                 </Box>
                               </Box>
                             )}
+
+                            {/* Acting on the alert itself: mute it in the product, or change the rule
+                                where it is defined. Below the fixes, because for a real fault the fix
+                                comes first; not a remediation row, because a mute stops nothing. */}
+                            {row?.id &&
+                              (() => {
+                                const alertAccountId = row?.cloud_account_id || router.query.accountId;
+                                const detailsPrefix = isCloud ? '/cloud-account/details' : '/kubernetes/details';
+                                return (
+                                  <EventAlertControlsSection
+                                    accountId={alertAccountId}
+                                    eventId={row.id}
+                                    canWrite={hasWriteAccess(alertAccountId)}
+                                    alertManagerHref={`${detailsPrefix}/${alertAccountId}?name=${encodeURIComponent(
+                                      row?.aggregation_key || ''
+                                    )}#monitoring/alert-manager`}
+                                    triageRulesHref={`${detailsPrefix}/${alertAccountId}#events/triage-rules`}
+                                    headingSx={remediationSectionSx}
+                                    onVisibilityChange={setHasAlertControls}
+                                  />
+                                );
+                              })()}
 
                             {/* Automations are remediation too: running one changes the system and
                                 writes a WorkflowExecution resolution, so it appears in History
@@ -3019,7 +3084,7 @@ const Investigate = () => {
                                           borderTop: runIndex === 0 ? 'none' : `1px solid ${ds.gray[200]}`,
                                         }}
                                       >
-                                        <Box sx={{ flexShrink: 0, pt: '2px' }}>
+                                        <Box sx={{ flexShrink: 0, pt: ds.space[0] }}>
                                           <Label tone={outcome.tone} text={outcome.label} size='sm' />
                                         </Box>
                                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: 0, flex: 1 }}>
@@ -3054,7 +3119,7 @@ const Investigate = () => {
                               </Box>
                             )}
 
-                            {matchedOptions
+                            {remediationRows
                               .filter((option) => option.id === openResolveComponentId)
                               .map((option) => {
                                 const ResolveComponent = option?.getResolveComponent?.();
@@ -3064,22 +3129,21 @@ const Investigate = () => {
                               })}
                           </Box>
                         </TabPanel>
-                        <TabPanel value={tabValue} index={1} className='custom-panel'>
+                        <TabPanel value={activeTab} index={1} className='custom-panel'>
                           <Box sx={{ display: 'flex', flexDirection: 'column' }}>
                             {matchedOptions
                               .filter((option) => option?.id !== 'AskAiCard' && option?.id !== 'RCACard')
                               .map((option, index) => (
-                                <div key={`${option?.id || option?.text}-${option?.refreshRenderId || 0}`} data-card-index={index}>
+                                <div key={`${getCardKey(option)}-${option?.refreshRenderId || 0}`} data-card-index={index}>
                                   <CollapsableCard
-                                    idx={index}
+                                    idx={getCardKey(option)}
                                     icon={option?.icon}
                                     text={option?.text}
                                     highlightsData={option?.getHighLightsData?.() ?? []}
                                     contentComponents={option?.getContentComponents?.() ?? []}
                                     onCardClick={handleCardClick}
                                     collapsedObj={collapsedObj}
-                                    isCollapsed={collapsedObj[index]}
-                                    expandedCardIndex={openCardIndex}
+                                    expandedCardIndex={openCardKey}
                                     isBeta={option?.isBeta}
                                     newUI
                                     maxWidth='100%'
@@ -3090,13 +3154,13 @@ const Investigate = () => {
                                 </div>
                               ))}
                             {currentInvestigation?.text && (
-                              <CustomBorderCard borderColor={ds.gray[200]} sx={{ textAlign: 'center', mt: 0 }} showLeftBorder={false}>
+                              <Card elevation='flat' sx={{ textAlign: 'center' }}>
                                 <ConversationLoader />
-                              </CustomBorderCard>
+                              </Card>
                             )}
                           </Box>
                         </TabPanel>
-                        <TabPanel value={tabValue} index={2} className='custom-panel'>
+                        <TabPanel value={activeTab} index={2} className='custom-panel'>
                           {matchedOptions
                             .filter((option) => option?.id === 'RCACard')
                             .map((option) => (

@@ -85,17 +85,20 @@ ingress:
 # -- Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/).
 # See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#resources) for details.
 # @default -- No requests or limits.
+# Small-tier defaults for the API/collector pod. See docs/sizing-and-tiers.md.
+# Memory is flat: 149-369Mi average, 218-593Mi peak across every measured
+# deployment, and it plateaus rather than climbing. The old 1500Mi request
+# reserved 4-10x what the pod uses.
+# CPU is the real cost here — 136-337m p95, 711m peak — and the chart shipped no
+# CPU request at all, so the scheduler treated it as free and it was throttled on
+# every deployment measured (70% of periods on one).
 resources:
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
   limits:
-    #cpu: 100m
-    memory: 1500Mi
+    cpu: 1000m
+    memory: 1.5Gi
   requests:
-    #cpu: 100m
-    memory: 1500Mi
+    cpu: 200m
+    memory: 500Mi
 
 # -- Autoscaling by resources
 autoscaling:
@@ -132,31 +135,29 @@ secretName: 'nudgebee'
 
 annotations: {}
 
-# -- Metrics configuration
-metrics:
-  # -- Enable Prometheus metrics collection
-  enabled: false
+# -- OpenTelemetry configuration
+#
+# Metrics are pushed over OTLP instead of being scraped from a /metrics endpoint.
+# The previous ServiceMonitor required the Prometheus Operator to be installed in
+# the target cluster, and even then the samples stayed in that cluster's
+# Prometheus -- nothing forwarded them to Nudgebee.
+otel:
+  # -- Metric export destination. "otlp" pushes to `endpoint`, "console" logs to
+  # stdout (local debugging), "" (default) disables metric export entirely.
+  exporter: ""
 
-  # -- ServiceMonitor configuration (requires Prometheus Operator)
-  serviceMonitor:
-    # -- Enable ServiceMonitor resource creation
-    enabled: true
+  # -- OTLP collector endpoint, e.g. http://otel-collector:4317. Required when
+  # exporter is "otlp".
+  endpoint: "" 
 
-    # -- Metrics scrape interval
-    interval: 30s
+  # -- OTLP wire protocol: grpc or http/protobuf
+  protocol: grpc
 
-    # -- Metrics scrape timeout
-    scrapeTimeout: 10s
+  # -- Metric export interval in milliseconds
+  exportIntervalMillis: 60000
 
-    # -- Additional labels for ServiceMonitor
-    labels: {}
-
-    # -- Additional annotations for ServiceMonitor
-    annotations: {}
-
-    # -- RelabelConfigs to apply to samples before scraping
-    # https://github.com/prometheus-operator/prometheus-operator/blob/main/Documentation/api.md#relabelconfig
-    relabelings: []
+  # -- Value reported as service.name on exported telemetry
+  serviceName: k8s-collector
 
 # -- Dual mode configuration for separate server and worker deployments
 # Only applied when dualMode.enabled is true. When false, runs in traditional combined mode.
@@ -179,11 +180,22 @@ dualMode:
       targetMemoryUtilizationPercentage: 70
     
     # -- Worker resource requirements (defaults to main resources if not specified)
-    resources: {}
-    #  limits:
-    #    memory: 1Gi
-    #  requests:
-    #    memory: 512Mi
+    # The worker needs its own block: it does NOT behave like the API pod.
+    # KNOWN DEFECT — the worker's memory grows monotonically for as long as the
+    # pod lives. Measured on the largest deployment: 439Mi -> 1051Mi over 7 days,
+    # zero reclaim, identical on both replicas (~87Mi/day). It is a leak, not
+    # load: the curve does not flatten and does not track estate size. Until it
+    # is fixed the limit below is a containment budget, not a sizing figure — it
+    # holds ~12 days of growth from a cold start, so the pod restarts on its own
+    # roughly fortnightly instead of OOM-looping. Alert on the restart, do not
+    # treat it as normal. Tracked in docs/sizing-and-tiers.md ("Known memory defects").
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1.5Gi
+      requests:
+        cpu: 200m
+        memory: 500Mi
     
     # -- Worker specific tolerations (defaults to main tolerations if not specified)
     tolerations: []

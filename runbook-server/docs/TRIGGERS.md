@@ -81,3 +81,38 @@ Allows the workflow to be triggered manually via the API or CLI. This trigger ty
 triggers:
   - type: manual
 ```
+
+### 4. Event Trigger (`event`)
+
+Runs the workflow when a Nudgebee event (alert, anomaly, Kubernetes change, …) matches.
+
+#### Parameters (`params`)
+
+*   **`event_type`** (string or list of strings, optional): Event types to listen for. Empty means every type.
+*   **`filter`** (string, optional): A Jinja expression evaluated against `event`; the workflow runs when it renders `true`. One of `event_type` or `filter` is required.
+*   **`on`** (string, optional): Lifecycle phase to fire on. Default `event.created`.
+*   **`accounts`** (list of account IDs, optional): Accounts whose events fire this workflow. Empty means the workflow's own account only. When set, only the listed accounts fire it — list the own account too if it should keep firing. Every listed account must be an account ID in the workflow's tenant, readable by whoever saves it. Triggers are read from the saved draft, so the list takes effect on save, not on publish.
+
+Steps still default to the **workflow's** account. In a workflow that listens to several accounts, set a step's `account_id` to `{{ Inputs.event.cloud_account_id }}` so it acts on the account the event came from.
+
+#### Example
+
+```yaml
+triggers:
+  - type: event
+    params:
+      event_type: ["KubePodCrashLooping"]
+      accounts: ["<cluster-a-account-id>", "<cluster-b-account-id>"]
+```
+
+### 5. Optimization Trigger (`optimization`)
+
+Runs the workflow when a new open recommendation matches.
+
+#### Parameters (`params`)
+
+*   **`categories`**, **`rule_names`** (lists of strings, optional): Recommendation categories / rule names to match.
+*   **`clusters`** (list of account IDs, optional): Accounts whose recommendations fire this workflow. Empty means the workflow's own account only. Same access rules as event `accounts`.
+*   **`filter`** (string, optional): Extra Jinja expression, ANDed with the above.
+
+At least one parameter is required.

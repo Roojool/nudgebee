@@ -31,7 +31,7 @@ func TestAnnotateBreakdownWithImpactNoOp(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			bd := map[string]any{"base_score": 10}
-			annotateBreakdownWithImpact(tc.kg, "tenant", "acct", tc.namespace, tc.workload, tc.resourceID, ChangeClassReductive, bd, cache)
+			annotateBreakdownWithImpact(tc.kg, "tenant", "acct", tc.namespace, tc.workload, tc.resourceID, "", ChangeClassReductive, bd, cache)
 			if _, ok := bd["safety_band"]; ok {
 				t.Error("must not stamp safety_band on a no-op path")
 			}
@@ -64,7 +64,7 @@ func TestAnnotateBreakdownDerivesBandPerChangeClass(t *testing.T) {
 	}
 
 	additive := map[string]any{}
-	annotateBreakdownWithImpact(&core.Service{}, "tenant", "acct", "shop", "checkout", "", ChangeClassAdditive, additive, cache)
+	annotateBreakdownWithImpact(&core.Service{}, "tenant", "acct", "shop", "checkout", "", "", ChangeClassAdditive, additive, cache)
 	if additive["safety_band"] != string(SafetyBandReview) {
 		t.Errorf("additive band = %v, want review (prod dependents cap at review for additive changes)", additive["safety_band"])
 	}
@@ -73,13 +73,13 @@ func TestAnnotateBreakdownDerivesBandPerChangeClass(t *testing.T) {
 	}
 
 	destructive := map[string]any{}
-	annotateBreakdownWithImpact(&core.Service{}, "tenant", "acct", "shop", "checkout", "", ChangeClassDestructive, destructive, cache)
+	annotateBreakdownWithImpact(&core.Service{}, "tenant", "acct", "shop", "checkout", "", "", ChangeClassDestructive, destructive, cache)
 	if destructive["safety_band"] != string(SafetyBandRisky) {
 		t.Errorf("destructive band = %v, want risky", destructive["safety_band"])
 	}
 
 	unknown := map[string]any{}
-	annotateBreakdownWithImpact(&core.Service{}, "tenant", "acct", "shop", "checkout", "", ChangeClassUnknown, unknown, cache)
+	annotateBreakdownWithImpact(&core.Service{}, "tenant", "acct", "shop", "checkout", "", "", ChangeClassUnknown, unknown, cache)
 	if unknown["safety_band"] != string(SafetyBandRisky) {
 		t.Errorf("unknown-class band = %v, want risky (pre-change-aware policy)", unknown["safety_band"])
 	}

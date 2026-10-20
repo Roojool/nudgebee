@@ -1,13 +1,13 @@
 package core
 
 import (
+	"database/sql"
+	"net/http"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"nudgebee/llm/common"
 	"nudgebee/llm/security"
 )
 
@@ -238,6 +238,32 @@ func TestSetKBDocumentCategoryRejectsForeignKnowledgeBase(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// The list hands the UI the same key retrieval computes, with the mark already
+// on it, so the control shows what agents will actually be told.
+func TestAnIntegrationListingCarriesKeysAndMarks(t *testing.T) {
+	withRAGServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"items":[
+			{"id":"p1","title":"Runbook","url":"https://wiki.test/runbook","source_id":"101"},
+			{"id":"p2","title":"Loose page","url":null,"source_id":null}
+		],"next_offset":null}}`))
+	})
+	mock := mockKBDatabase(t)
+	mock.ExpectQuery(`SELECT name, kb_type, integration_id FROM llm_knowledgebases`).WithArgs("kb-1", "account-a").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "kb_type", "integration_id"}).AddRow("Confluence", KBTypeIntegration, "integration-a"))
+	mock.ExpectQuery(`SELECT name, `).WithArgs("kb-1", "account-a").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`SELECT document_key, note_category FROM llm_kb_document_categories`).
+		WithArgs("account-a", sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"document_key", "note_category"}).AddRow(confluenceCollection+"|101", "sop"))
+
+	page, err := ListKBDocuments(security.NewRequestContextForSuperAdmin(), "account-a", "kb-1", 50, "")
+	require.NoError(t, err)
+	require.Len(t, page.Items, 2)
+	assert.Equal(t, confluenceCollection+"|101", page.Items[0].DocumentKey)
+	assert.Equal(t, KBNoteCategorySOP, page.Items[0].NoteCategory)
+	assert.Equal(t, "", page.Items[1].DocumentKey, "no id and no URL: not markable")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // The list hands the UI the same key retrieval computes from a search hit, so
 // a mark set from the list is the mark retrieval finds.
 func TestListingKeyMatchesRetrievalKey(t *testing.T) {
@@ -249,18 +275,4 @@ func TestListingKeyMatchesRetrievalKey(t *testing.T) {
 	assert.Equal(t, confluenceCollection+"|101", listed)
 	assert.Equal(t, listed, hit)
 	assert.Equal(t, "", ragDocumentKey(confluenceCollection, ragKBDocument{Id: "p2"}), "no id and no URL: not markable")
-}
-
-// mockKBDatabase points the knowledge queries at sqlmock and returns the mock.
-func mockKBDatabase(t *testing.T) sqlmock.Sqlmock {
-	t.Helper()
-	db, mock, err := sqlmock.New()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	old := knowledgeDatabase
-	knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {
-		return &common.DatabaseManager{Db: sqlx.NewDb(db, "postgresql")}, nil
-	}
-	t.Cleanup(func() { knowledgeDatabase = old })
-	return mock
 }

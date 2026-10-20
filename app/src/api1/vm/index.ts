@@ -17,8 +17,8 @@
  */
 import { gqlStringify, queryGraphQL } from '@lib/HttpService';
 import apiHome from '@api1/home';
-import apiIntegrations from '@api1/integrations';
 import k8sApi from '@api1/kubernetes';
+import ticketsApi from '@api1/tickets';
 
 /** rule_name every VM vulnerability finding is written under. */
 export const VM_VULNERABILITY_RULE = 'vm_package_vulnerability';
@@ -26,7 +26,11 @@ export const VM_VULNERABILITY_RULE = 'vm_package_vulnerability';
 /** Statuses that count as an unresolved finding. */
 export const OPEN_STATUSES = ['Open', 'InProgress'];
 
-export const SEVERITY_ORDER = ['Critical', 'High', 'Medium', 'Low', 'Negligible', 'Unknown'];
+// The scan pipeline's mapSeverity (services/vmpackage/persist.go) only ever
+// writes these five — negligible/unknown/blank all collapse to Info — so a
+// filter offering Negligible or Unknown matched zero rows while Info, a real
+// value, was unfilterable.
+export const SEVERITY_ORDER = ['Critical', 'High', 'Medium', 'Low', 'Info'];
 
 export interface VmResource {
   id: string;
@@ -97,6 +101,7 @@ export interface VmVulnerability {
   updated_at: string;
   created_at: string;
   recommendation: VmVulnerabilityPayload;
+  ticket?: { ticket_id: string; url?: string };
 }
 
 /** Dimension the vulnerability list can be rolled up by. */
@@ -129,6 +134,34 @@ export interface VmScanTarget {
   status: string;
   host: string;
   username: string;
+}
+
+// Credential-free listing of the integrations attached to one account, readable
+// by account-scoped roles. integrations_list is tenant-admin-only (its rows carry
+// integration_config_values) and apiIntegrations.listIntegrations swallows the
+// resulting 403 into an empty list, which is how account users saw "0 / 0"
+// proxy agents and an empty scan-target picker (#39858).
+const LIST_ACCOUNT_INTEGRATIONS = `
+query ListAccountIntegrations {
+  integrations: cloud_list_account_integrations(where: __WHERE__, limit: 100, offset: 0, order_by: [{column: "name", order: asc}]) {
+    rows {
+      id
+      name
+      type
+      status
+      created_at
+    }
+  }
+}`;
+/** One vm_scan_status row — see #38466. status is 'started' | 'completed' | 'failed'. */
+export interface VmScanStatus {
+  cloudResourceId: string;
+  status: string;
+  error: string;
+  packageCount: number;
+  findingCount: number;
+  scannedAt: string;
+  updatedAt: string;
 }
 
 const LIST_VMS = `
@@ -294,6 +327,15 @@ mutation ScanVmAccount($accountId: String!) {
   }
 }`;
 
+const LIST_VM_SCAN_STATUSES = `
+query ListVmScanStatuses($accountId: String!) {
+  security_list_vm_scan_statuses(object: {
+    account_id: $accountId
+  }) {
+    data
+  }
+}`;
+
 const safeParse = (value: any) => {
   if (typeof value !== 'string') return value;
   try {
@@ -322,11 +364,43 @@ const GROUPING_DIMENSIONS: Record<VmVulnerabilityGrouping, { groupBy: string[]; 
   vulnerability: { groupBy: ['vuln_id'], key: 'vuln_id', label: 'vuln_id', canListVms: true },
   package: { groupBy: ['package_name'], key: 'package_name', label: 'package_name', canListVms: true },
   // A VM group is one machine — listing its VMs would restate the label.
-  vm: { groupBy: ['resource_id', 'resource_name'], key: 'resource_id', label: 'resource_name', canListVms: false },
+  //
+  // Grouped by resource_id ALONE (not resource_name too): resource_name is
+  // one of the columns that forces recommendation_groupings_v2 onto the
+  // query engine's joined CTE + window-function plan, which windows every
+  // recommendation row on the account (all rules, all statuses) before
+  // filtering by rule_name/status — measured at 7-8s cold on a tenant with
+  // ~24k findings (#38494). Names are resolved separately afterwards via a
+  // cheap indexed point lookup against cloud_resourses (resolveVmNames), not
+  // by widening the GROUP BY.
+  vm: { groupBy: ['resource_id'], key: 'resource_id', label: 'resource_id', canListVms: false },
+};
+
+/**
+ * resource_id -> name for a small set of ids, via cloud_resources_list_v2 —
+ * a plain indexed lookup on a different table, unrelated to the
+ * recommendation query's CTE cost. Used to label "by VM" groups without
+ * putting resource_name back in recommendation_groupings_v2's GROUP BY.
+ */
+const resolveVmNames = async (accountId: string | string[], ids: string[]): Promise<Record<string, string>> => {
+  if (!ids.length) return {};
+  const where = { account: Array.isArray(accountId) ? { _in: accountId } : { _eq: accountId }, id: { _in: ids } };
+  const response = await queryGraphQL(LIST_VMS.replaceAll('__WHERE__', gqlStringify(where)), 'ListVms', { limit: ids.length, offset: 0 });
+  const rows = response?.data?.data?.vms?.rows || [];
+  const nameById: Record<string, string> = {};
+  for (const row of rows) {
+    if (row?.id) nameById[row.id] = row.name || row.resourse_id || row.id;
+  }
+  return nameById;
 };
 
 const vmVulnerabilityWhere = (accountId: string | string[], extra: Record<string, any> = {}, status: string[] = OPEN_STATUSES) => ({
   account_id: Array.isArray(accountId) ? { _in: accountId } : { _eq: accountId },
+  // VM findings are always Security (see vmpackage/persist.go's recommendationCategory).
+  // Pushed into the where-clause explicitly so the partial index on
+  // (tenant_id, cloud_account_id, rule_name) WHERE category='Security' AND
+  // status IN ('Open','InProgress') applies — see #38494.
+  category: { _eq: 'Security' },
   rule_name: { _eq: VM_VULNERABILITY_RULE },
   status: { _in: status },
   ...extra,
@@ -359,6 +433,24 @@ function cachedCall<T>(key: string, fetcher: () => Promise<T>, isFailure: (resul
   };
   pending.then((result) => isFailure(result) && drop()).catch(drop);
   return pending;
+}
+
+/** Rows of LIST_ACCOUNT_INTEGRATIONS for one account and integration type; throws on a GraphQL error instead of returning an empty list. */
+async function listAccountIntegrations(accountId: string, type: string): Promise<any[]> {
+  const where = { account_id: { _eq: accountId }, type: { _eq: type } };
+  const response: any = await queryGraphQL(LIST_ACCOUNT_INTEGRATIONS.replaceAll('__WHERE__', gqlStringify(where)), 'ListAccountIntegrations', {});
+  if (response?.data?.errors?.length) {
+    throw new Error(response.data.errors[0]?.message || `Failed to list ${type} integrations`);
+  }
+  // queryGraphQL does not throw on a transport failure — it hands back the bare
+  // axios response / XHR (or undefined on a 401 redirect). A missing payload is a
+  // failed call, not "no integrations": that silent-empty reading is the bug
+  // this function replaces.
+  const result = response?.data?.data?.integrations;
+  if (!result) {
+    throw new Error(`Failed to list ${type} integrations`);
+  }
+  return result.rows || [];
 }
 
 function queryGraphQLCached(query: string, operationName: string, variables: Record<string, any>): Promise<any> {
@@ -487,8 +579,21 @@ const apiVm = {
       offset,
     });
     const rows = response?.data?.data?.findings?.rows || [];
+    const findings = rows.map((row: any) => ({ ...row, recommendation: safeParse(row.recommendation) || {} })) as VmVulnerability[];
+    // Tickets store the finding id as reference_id; one batched lookup maps them back.
+    const findingIds = findings.map((finding) => finding.id);
+    if (findingIds.length > 0) {
+      const tickets: any = await ticketsApi.listTicketsSummary({ reference_id: findingIds });
+      const ticketByFinding = new Map<string, { ticket_id: string; url?: string }>();
+      (tickets?.data?.tickets || []).forEach((ticket: any) => {
+        if (ticket.ticket_id) ticketByFinding.set(ticket.reference_id, { ticket_id: ticket.ticket_id, url: ticket.url || undefined });
+      });
+      findings.forEach((finding) => {
+        finding.ticket = ticketByFinding.get(finding.id);
+      });
+    }
     return {
-      rows: rows.map((row: any) => ({ ...row, recommendation: safeParse(row.recommendation) || {} })) as VmVulnerability[],
+      rows: findings,
       total: response?.data?.data?.findings_aggregate?.rows?.[0]?.count || 0,
     };
   },
@@ -554,10 +659,14 @@ const apiVm = {
       .replaceAll('__DISTINCT_ARGS__', JSON.stringify([dimension.key]));
     const response = await queryGraphQLCached(query, 'VmVulnerabilityGroups', { limit, offset });
     const rows = response?.data?.data?.groups?.rows || [];
+    // The 'vm' dimension groups by resource_id alone (see GROUPING_DIMENSIONS'
+    // comment), so its label needs a separate name lookup — a handful of ids
+    // (at most `limit`), not the full account.
+    const vmNameById = grouping === 'vm' ? await resolveVmNames(accountId, rows.map((row: any) => row.resource_id).filter(Boolean)) : {};
     return {
       rows: rows.map((row: any) => ({
         key: row[dimension.key] || '',
-        label: row[dimension.label] || row[dimension.key] || '',
+        label: grouping === 'vm' ? vmNameById[row.resource_id] || row.resource_id || '' : row[dimension.label] || row[dimension.key] || '',
         count: row.count || 0,
         max_severity_weight: row.max_severity_weight || 0,
         resource_names: String(row.resource_names || '')
@@ -615,8 +724,8 @@ const apiVm = {
 
   /** Uncached; use listAgents. */
   async fetchAgents(accountId: string): Promise<VmAgent[]> {
-    const [listRes, healthRes]: any[] = await Promise.all([
-      apiIntegrations.listIntegrations({ type: 'vm_agent', cloudAccountId: accountId, limit: 100 }),
+    const [rows, healthRes]: any[] = await Promise.all([
+      listAccountIntegrations(accountId, 'vm_agent'),
       // Health is decoration on top of the agent list — if it fails, still show
       // the agents (as Disconnected) rather than rejecting the whole tab.
       k8sApi.getAgentHealth({ accountId, type: 'proxy' }).catch((error: unknown) => {
@@ -629,7 +738,7 @@ const apiVm = {
     // relay's own CONNECTED/DISCONNECTED state, not the integration's
     // enabled/disabled state (which is `row.status` below).
     const connected = health?.status === 'CONNECTED';
-    return (listRes?.data?.data?.integrations_list?.rows || []).map((row: any) => ({
+    return rows.map((row: any) => ({
       id: row.id,
       name: row.name,
       status: row.status,
@@ -647,8 +756,8 @@ const apiVm = {
    */
   /** Uncached; use listDiscoveryTargets. */
   async fetchDiscoveryTargets(accountId: string): Promise<VmScanTarget[]> {
-    const response: any = await apiIntegrations.listIntegrations({ type: 'discovery', cloudAccountId: accountId, limit: 100 });
-    return (response?.data?.data?.integrations_list?.rows || []).map((row: any) => ({
+    const rows = await listAccountIntegrations(accountId, 'discovery');
+    return rows.map((row: any) => ({
       id: row.id,
       name: row.name,
       status: row.status,
@@ -687,6 +796,29 @@ const apiVm = {
       throw new Error(errors[0]?.message || 'Failed to start account scan');
     }
     return response?.data?.data?.security_scan_vm_account?.data || [];
+  },
+
+  /**
+   * Each VM's most recent scan outcome for the account, so a row can show
+   * "Scanning…" / "Scan failed" instead of just an ageing Last Scan
+   * timestamp with no explanation (see #38466).
+   */
+  async getScanStatuses(accountId: string): Promise<VmScanStatus[]> {
+    const response = await queryGraphQL(LIST_VM_SCAN_STATUSES, 'ListVmScanStatuses', { accountId });
+    const errors = response?.data?.errors;
+    if (errors?.length) {
+      throw new Error(errors[0]?.message || 'Failed to load VM scan statuses');
+    }
+    const rows = response?.data?.data?.security_list_vm_scan_statuses?.data || [];
+    return rows.map((row: any) => ({
+      cloudResourceId: row.cloud_resource_id,
+      status: row.status,
+      error: row.error,
+      packageCount: row.package_count,
+      findingCount: row.finding_count,
+      scannedAt: row.scanned_at,
+      updatedAt: row.updated_at,
+    }));
   },
 };
 

@@ -379,6 +379,11 @@ func TestBuildDynatraceWorkloadQueries_HTTPLatencyPercentiles(t *testing.T) {
 	q99, ok99 := queries["http_latency_p99"]
 	assert.True(t, ok99, "http_latency_p99 must be present")
 	assert.Contains(t, q99, "99")
+
+	// The evidence cards ask for the workload-level key; Dynatrace's p99 is already
+	// one series per workload, so it answers with the same query.
+	aliased := buildDynatraceWorkloadQueries(meta, []string{"workload_http_latency_p99"})
+	assert.Equal(t, q99, aliased["workload_http_latency_p99"])
 }
 
 func TestBuildDynatraceWorkloadQueries_HTTPMetricsNameEscaped(t *testing.T) {

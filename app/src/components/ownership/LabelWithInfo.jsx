@@ -9,7 +9,7 @@ import Tooltip from '@ui/Tooltip';
 // (and required asterisk) while gaining inline help.
 export default function LabelWithInfo({ text, info }) {
   return (
-    <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+    <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
       {text}
       <Tooltip title={info} arrow>
         <InfoOutlinedIcon sx={{ fontSize: 14, color: 'var(--ds-gray-400)', cursor: 'help' }} />

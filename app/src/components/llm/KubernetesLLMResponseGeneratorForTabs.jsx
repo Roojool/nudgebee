@@ -25,6 +25,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ds } from '@utils/colors';
 import Text from '@shared/format/Text';
 import { getUserSession } from '@lib/auth';
+import { useFollowLatest } from '@hooks/useFollowLatest';
 import { IoIosLogIn, IoIosStats } from 'react-icons/io';
 import TextSelectionHoverBox from './common/TextSelectionHoverBox';
 import LLMConversationWithTabs from './LLMConversationWithTabs';
@@ -43,6 +44,8 @@ const KubernetesLLMResponseGenerator = ({ accountId, query = '', popup = false, 
   const previousAccountIdRef = useRef(accountId);
   const textareaRef = useRef(null);
   const bottomRef = useRef(null);
+  const scrollContainerRef = useRef(null);
+  const followingLatestRef = useFollowLatest(scrollContainerRef);
   const processedSessionIds = useRef(new Set());
   const isChatScreen = router.query.session_id;
 
@@ -168,7 +171,9 @@ const KubernetesLLMResponseGenerator = ({ accountId, query = '', popup = false, 
   useEffect(() => {
     if (messages.length > 0) {
       const timeoutId = setTimeout(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+        if (followingLatestRef.current) {
+          bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }
       }, 1000);
       return () => {
         clearTimeout(timeoutId);
@@ -914,6 +919,7 @@ const KubernetesLLMResponseGenerator = ({ accountId, query = '', popup = false, 
           )}
 
           <Box
+            ref={scrollContainerRef}
             sx={{
               maxHeight: 'calc(100vh - 0px - 0px - 0px - 91px)',
               overflowY: 'auto',

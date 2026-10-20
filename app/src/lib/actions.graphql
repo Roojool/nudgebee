@@ -15,6 +15,67 @@ type Query {
 }
 
 type Query {
+  integrations_list_webhook_events(
+    limit: Int
+    offset: Int
+    order_by: [QuerySortByRequest!]
+    where: WebhookEventWhereRequest
+  ): WebhookEventResponse!
+}
+
+type Query {
+  integrations_aggregate_webhook_events(
+    where: WebhookEventWhereRequest
+  ): WebhookEventAggregationResponse!
+}
+
+input WebhookEventWhereRequest {
+  _and: [WebhookEventWhereRequest]
+  _or: [WebhookEventWhereRequest]
+  _not: WebhookEventWhereRequest
+  id: QueryWhereStringRequest
+  integration_id: QueryWhereStringRequest
+  account_id: QueryWhereStringRequest
+  event_title: QueryWhereStringRequest
+  event_type: QueryWhereStringRequest
+  event_status: QueryWhereStringRequest
+  event_priority: QueryWhereStringRequest
+  event_url: QueryWhereStringRequest
+  event_description: QueryWhereStringRequest
+  event_created_at: QueryWhereDatetimeRequest
+  processing_status: QueryWhereStringRequest
+  tenant_id: QueryWhereStringRequest
+}
+
+type WebhookEventResponse {
+  rows: [WebhookEvent!]!
+}
+
+type WebhookEvent {
+  id: String
+  integration_id: String
+  account_id: String
+  event_title: String
+  event_type: String
+  event_status: String
+  event_priority: String
+  event_url: String
+  event_description: String
+  event_created_at: Datetime
+  processing_status: String
+  raw: String
+  tenant_id: String
+}
+
+type WebhookEventAggregationResponse {
+  rows: [WebhookEventAggregation!]!
+}
+
+type WebhookEventAggregation {
+  count: Int
+}
+
+type Query {
   notifications_aggregate_rules(
     where: NotificationRulesWhereRequest
   ): NotificationRulesAggregationResponse!
@@ -202,9 +263,9 @@ type Mutation {
 }
 
 type Mutation {
-  ai_generate_prometheus_query(
-    request: AIGetPrometheusQueryRequest!
-  ): AIGetPrometheusQueryResponse
+  ai_generate_metrics_query(
+    request: AIGetMetricsQueryRequest!
+  ): AIGetMetricsQueryResponse
 }
 
 type Query {
@@ -284,6 +345,7 @@ type Query {
     event_id: String
     context: String!
     available_artifacts: [String!]
+    alert_rule: jsonb
   ): AIResponse
 }
 
@@ -514,6 +576,36 @@ type Mutation {
   alertmanager_update_rule(
     request: UpdateAlertRule!
   ): AlertRuleResponse
+}
+
+type Query {
+  eventrules_get_capabilities(
+    request: EventRulesGetCapabilitiesRequest!
+  ): jsonb
+}
+
+type Mutation {
+  eventrules_update_mute(
+    request: EventRulesUpdateMuteRequest!
+  ): jsonb
+}
+
+type Query {
+  eventrules_get_event_alert_controls(
+    request: EventRulesGetEventAlertControlsRequest!
+  ): jsonb
+}
+
+type Mutation {
+  eventrules_apply_rule_change(
+    request: EventRulesApplyRuleChangeRequest!
+  ): jsonb
+}
+
+type Mutation {
+  eventrules_update_event_mute(
+    request: EventRulesUpdateEventMuteRequest!
+  ): jsonb
 }
 
 type Query {
@@ -1234,6 +1326,22 @@ type Mutation {
 }
 
 type Mutation {
+  event_update_status(
+    event_id: String!
+    status: String!
+    reason_code: String!
+    reason_text: String
+    evidence_url: String
+  ): UpdateEventStatusResponse
+}
+
+type Mutation {
+  event_get_status_change(
+    event_ids: [String!]!
+  ): [EventManualStatusChangeResponse!]
+}
+
+type Mutation {
   event_update_triage_rule(
     cloud_account_id: String!
     rule_id: String!
@@ -1776,6 +1884,22 @@ type Mutation {
   ): notification_rule_mapping_output
 }
 
+type Query {
+  notifications_list_default_policies: notification_default_policies_output
+}
+
+type Mutation {
+  notifications_upsert_default_policy(
+    request: notification_default_policy_input!
+  ): notification_default_policy_output
+}
+
+type Query {
+  notifications_check_route(
+    request: notification_route_check_input!
+  ): notification_route_check_output
+}
+
 type Mutation {
   recommendation_export(
     request: ExportRecommendationRequest!
@@ -1884,6 +2008,12 @@ type Mutation {
   security_scan_vm_account(
     object: security_scan_vm_account_input!
   ): security_scan_vm_account_output
+}
+
+type Query {
+  security_list_vm_scan_statuses(
+    object: security_list_vm_scan_statuses_input!
+  ): security_list_vm_scan_statuses_output
 }
 
 type Mutation {
@@ -2340,6 +2470,12 @@ type Mutation {
   users_delete_token(
     user: UserTokenDeleteRequest
   ): UserTokenDeleteResponse
+}
+
+type Mutation {
+  users_update_token(
+    user: UserTokenUpdateRequest
+  ): UserTokenUpdateResponse
 }
 
 type Mutation {
@@ -3323,6 +3459,7 @@ input AlertRule {
 }
 
 input UpdateAlertRule {
+  id: String
   annotations: Annotations!
   expr: String!
   labels: Labels!
@@ -3356,6 +3493,38 @@ input QueryWhereBooleanRequest {
   _is_null: Boolean
 }
 
+input EventRulesGetCapabilitiesRequest {
+  rule_ids: [String!]!
+}
+
+input EventRulesUpdateMuteRequest {
+  rule_id: String!
+  account_id: String!
+  muted: Boolean!
+}
+
+input EventRulesGetEventAlertControlsRequest {
+  event_id: String!
+  account_id: String!
+}
+
+input EventRulesApplyRuleChangeRequest {
+  rule_id: String!
+  account_id: String!
+  expr: String
+  duration: String
+  expected_expr: String!
+  expected_duration: String
+}
+
+input EventRulesUpdateEventMuteRequest {
+  event_id: String!
+  account_id: String!
+  scope: String!
+  duration_hours: Int!
+  muted: Boolean!
+}
+
 input DisableAlertRule {
   accountId: String!
   alert: String!
@@ -3378,6 +3547,10 @@ input security_scan_vm_input {
 }
 
 input security_scan_vm_account_input {
+  account_id: String!
+}
+
+input security_list_vm_scan_statuses_input {
   account_id: String!
 }
 
@@ -3607,6 +3780,11 @@ input notification_rule_upsert_input {
   source: String!
   cluster: String
   account_id: uuid
+  account_ids: [uuid]
+  scope_mode: String
+  exceptions: jsonb
+  source_mode: String
+  sources: [String]
   namespace: String
   workload: String
   aggregation_key: String
@@ -3616,7 +3794,52 @@ input notification_rule_upsert_input {
   delivery_mode: String
   frequency: String
   severity: String
+  event_types: [String]
   mappings: [notification_rule_mapping_input]
+}
+
+input notification_default_policy_input {
+  source: String!
+  action: String!
+  mappings: [notification_rule_mapping_input]
+}
+
+type notification_default_policy {
+  source: String
+  action: String
+  mappings: jsonb
+}
+
+type notification_default_policies_output {
+  policies: [notification_default_policy]
+  error: String
+}
+
+type notification_default_policy_output {
+  source: String
+  action: String
+  mappings: jsonb
+  error: String
+}
+
+input notification_route_check_input {
+  source: String!
+  event: String
+  account_id: String
+  namespace: String
+  workload: String
+  aggregation_key: String
+  severity: String
+}
+
+type notification_route_check_output {
+  result: String
+  reason: String
+  stopped_by: jsonb
+  rules: jsonb
+  channels: jsonb
+  default_channels: Boolean
+  error: String
 }
 
 input notification_rule_input {
@@ -4116,11 +4339,12 @@ input NudgebeeAIGetPrometheusQueryRequest {
   user_id: String
 }
 
-input AIGetPrometheusQueryRequest {
+input AIGetMetricsQueryRequest {
   account_id: String!
   query: String!
   user_id: String
   async: Boolean
+  index: String
 }
 
 input AIGetLogQueryRequest {
@@ -4628,10 +4852,28 @@ input FetchLogLabelValuesRequest {
 
 input UserTokenCreateRequest {
   name: String!
+  kind: String
+  expires_at: String
+  limits: [TokenLimitInput!]
+  scopes: [String!]
 }
 
 input UserTokenDeleteRequest {
-  name: String!
+  id: String
+  name: String
+}
+
+input UserTokenUpdateRequest {
+  id: String!
+  expires_at: String
+  limits: [TokenLimitInput!]
+}
+
+input TokenLimitInput {
+  metric: String!
+  period: String!
+  value: Float!
+  model: String
 }
 
 input TraceServiceMapRequest {
@@ -5123,6 +5365,7 @@ input kg_get_edge_input {
 input kg_get_filter_options_input {
   account_ids: [String]
   node_types: [String]
+  specific_types: [String]
   labels: jsonb
   label_keys: [String]
   attributes: jsonb
@@ -5135,6 +5378,7 @@ input kg_get_complete_graph_input {
   sources: [String]
   account_ids: [String]
   node_types: [String]
+  specific_types: [String]
   labels: jsonb
   attributes: jsonb
   node_ids: [String]
@@ -5534,6 +5778,13 @@ input MetricsQueryUtilisationRequest {
   start_time: Float
   end_time: Float
   request: jsonb!
+  # The Go request has carried these since the typed-request work; undeclared fields
+  # are dropped by the gateway, so a caller could set them and silently get defaults.
+  # step_interval is the query resolution; step is the bucket a key aggregates over.
+  step_interval: Int
+  step: Int
+  aggregate: String
+  pod_names: [String!]
 }
 
 input AwsOnboardStatusInput {
@@ -5563,6 +5814,8 @@ input NotificationRulesWhereRequest {
   _not: NotificationRulesWhereRequest
   id: QueryWhereStringRequest
   account_id: QueryWhereStringRequest
+  account_ids: QueryWhereStringRequest
+  scope_mode: QueryWhereStringRequest
   source: QueryWhereStringRequest
   cluster: QueryWhereStringRequest
   aggregation_key: QueryWhereStringRequest
@@ -5887,6 +6140,7 @@ input cloud_account_update_input {
   account_name: String
   account_env: String
   data: jsonb
+  regions: [String!]
 }
 
 input cloud_account_attr_object {
@@ -6620,6 +6874,7 @@ type EventsRowResponse {
   subject_type: String
   subject_name: String
   subject_owner: String
+  subject_owner_kind: String
   subject_namespace: String
   subject_node: String
   service_key: String
@@ -6839,6 +7094,10 @@ type security_scan_vm_output {
 }
 
 type security_scan_vm_account_output {
+  data: [jsonb]!
+}
+
+type security_list_vm_scan_statuses_output {
   data: [jsonb]!
 }
 
@@ -7642,11 +7901,11 @@ type NudgebeeAIGetPrometheusQuery {
   chain_name: String
 }
 
-type AIGetPrometheusQueryResponse {
-  data: AIGetPrometheusQuery!
+type AIGetMetricsQueryResponse {
+  data: AIGeneratedQuery!
 }
 
-type AIGetPrometheusQuery {
+type AIGeneratedQuery {
   response: [String!]!
   query: String!
   agent_step_response: [String!]!
@@ -7657,7 +7916,7 @@ type AIGetPrometheusQuery {
 }
 
 type AIGetLogQueryResponse {
-  data: AIGetPrometheusQuery!
+  data: AIGeneratedQuery!
 }
 
 type GenerateFeedbackResponse {
@@ -8225,10 +8484,19 @@ type OutputLogLabelValue {
 type UserTokenCreateResponse {
   name: String!
   token: String!
+  kind: String
+  expires_at: String
+  scopes: [String]
 }
 
 type UserTokenDeleteResponse {
-  name: String!
+  name: String
+  status: String
+}
+
+type UserTokenUpdateResponse {
+  id: String!
+  status: String!
 }
 
 type UserAuthTokenResponse {
@@ -8239,9 +8507,27 @@ type UserAuthToken {
   id: String
   name: String
   provider: String
+  kind: String
   status: String
   created_at: timestamp
   accessed_at: timestamp
+  expires_at: timestamp
+  scopes: [String]
+  limits: [TokenLimit]
+  usage: TokenUsage
+}
+
+type TokenLimit {
+  metric: String
+  period: String
+  value: Float
+  model: String
+}
+
+type TokenUsage {
+  requests: Int
+  tokens: Int
+  cost_usd: Float
 }
 
 type ServiceApplicationId {
@@ -9205,6 +9491,22 @@ type UpdateNBStatusResponse {
   new_status: String!
 }
 
+type UpdateEventStatusResponse {
+  success: Boolean!
+  prev_status: String!
+  new_status: String!
+}
+
+type EventManualStatusChangeResponse {
+  event_id: String!
+  changed_by_name: String!
+  status: String!
+  changed_at: String!
+  reason_code: String
+  reason_text: String
+  evidence_url: String
+}
+
 type GetBulkOperationStatusResponse {
   job_id: String!
   status: String!
@@ -9503,9 +9805,11 @@ type KBDocument {
   id: String!
   title: String!
   url: String
-  document_key: String!
-  note_category: String
   content: String
+  content_source: String
+  content_type: String
+  document_key: String
+  note_category: String
 }
 
 input UpsertKBDocumentCategoryRequest {
@@ -9530,6 +9834,7 @@ type UpsertKBDocumentCategoryResponse {
 type KBDocumentsPage {
   items: [KBDocument!]!
   next_offset: String
+  indexed: Boolean
 }
 
 type ListKBDocumentsResponse {
@@ -9941,6 +10246,13 @@ type NotificationRulesResponse {
 type NotificationRule {
   id: String
   account_id: String
+  scope_mode: String
+  account_ids: jsonb
+  exceptions: jsonb
+  source_mode: String
+  sources: jsonb
+  is_active: Boolean
+  event_types: jsonb
   source: String
   created_at: Datetime
   cluster: String
@@ -11731,6 +12043,47 @@ type CloudVmPackagesRowResponse {
 }
 
 type Query {
+  cloud_list_account_integrations(
+    where: CloudAccountIntegrationsWhereRequest
+    limit: Int
+    offset: Int
+    order_by: [QuerySortByRequest!]
+    columns: [String!]
+  ): CloudAccountIntegrationsResponse
+}
+
+input CloudAccountIntegrationsWhereRequest {
+  _and: [CloudAccountIntegrationsWhereRequest]
+  _or: [CloudAccountIntegrationsWhereRequest]
+  _not: CloudAccountIntegrationsWhereRequest
+  id: QueryWhereStringRequest
+  tenant_id: QueryWhereStringRequest
+  account_id: QueryWhereStringRequest
+  name: QueryWhereStringRequest
+  type: QueryWhereStringRequest
+  source: QueryWhereStringRequest
+  status: QueryWhereStringRequest
+  created_at: QueryWhereDatetimeRequest
+  updated_at: QueryWhereDatetimeRequest
+}
+
+type CloudAccountIntegrationsResponse {
+  rows: [CloudAccountIntegrationsRowResponse]
+}
+
+type CloudAccountIntegrationsRowResponse {
+  id: String
+  tenant_id: String
+  account_id: String
+  name: String
+  type: String
+  source: String
+  status: String
+  created_at: Datetime
+  updated_at: Datetime
+}
+
+type Query {
   cloud_vm_package_groupings_v2(
     where: CloudVmPackageGroupingsWhereRequest
     limit: Int
@@ -12271,6 +12624,7 @@ type UserAuthByUsernameRowResponse {
   user_attrs: Json
   auth_accounts: Json
   tenants: Json
+  scopes: Json
 }
 
 type Query {
@@ -12390,6 +12744,7 @@ type AILlmWatchRow {
   id: String!
   status: String!
   source_kind: String!
+  watch_target: String
   predicate_kind: String!
   predicate_expr: String!
   predicate_negate: Boolean!

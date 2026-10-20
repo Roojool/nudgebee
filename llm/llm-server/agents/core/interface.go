@@ -56,6 +56,8 @@ const (
 	ConversationSourceUserInvestigationCLI ConversationSource = "UserInvestigationCli"
 	ConversationSourceOptimize             ConversationSource = "Optimize"
 	ConversationSourceAutomation           ConversationSource = "Automation"
+	ConversationSourcePRLifecycle          ConversationSource = "pr_lifecycle"
+	ConversationSourceRecommendation       ConversationSource = "recommendation"
 )
 
 // ImageAttachment represents an image attached to an agent request.
@@ -351,6 +353,9 @@ type ToolInvocation struct {
 	Response   llms.ToolCallResponse
 	Log        string
 	References []toolcore.NBToolResponseReference
+	// Failed is true when the step's tool reported failure, so a wrapper that
+	// forwards Response.Content upward doesn't relabel an error as success.
+	Failed bool
 }
 
 type NBAgentPlanner interface {
@@ -486,15 +491,15 @@ const AgentPlannerTypeReAct3 AgentPlannerType = "react_3"
 
 // AgentPlannerTypeReAct4 is the provider-native tool-calling ENGINE (also not a
 // declared type). Like ReAct3 it is produced at runtime, not returned by any
-// agent's GetPlannerType(): a ReAct/Orchestrating agent resolves to ReAct4 only
-// when LlmServerReAct4Enabled is set AND the resolved provider/model supports
+// agent's GetPlannerType(): a ReAct/Orchestrating agent resolves to ReAct4
+// when LlmServerPlannerEngine is auto/react4 AND the resolved provider/model supports
 // native tool calling (see SupportsNativeTools / useReAct4Engine); otherwise it
 // falls back to ReAct3. See docs/planner_react_4.md.
 const AgentPlannerTypeReAct4 AgentPlannerType = "react_4"
 
 // NBAgentReAct4Provider is an opt-in marker. An agent implementing it with
 // PrefersReAct4() == true runs under the ReAct4 native tool-calling planner
-// regardless of LlmServerReAct4Enabled — but never bypasses the capability
+// regardless of LlmServerPlannerEngine — but never bypasses the capability
 // gate: if the resolved provider/model lacks native tool support it still falls
 // back to ReAct3 (fail-closed, see useReAct4Engine).
 //
@@ -607,6 +612,22 @@ func agentModelCategory(agent NBAgent) ModelTier {
 // Callers use this to skip that enrichment for internal classifier runs.
 func isSingleShotClassifier(agent NBAgent) bool {
 	return agent != nil && agent.GetPlannerType() == AgentPlannerTypeClassification
+}
+
+// isContextExtractionApplicable reports whether a conversation source should run
+// asynchronous conversation context distillation (context_memories_extractions).
+// Headless automated pipelines (alert investigations, PR lifecycle bots, workflow
+// automations, and recommendation generators) never reuse conversational context.
+func isContextExtractionApplicable(source ConversationSource) bool {
+	switch source {
+	case ConversationSourceInvestigation,
+		ConversationSourceAutomation,
+		ConversationSourcePRLifecycle,
+		ConversationSourceRecommendation:
+		return false
+	default:
+		return true
+	}
 }
 
 // NBAgentCacheScopeProvider is an optional interface that allows agents to define

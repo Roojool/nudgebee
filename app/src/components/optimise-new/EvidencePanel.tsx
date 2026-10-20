@@ -16,6 +16,7 @@ import ImageScanEvidence from './evidence/ImageScanEvidence';
 import CISSecurityEvidence from './evidence/CISSecurityEvidence';
 import SpotRecommendationEvidence from './evidence/SpotRecommendationEvidence';
 import GenericEvidence from './evidence/GenericEvidence';
+import type { RightSizingTrend } from '@hooks/useRightSizingTrend';
 import { MetricRow, SectionTitle, SavingsFooter } from './evidence/evidencePrimitives';
 export { MetricRow, SectionTitle, SavingsFooter };
 
@@ -28,6 +29,9 @@ interface EvidencePanelProps {
   estimatedSavings?: number;
   cloudResource?: any;
   fullRecommendation?: any;
+  /** Pod right-sizing usage trend, fetched once by the drawer. Always supplied:
+   *  the hook returns an empty trend for rules that have none. */
+  trend: RightSizingTrend;
 }
 
 const K8S_RESOURCE_TYPES = new Set(['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Job', 'CronJob', 'Rollout']);
@@ -56,7 +60,14 @@ const isCloudRightSizing = (rec: any, ruleName: string, cloudResource: any, full
   return !isK8s && !hasK8sData;
 };
 
-const renderRightSizing = (rec: any, ruleName: string, estimatedSavings?: number, cloudResource?: any, fullRecommendation?: any) => {
+const renderRightSizing = (
+  rec: any,
+  ruleName: string,
+  trend: RightSizingTrend,
+  estimatedSavings?: number,
+  cloudResource?: any,
+  fullRecommendation?: any
+) => {
   const specialRule = RIGHTSIZING_RULE_MAP[ruleName];
   if (specialRule === 'replica') {
     return <ReplicaRightSizingEvidence recommendation={rec} estimatedSavings={estimatedSavings} />;
@@ -83,7 +94,7 @@ const renderRightSizing = (rec: any, ruleName: string, estimatedSavings?: number
       />
     );
   }
-  return <RightSizingEvidence recommendation={rec} estimatedSavings={estimatedSavings} fullRecommendation={fullRecommendation} />;
+  return <RightSizingEvidence trend={trend} recommendation={rec} estimatedSavings={estimatedSavings} fullRecommendation={fullRecommendation} />;
 };
 
 const isCisBenchmark = (rec: any, ruleName: string): boolean => Boolean(rec.rule_id || rec.rule_description || ruleName?.includes('cis'));
@@ -98,7 +109,7 @@ const renderSecurity = (rec: any, ruleName: string, estimatedSavings?: number) =
   return <SecurityEvidence recommendation={rec} ruleName={ruleName} estimatedSavings={estimatedSavings} />;
 };
 
-const EvidencePanel = ({ recommendation, category, ruleName, estimatedSavings, cloudResource, fullRecommendation }: EvidencePanelProps) => {
+const EvidencePanel = ({ recommendation, category, ruleName, estimatedSavings, cloudResource, fullRecommendation, trend }: EvidencePanelProps) => {
   if (!recommendation) {
     return (
       <Box sx={{ p: ds.space.mul(0, 10), textAlign: 'center' }}>
@@ -115,12 +126,12 @@ const EvidencePanel = ({ recommendation, category, ruleName, estimatedSavings, c
   // pod_right_sizing payloads keep the KRR container shape under either
   // category (requests-unset rows live under Configuration)
   if (ruleName === 'pod_right_sizing') {
-    return renderRightSizing(rec, ruleName, estimatedSavings, cloudResource, fullRecommendation);
+    return renderRightSizing(rec, ruleName, trend, estimatedSavings, cloudResource, fullRecommendation);
   }
 
   switch (category) {
     case 'RightSizing':
-      return renderRightSizing(rec, ruleName, estimatedSavings, cloudResource, fullRecommendation);
+      return renderRightSizing(rec, ruleName, trend, estimatedSavings, cloudResource, fullRecommendation);
 
     case 'Configuration': {
       if (ruleName === 'certificate_expiry') {

@@ -1,0 +1,5 @@
+user_prompt: "batch-analytics has been Pending for a while in benchmark-scenarios. what is blocking it?"
+expected_output:
+  - The response must identify FailedScheduling due to insufficient CPU — the pod requests 64 CPU cores, which no node can satisfy.
+  - The response must not claim the pod is running or that the image is the problem.
+tags: [kubernetes, rca, scenario, easy]

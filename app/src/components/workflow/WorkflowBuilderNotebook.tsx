@@ -14,8 +14,10 @@ import {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useRouter } from 'next/router';
-import { Alert, Box, Typography, CircularProgress, Drawer, Divider } from '@mui/material';
+import { Box, Typography, CircularProgress, Drawer } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import Tooltip from '@ui/Tooltip';
+import { Banner } from '@ui/Banner';
 import { Checkbox } from '@ui/Checkbox';
 import { Input } from '@ui/Input';
 import { Select } from '@ui/Select';
@@ -995,12 +997,14 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
       if (hasEventContext && taskDefinitions.length > 0 && !eventTriggerInitializedRef.current) {
         try {
           const filter = buildFilterExpression({
-            event_type: eventTypeQ,
-            priority: eventPriorityQ,
-            source: eventSourceQ,
-            cluster: eventClusterQ,
-            namespace: eventNamespaceQ,
+            event_type: [eventTypeQ],
+            priority: [eventPriorityQ],
+            source: [eventSourceQ],
+            namespace: [eventNamespaceQ],
           });
+          // The event's account is who the trigger listens to, not a filter clause; the
+          // automation's own account is the default, so only another one is saved.
+          const eventParams = { filter, ...(eventClusterQ && eventClusterQ !== accountId ? { accounts: [eventClusterQ] } : {}) };
 
           const eventWorkflowData: WorkflowData = {
             id: null,
@@ -1010,7 +1014,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
               timeout: '',
               inputs: [],
               tasks: [],
-              triggers: [{ type: 'event', params: { filter } }],
+              triggers: [{ type: 'event', params: eventParams }],
               output: {},
               retry_policy: {
                 maximum_attempts: 3,
@@ -3601,10 +3605,17 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
 
       {/* Config placeholder warning for AI-generated workflows */}
       {configPlaceholders.length > 0 && !configWarningDismissed && (
-        <Alert severity='info' onClose={() => setConfigWarningDismissed(true)} sx={{ borderRadius: 0 }}>
-          This workflow uses configuration placeholders: <strong>{configPlaceholders.join(', ')}</strong>. Please ensure these are set in the Config
-          Manager before running.
-        </Alert>
+        <Banner
+          tone='info'
+          dismissible
+          onDismiss={() => setConfigWarningDismissed(true)}
+          message={
+            <>
+              This workflow uses configuration placeholders: <strong>{configPlaceholders.join(', ')}</strong>. Please ensure these are set in the
+              Config Manager before running.
+            </>
+          }
+        />
       )}
 
       {/* Content Area - Sidebar + Main Content */}
@@ -4618,6 +4629,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                     taskDefinitions={taskDefinitions}
                     taskData={sidebarTaskData}
                     validationErrors={sidebarValidationErrors}
+                    serverError={sidebarSelectedNode ? serverErrors[sidebarSelectedNode.id] : null}
                     viewOnlyMode={false}
                     previousNodeOutputSchema={sidebarPreviousNodeOutputSchema}
                     accountId={accountId}
@@ -4849,7 +4861,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                   onClick={() => setHistoryOpen(false)}
                 />
               </Box>
-              <Divider />
+              <Divider sx={{ my: 0 }} />
               <Box sx={{ flex: 1, overflowY: 'auto' }}>
                 {loadingVersions ? (
                   <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>

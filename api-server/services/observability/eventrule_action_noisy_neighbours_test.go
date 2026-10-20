@@ -2,6 +2,7 @@ package observability
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"testing"
 
@@ -32,43 +33,54 @@ func TestNoisyNeighboursCanAutoExecute(t *testing.T) {
 	assert.False(t, a.CanAutoExecute(ctxFor("pod_oom_killer_enricher", "pod", "p1", "ns", "")))
 }
 
-// Requests and limits live in the state_container metricset, which carries NO node
-// field — asking for them alongside working set returns null for every container
-// (verified against a live cluster). So they are a second search keyed by the pods the
-// first one found. If that lookup fails the rows still render, with an empty request
-// column, rather than the whole card erroring.
-func TestNoisyNeighboursSpecsAreKeyedByPodAndContainer(t *testing.T) {
-	raw := []byte(`{"aggregations":{"pods":{"buckets":[
-	  {"key":"kube-dns-1","containers":{"buckets":[
-	     {"key":"kubedns","requested":{"value":73400320},"limit":{"value":220200960}},
-	     {"key":"dnsmasq","requested":{"value":20971520},"limit":{"value":null}}]}}]}}}`)
-	var resp esNNSpecResponse
-	require.NoError(t, json.Unmarshal(raw, &resp))
+// A container's request and limit must be found by the same identity the usage row
+// carries — namespace, pod and container. Keyed by pod and container alone, two
+// namespaces running the same workload would read each other's limits.
+func TestNoisyNeighboursSpecsAreKeyedByNamespacePodContainer(t *testing.T) {
+	specs := indexByPodContainer([]latestSample{
+		{Metric: map[string]string{"namespace": "team-a", "pod": "worker-0", "container": "app"}, Value: 73400320},
+		{Metric: map[string]string{"namespace": "team-b", "pod": "worker-0", "container": "app"}, Value: 20971520},
+	})
 
-	specs := map[string]esContainerSpec{}
-	for _, pod := range resp.Aggregations.Pods.Buckets {
-		for _, c := range pod.Containers.Buckets {
-			specs[pod.Key+"/"+c.Key] = esContainerSpec{
-				Requested: esNNValue(c.Requested.Value),
-				Limit:     esNNValue(c.Limit.Value),
-			}
-		}
+	assert.Equal(t, float64(73400320), specs["team-a/worker-0/app"])
+	assert.Equal(t, float64(20971520), specs["team-b/worker-0/app"], "the other namespace's pod of the same name is a different container")
+	// A container absent from the spec response reads as zero rather than missing,
+	// which is what the card renders as "does not have a memory request".
+	assert.Zero(t, specs["team-a/worker-0/absent"])
+}
+
+// The card ranks by usage and cuts to the top N, and it does that in Go rather than
+// asking the provider for a topk — so the ranking is identical whichever backend
+// answered.
+func TestNoisyNeighboursRanksAndCutsToTopN(t *testing.T) {
+	usage := make([]latestSample, 0, noisyNeighboursTopN+5)
+	for i := 0; i < noisyNeighboursTopN+5; i++ {
+		usage = append(usage, latestSample{
+			Metric: map[string]string{"namespace": "team-a", "pod": fmt.Sprintf("pod-%02d", i), "container": "app"},
+			Value:  float64(i), // ascending, so the cut must reorder before trimming
+		})
 	}
 
-	assert.Equal(t, float64(73400320), specs["kube-dns-1/kubedns"].Requested)
-	assert.Equal(t, float64(220200960), specs["kube-dns-1/kubedns"].Limit)
-	// A container with no limit reports 0, not a nil deref.
-	assert.Equal(t, float64(20971520), specs["kube-dns-1/dnsmasq"].Requested)
-	assert.Zero(t, specs["kube-dns-1/dnsmasq"].Limit)
-	// A container absent from the spec search reads as zero rather than missing.
-	assert.Zero(t, specs["kube-dns-1/absent"].Requested)
+	data, err := buildNoisyNeighbourData("node-1", "subject-pod", "subject-ns", map[string][]latestSample{
+		"top_pods":   usage,
+		"node_alloc": {{Metric: map[string]string{}, Value: 1000}},
+	}, false)
+	require.NoError(t, err)
+
+	require.Len(t, data.Neighbours, noisyNeighboursTopN)
+	first, _ := data.Neighbours[0]["memory_used"].(float64)
+	last, _ := data.Neighbours[noisyNeighboursTopN-1]["memory_used"].(float64)
+	assert.Greater(t, first, last, "ranked by usage, descending")
+	assert.Equal(t, float64(len(usage)-1), first, "the busiest container leads")
+	// TotalRequested sums every container on the node, not just the ones shown.
+	assert.False(t, data.CPUMeasured, "CPU is omitted when nothing measured it")
 }
 
 // Both providers render through noisyNeighboursResponse, so the payload the UI consumes
 // cannot drift between them. The card reads these fields verbatim.
 func TestNoisyNeighboursPayloadShapeIsProviderIndependent(t *testing.T) {
 	resp, err := noisyNeighboursResponse("p1", "ns", map[string]any{"node_name": "n1"},
-		&esNoisyNeighbourData{
+		&noisyNeighbourData{
 			NodeName: "n1", NodeUsed: 100, NodeAllocatable: 200, TotalRequested: 150,
 			Neighbours: []map[string]any{{"name": "c1", "pod_name": "p1", "memory_used": 100.0}},
 		})
@@ -76,24 +88,21 @@ func TestNoisyNeighboursPayloadShapeIsProviderIndependent(t *testing.T) {
 
 	out, err := json.Marshal(resp)
 	require.NoError(t, err)
-	for _, want := range []string{"node_name", "memory_used", "memory_allocatable", "memory_requested", "total_pods", "neighbours"} {
+	for _, want := range []string{"node_name", "memory_used", "memory_allocatable", "memory_requested", "memory_limits", "neighbours_shown", "neighbours"} {
 		assert.Containsf(t, string(out), want, "payload missing %q", want)
 	}
-}
-
-// Without a node there is nothing to narrow by, and an unfiltered query would return the
-// whole cluster's containers as though they were this node's. Guarded inside the lookup
-// so every caller is covered, not just the enricher.
-func TestNoisyNeighboursESRefusesAnEmptyNodeName(t *testing.T) {
-	_, err := esNoisyNeighbours(nil, "acct", "", 10, 15)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "node name required")
+	// `total_pods` claimed to be the node's pod count while holding the length of a
+	// list truncated at 15. It read 15 on 720 of 730 cards measured over 14 days,
+	// and the evidence-analysis agent repeated it to the model as "Number of pods
+	// in node" — on a node that kubectl reports as running 46. The name is gone so
+	// nothing can go on reading it that way.
+	assert.NotContains(t, string(out), "total_pods")
 }
 
 // A node with nothing on it must render as an empty list. A nil slice marshals to
 // `null`, which the card iterates.
 func TestNoisyNeighboursEmptyNodeRendersAsEmptyList(t *testing.T) {
-	resp, err := noisyNeighboursResponse("p1", "ns", nil, &esNoisyNeighbourData{
+	resp, err := noisyNeighboursResponse("p1", "ns", nil, &noisyNeighbourData{
 		NodeName: "n1", Neighbours: []map[string]any{},
 	})
 	require.NoError(t, err)
@@ -150,7 +159,7 @@ func TestNoisyNeighboursRunsForContentionAlerts(t *testing.T) {
 // A node pinned on CPU starves everything on it while memory looks fine, so the
 // payload has to carry CPU for a reader to reach the right answer.
 func TestNoisyNeighboursPayloadCarriesCPUWhenMeasured(t *testing.T) {
-	resp, err := noisyNeighboursResponse("p1", "ns", nil, &esNoisyNeighbourData{
+	resp, err := noisyNeighboursResponse("p1", "ns", nil, &noisyNeighbourData{
 		NodeName:        "node-1",
 		CPUMeasured:     true,
 		NodeCPUUsed:     5.994,
@@ -176,7 +185,7 @@ func TestNoisyNeighboursPayloadCarriesCPUWhenMeasured(t *testing.T) {
 // Elasticsearch clusters cannot report CPU here. Reporting zero would read as
 // "nothing is using CPU", which is a stronger and wronger claim than silence.
 func TestNoisyNeighboursOmitsCPUWhenNotMeasured(t *testing.T) {
-	resp, err := noisyNeighboursResponse("p1", "ns", nil, &esNoisyNeighbourData{
+	resp, err := noisyNeighboursResponse("p1", "ns", nil, &noisyNeighbourData{
 		NodeName:   "node-1",
 		Neighbours: []map[string]any{},
 	})

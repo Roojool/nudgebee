@@ -41,11 +41,12 @@ func TestListDiscoveryDatasourcesForAccount_FiltersByTargetAndEligibility(t *tes
 		WithArgs("aws-account-1").
 		WillReturnRows(rows)
 
-	datasources, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "aws-account-1")
+	datasources, ineligible, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "aws-account-1")
 	require.NoError(t, err)
 	require.Len(t, datasources, 1)
 	assert.Equal(t, "int-1", datasources[0].IntegrationID)
 	assert.Equal(t, "aws-account-1", datasources[0].TargetAccountID)
+	assert.Zero(t, ineligible)
 }
 
 // A self-hosted forager discovery datasource that runs in the queried account
@@ -62,12 +63,13 @@ func TestListDiscoveryDatasourcesForAccount_MatchesOwnAccountWithoutTarget(t *te
 		WithArgs("self-hosted-acct").
 		WillReturnRows(rows)
 
-	datasources, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "self-hosted-acct")
+	datasources, ineligible, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "self-hosted-acct")
 	require.NoError(t, err)
 	require.Len(t, datasources, 1)
 	assert.Equal(t, "int-1", datasources[0].IntegrationID)
 	assert.Equal(t, "self-hosted-acct", datasources[0].AccountID)
 	assert.Empty(t, datasources[0].TargetAccountID)
+	assert.Zero(t, ineligible)
 }
 
 // Pins the WHERE clause: an explicit discovery_target must win over the 'own'
@@ -83,9 +85,10 @@ func TestListDiscoveryDatasourcesForAccount_ExplicitTargetWinsOverOwn(t *testing
 		WithArgs("host-acct").
 		WillReturnRows(sqlmock.NewRows([]string{"integration_id", "tenant_id", "account_id", "target_account_id", "labels"}))
 
-	datasources, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "host-acct")
+	datasources, ineligible, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "host-acct")
 	require.NoError(t, err)
 	assert.Empty(t, datasources)
+	assert.Zero(t, ineligible)
 }
 
 func TestListDiscoveryDatasourcesForAccount_NoneEligible(t *testing.T) {
@@ -95,9 +98,29 @@ func TestListDiscoveryDatasourcesForAccount_NoneEligible(t *testing.T) {
 		WithArgs("aws-account-2").
 		WillReturnRows(rows)
 
-	datasources, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "aws-account-2")
+	datasources, ineligible, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "aws-account-2")
 	require.NoError(t, err)
 	assert.Empty(t, datasources)
+	assert.Zero(t, ineligible)
+}
+
+// A discovery integration row exists and is enabled, but its labels are
+// still "{}" (agent connected, metadata not yet synced — see #38718). This
+// must be distinguishable by the caller from "no row matched at all", so
+// scanVmAccount can tell the user their agent is connected but not yet
+// ready, instead of "no discovery agent is configured".
+func TestListDiscoveryDatasourcesForAccount_IneligibleLabelsCounted(t *testing.T) {
+	mock := withMockDB(t)
+	rows := sqlmock.NewRows([]string{"integration_id", "tenant_id", "account_id", "target_account_id", "labels"}).
+		AddRow("int-1", "tenant-1", "aws-account-3", nil, `{}`)
+	mock.ExpectQuery("SELECT i.id::text AS integration_id").
+		WithArgs("aws-account-3").
+		WillReturnRows(rows)
+
+	datasources, ineligible, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "aws-account-3")
+	require.NoError(t, err)
+	assert.Empty(t, datasources)
+	assert.Equal(t, 1, ineligible)
 }
 
 func TestGetDiscoveryDatasourceByID_Found(t *testing.T) {

@@ -116,7 +116,7 @@ export class ToolsAndMcpLocators extends CommonLocators {
     // fallback is the tab's own id: Tabs stamps a11yProps(opt.value, opt.id) and
     // takes the option's id when it has one, which AI_TOOLS_SUB_TABS entries do —
     // so unlike ds/Tabs' positional `#tab-${index}` it does not shift when a
-    // feature flag drops the Functions or Gateway sub-tab.
+    // feature flag drops the Gateway sub-tab.
     this.toolsMcpTab = page
       .getByRole("tab", { name: TOOLS_MCP_TAB_NAME })
       .or(page.locator(`#${TOOLS_MCP_TAB_FRAGMENT}`))
@@ -183,8 +183,8 @@ export class ToolsAndMcpLocators extends CommonLocators {
       .or(this.toolsListing.getByRole("button", { name: CREATE_TOOL_BTN_NAME }))
       .first();
 
-    // ds/Banner with tone='info' renders role="status" (Banner.tsx picks 'alert'
-    // only for critical/warning). Filtered on its own copy so the toast region,
+    // ds/Banner with tone='info' renders role="status" (feedbackRole in
+    // ds/internal/feedbackTones picks 'alert' only for critical/warning). Filtered on its own copy so the toast region,
     // which carries the same role, cannot satisfy it.
     this.mcpBanner = page
       .getByRole("status")
@@ -341,8 +341,7 @@ export class ToolsAndMcpLocators extends CommonLocators {
     await this.openOptionList.first().waitFor({ state: "visible", timeout: 20000 });
   }
 
-  // Every account label the filter offers, minus the synthetic "All accounts"
-  // entry AccountSelect prepends via includeAllOption.
+  // Every account label the filter offers.
   async accountOptionLabels(): Promise<string[]> {
     await this.accountFilter.click();
     await this.revealAccountOptions();

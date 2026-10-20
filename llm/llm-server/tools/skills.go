@@ -55,7 +55,7 @@ func (m LoadSkillsTool) Name() string {
 func (m LoadSkillsTool) Description() string {
 	const procedureReadGuidance = " For a potentially relevant SOP/procedure, finish reading its applicability, scope and prerequisites before dependent investigation or delegation; do not launch those actions in parallel with this load. If it does not apply, proceed without following it; a title match alone does not establish applicability."
 	if config.Config.LlmServerKnowledgeWorkspaceEnabled {
-		return `Loads one exact account skill or discovered candidate ID. Large indexed documents are saved to the workspace. Use keyword or start_line to read bounded sections through this tool. Integration names return document candidates for selection. Unknown names are never substituted.` + procedureReadGuidance + " Continue truncated reads as needed using keyword or start_line."
+		return `Loads one exact account skill or discovered candidate ID. Large indexed documents are saved to the workspace. Use keyword or start_line to read bounded sections through this tool. Integration names return document candidates for selection. Unknown names are never substituted.` + procedureReadGuidance + " Continue truncated reads using the returned start_byte cursor when present, or refine keyword/start_line."
 	}
 	return `Loads discovered knowledge candidates by candidate id, or active account knowledge bases by exact name. Unknown names are not searched or substituted; use search_skills for discovery. You MUST use the 'skill_name' parameter. For multiple entries, provide ids or names as a single comma-separated string.` + procedureReadGuidance + " If the excerpt omits scope or prerequisites and the full document is unavailable, report that applicability is unverified; do not repeatedly reload the same excerpt or assume the procedure applies."
 }
@@ -75,6 +75,7 @@ func (m LoadSkillsTool) InputSchema() core.ToolSchema {
 		Properties: map[string]core.ToolSchemaProperty{
 			"keyword":    {Type: core.ToolSchemaTypeString, Description: "Find matching lines in one selected knowledge document. Bounded output; refine the keyword for more specific matches."},
 			"start_line": {Type: core.ToolSchemaTypeInteger, Description: "Read one document starting at this 1-based line number."},
+			"start_byte": {Type: core.ToolSchemaTypeInteger, Description: "Continue a truncated read at the returned 0-based byte cursor. Do not combine with keyword or start_line."},
 			"skill_name": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "The candidate id shown in <skill-lists> (preferred), or an exact account skill name. For multiple entries, use a comma-separated string. Do NOT pass an array or list.",
@@ -87,6 +88,7 @@ func (m LoadSkillsTool) InputSchema() core.ToolSchema {
 	} else {
 		delete(schema.Properties, "keyword")
 		delete(schema.Properties, "start_line")
+		delete(schema.Properties, "start_byte")
 	}
 	return schema
 }
@@ -248,7 +250,7 @@ func (m LoadSkillsTool) Call(ctx core.NbToolContext, input core.NBToolCallReques
 		}
 	}
 	// Integration results are query-dependent and never enter the name cache.
-	enrichIntegrationSkillsFromRAG(ctx, results)
+	enrichIntegrationSkillsFromRAG(ctx, input, results)
 	var missingNames []string
 	for _, name := range requestedNames {
 		if _, found := results[strings.ToLower(name)]; !found {
@@ -371,8 +373,9 @@ func (m LoadSkillsTool) fetchSkillsBatch(ctx core.NbToolContext, dbms *common.Da
 
 	// Resolve the requested names in one account-scoped batch query.
 	query := `
-		SELECT kb.id, kb.name, LEFT(kb.data, 4097), COALESCE(kb.description, ''),
-		       COALESCE(kb.kb_type, 'manual'), kb.kb_source, kb.integration_id, COALESCE(kb.note_category, '')
+		SELECT kb.id, kb.name, CASE WHEN kb.data_format = 'pdf' THEN '' ELSE LEFT(kb.data, 4097) END, COALESCE(kb.description, ''),
+		       COALESCE(kb.kb_type, 'manual'), kb.kb_source, kb.integration_id, COALESCE(kb.note_category, ''),
+		       COALESCE(kb.data_format, '')
 		FROM llm_knowledgebases kb
 		WHERE kb.account_id = $1
 		  AND LOWER(BTRIM(kb.name)) = ANY($2::text[])
@@ -392,10 +395,15 @@ func (m LoadSkillsTool) fetchSkillsBatch(ctx core.NbToolContext, dbms *common.Da
 
 	foundInDB := make(map[string]bool)
 	for rows.Next() {
-		var id, name, data, description, kbType, category string
+		var id, name, data, description, kbType, category, format string
 		var kbSource, integrationID *string
-		if err := rows.Scan(&id, &name, &data, &description, &kbType, &kbSource, &integrationID, &category); err != nil {
+		if err := rows.Scan(&id, &name, &data, &description, &kbType, &kbSource, &integrationID, &category, &format); err != nil {
 			continue
+		}
+		if format == string(core.KBFormatPDF) {
+			// A PDF's data column is base64 of the document; its content is only
+			// reachable through the indexed page and figure chunks.
+			data = core.PDFKnowledgePointer
 		}
 		lower := strings.ToLower(strings.TrimSpace(name))
 		sd := skillData{Purpose: core.KnowledgePurpose(kbType, category), ID: id, ExcerptOnly: len(data) > core.KnowledgeExcerptBytes, Data: common.TruncateHead(data, core.KnowledgeExcerptBytes), Description: description, KBType: kbType, KBSource: kbSource, IntegrationID: integrationID}
@@ -502,19 +510,30 @@ const ragKBModule = "knowledge_base"
 
 // enrichIntegrationSkillsFromRAG searches each resolved collection independently.
 // One deadline bounds the batch; no query-dependent content is cached by KB name.
-func enrichIntegrationSkillsFromRAG(ctx core.NbToolContext, results map[string]skillData) {
+func enrichIntegrationSkillsFromRAG(ctx core.NbToolContext, input core.NBToolCallRequest, results map[string]skillData) {
 	retrievalCtx, cancel := context.WithTimeout(ctx.Ctx.GetContext(), ragSkillTimeout)
 	defer cancel()
+	// Prefer the model's own keyword over the turn's task prompt — the prompt is
+	// boilerplate-heavy and identical across investigations.
+	keyword, _ := input.Arguments["keyword"].(string)
+	// Loop-invariant: the query depends on the turn, not on which skill is
+	// being enriched. Only the per-skill fallback below varies.
+	baseQuery := core.BuildRetrievalQuery(keyword, ctx.QueryConfig, ctx.Query)
+	if baseQuery == "" {
+		baseQuery = strings.TrimSpace(ctx.Query)
+	}
 	for key, skill := range results {
 		if skill.KBType != "integration" || strings.TrimSpace(skill.Data) != "" {
 			continue
 		}
 		collection := core.KnowledgebaseCollectionName(core.Knowledgebase{Id: skill.ID, KBType: skill.KBType, IntegrationId: skill.IntegrationID})
-		query := strings.TrimSpace(ctx.Query)
+		query := baseQuery
 		if query == "" {
 			query = key
 		}
-		docs := core.QueryRAGCollectionReranked(retrievalCtx, ctx.UserId, ctx.AccountId, query, ragKBModule, collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+		searchCtx, traceID := core.WithRetrievalTraceID(retrievalCtx)
+		docs := core.QueryRAGCollectionReranked(searchCtx, ctx.UserId, ctx.AccountId, query, ragKBModule, collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+		docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, query, docs, traceID)
 		var content strings.Builder
 		for _, doc := range docs {
 			// Defend against a mis-scoped response from an incompatible server.
@@ -622,9 +641,10 @@ func (s SearchSkillsTool) Call(ctx core.NbToolContext, input core.NBToolCallRequ
 	// 2. Integration KBs — single RAG search with module "knowledge_base".
 	go func() {
 		var out searchOutput
-		docs := core.QueryRAG(ctx.UserId, ctx.AccountId, query, ragKBModule,
+		searchCtx, traceID := core.WithRetrievalTraceID(ctx.Ctx.GetContext())
+		docs := core.QueryRAGCollection(searchCtx, ctx.UserId, ctx.AccountId, "", query, ragKBModule, "",
 			ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
-		out.docs = docs
+		out.docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, query, docs, traceID)
 		ragCh <- out
 	}()
 
@@ -716,7 +736,7 @@ func (s SearchSkillsTool) searchManualKBs(ctx core.NbToolContext, dbms *common.D
 
 	sqlQuery := fmt.Sprintf(`
 		SELECT kb.id, kb.name, COALESCE(kb.description, ''),
-		       LEFT(kb.data, 500), COALESCE(kb.note_category, '')
+		       CASE WHEN kb.data_format = 'pdf' THEN '' ELSE LEFT(kb.data, 500) END, COALESCE(kb.note_category, '')
 		FROM llm_knowledgebases kb
 		WHERE kb.account_id = $1
 		  AND kb.status = 'active'

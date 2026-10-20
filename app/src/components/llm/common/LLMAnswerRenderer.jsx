@@ -268,7 +268,7 @@ const LLMAnswerRenderer = ({ toolCall, messages = [], onNavigateToTask, groupInd
               borderRadius: ds.radius.lg,
               overflow: 'auto',
               fontSize: 'var(--ds-text-body)',
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               margin: 0,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',

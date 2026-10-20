@@ -88,11 +88,20 @@ func TestMapOtelStatusCode(t *testing.T) {
 	assert.Equal(t, "", mapOtelStatusCode(nil))
 }
 
-func TestIsOtelNativeTraceIndex(t *testing.T) {
-	assert.True(t, isOtelNativeTraceIndex("traces-generic.otel-default"))
-	assert.True(t, isOtelNativeTraceIndex("logs-generic.otel-default")) // any .otel index
-	assert.True(t, isOtelNativeTraceIndex("traces-my"))                 // traces-* prefix
-	assert.False(t, isOtelNativeTraceIndex("otel-v1-apm-span-*"))       // Data Prepper schema
-	assert.False(t, isOtelNativeTraceIndex(""))
-	assert.False(t, isOtelNativeTraceIndex("  "))
+// TestOtelNativeIndexNoLongerSelectsTheReader replaces TestIsOtelNativeTraceIndex.
+// The reader is no longer inferred from the index name — isOtelNativeTraceIndex was
+// deleted because traces-apm* matched its "traces-" prefix rule and selected this
+// OTel reader for Elastic APM data, returning zero hits. The index patterns that
+// test enumerated are now mapped to a stored trace_schema value once, by the V1003
+// backfill migration; from then on dispatch reads the declaration.
+//
+// What remains worth asserting here is that an OTel-native index does NOT by itself
+// steer dispatch: a declared schema wins over whatever the index happens to be named.
+func TestOtelNativeIndexNoLongerSelectsTheReader(t *testing.T) {
+	assert.IsType(t, &ElasticOtelTraceSource{}, esTraceSourceFor(ESTraceSchemaOtelNative))
+
+	// The Elastic APM trap: this index name would have selected the OTel reader
+	// under the old heuristic. The declaration is what decides now.
+	assert.IsType(t, &ElasticAPMTraceSource{}, esTraceSourceFor(ESTraceSchemaElasticAPM))
+	assert.IsType(t, &ElasticSaasTraceSource{}, esTraceSourceFor(ESTraceSchemaDataPrepper))
 }

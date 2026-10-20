@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"nudgebee/collector/cloud/common"
+	"nudgebee/collector/cloud/kgnotify"
 	"nudgebee/collector/cloud/providers"
 	"strings"
 	"time"
@@ -382,6 +383,10 @@ func (p *TemplatedEventGridProcessor) executeUpdateCloudResourceAction(ctx provi
 		"status", resultStatus,
 		"dbId", resultId,
 		"updated_at", resultUpdatedAt)
+
+	// Update this resource's knowledge-graph node, found by the row id (its
+	// nb_resource_id), which is exact where Azure resource ids vary in casing.
+	kgnotify.PublishResourceUpdate(ctx.GetContext(), tenantID, accountID, resultId, kgnotify.OpFor(isActive))
 
 	return map[string]interface{}{
 		"success":           true,

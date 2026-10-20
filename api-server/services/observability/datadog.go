@@ -2,6 +2,7 @@ package observability
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -12,6 +13,8 @@ import (
 	"nudgebee/services/integrations"
 	"nudgebee/services/query"
 	"nudgebee/services/security"
+
+	"golang.org/x/sync/errgroup"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,11 +28,25 @@ const (
 	datadogTraceBodyLogTrunc = 512
 )
 
-// fetchDatadogTraceAPI issues a GET against the Datadog API and retries on
-// 429 (rate-limited) and 5xx responses. On 429 it honors the Retry-After
-// response header (delta-seconds or HTTP-date), falling back to exponential
-// backoff with jitter. Returns the response body bytes on 2xx.
-func fetchDatadogTraceAPI(ctx *security.RequestContext, requestURL string, headers map[string]string) ([]byte, error) {
+// fetchDatadogAPI issues a GET against the Datadog API and retries on 429
+// (rate-limited) and 5xx responses. On 429 it honors the Retry-After response header
+// (delta-seconds or HTTP-date), falling back to exponential backoff with jitter.
+// Returns the response body bytes on 2xx.
+//
+// `deadline` is the wall-clock instant retrying may not pass. It exists because the
+// same keys serve UI charts and background jobs, and those want opposite things: a
+// chart would rather show an error than hang, while an hourly anomaly run can afford to
+// wait out a rate limit. The caller decides how much to allow (see datadogRetryBudget);
+// this function only enforces it. A deadline in the past means "no waiting" -- the first
+// failure is returned.
+//
+// It is an instant rather than a duration so that a caller fetching several keys can
+// compute it ONCE and share it. A per-call duration would restart the clock on every
+// key, and N keys against a rate-limited Datadog would wait N times the budget --
+// exactly the pinned connection the budget exists to prevent. Sharing one deadline also
+// survives the keys being fetched concurrently, where decrementing a remaining budget
+// would not.
+func fetchDatadogAPI(ctx *security.RequestContext, requestURL string, headers map[string]string, deadline time.Time) ([]byte, error) {
 	var lastErr error
 	var lastStatus int
 
@@ -40,7 +57,9 @@ func fetchDatadogTraceAPI(ctx *security.RequestContext, requestURL string, heade
 			lastStatus = 0
 			if attempt < datadogTraceMaxRetries {
 				sleep := datadogBackoff(attempt)
-				ctx.GetLogger().Warn("datadog: trace request network error, retrying", "attempt", attempt+1, "sleep", sleep, "error", err)
+				if !datadogCanWait(ctx, sleep, deadline, "network error", attempt) {
+					return nil, fmt.Errorf("datadog request failed and the retry budget is spent: %w", err)
+				}
 				time.Sleep(sleep)
 				continue
 			}
@@ -71,6 +90,9 @@ func fetchDatadogTraceAPI(ctx *security.RequestContext, requestURL string, heade
 				return nil, fmt.Errorf("datadog traces api rate-limited after %d attempts: %s", attempt+1, truncateForLog(bodyBytes))
 			}
 			sleep := retryAfterDelay(resp.Header.Get("Retry-After"), datadogBackoff(attempt))
+			if !datadogCanWait(ctx, sleep, deadline, "rate-limited (429)", attempt) {
+				return nil, fmt.Errorf("datadog rate-limited (429) and the retry budget is spent after %d attempt(s)", attempt+1)
+			}
 			ctx.GetLogger().Warn("datadog: trace request rate-limited, retrying",
 				"attempt", attempt+1,
 				"sleep", sleep,
@@ -98,6 +120,47 @@ func fetchDatadogTraceAPI(ctx *security.RequestContext, requestURL string, heade
 	}
 
 	return nil, fmt.Errorf("datadog traces api exhausted retries (last status %d): %v", lastStatus, lastErr)
+}
+
+// Retry budgets. The caller picks one; these bound what it may pick.
+//
+// A UI chart would rather show an error than hang, so the default is deliberately
+// small. A background job -- the hourly anomaly run, rightsizing -- can afford to wait
+// a rate limit out, and asks for more. The ceiling exists because the budget arrives
+// over the wire: without it a caller could pin a connection for as long as it liked.
+const (
+	datadogRetryBudgetDefault = 2 * time.Second
+	datadogRetryBudgetMax     = 30 * time.Second
+)
+
+// datadogRetryBudget clamps what the caller asked for into what is allowed.
+func datadogRetryBudget(seconds int) time.Duration {
+	if seconds <= 0 {
+		return datadogRetryBudgetDefault
+	}
+	if d := time.Duration(seconds) * time.Second; d < datadogRetryBudgetMax {
+		return d
+	}
+	return datadogRetryBudgetMax
+}
+
+// datadogCanWait reports whether sleeping for `sleep` stays inside the budget, and logs
+// the decision either way.
+//
+// The log line is the point as much as the decision: rate limiting is otherwise
+// invisible -- it shows up as a slow page or a thin chart, with nothing to grep for.
+// Every wait and every give-up names the reason and the delay.
+func datadogCanWait(ctx *security.RequestContext, sleep time.Duration, deadline time.Time, reason string, attempt int) bool {
+	if time.Now().Add(sleep).After(deadline) {
+		ctx.GetLogger().Warn("datadog: giving up rather than exceeding the retry budget",
+			"reason", reason, "attempt", attempt+1, "would_sleep", sleep,
+			"budget_remaining", time.Until(deadline))
+		return false
+	}
+	ctx.GetLogger().Warn("datadog: retrying after a delay",
+		"reason", reason, "attempt", attempt+1, "sleep", sleep,
+		"budget_remaining", time.Until(deadline))
+	return true
 }
 
 // datadogBackoff returns an exponential backoff delay (capped) with ±25% jitter.
@@ -514,7 +577,7 @@ func (s *DatadogTraceSource) QueryTracesHeatmap(ctx *security.RequestContext, fe
 		"DD-APPLICATION-KEY": appKey,
 	}
 
-	bodyBytes, err := fetchDatadogTraceAPI(ctx, url, headers)
+	bodyBytes, err := fetchDatadogAPI(ctx, url, headers, time.Now().Add(datadogRetryBudgetDefault))
 	if err != nil {
 		return nil, err
 	}
@@ -863,10 +926,8 @@ func extractDatadogTimestampRange(binary query.BinaryWhereClause) (startTime, en
 }
 
 func (s *DatadogTraceSource) QueryTraces(sc *security.RequestContext, tracesRequest TracesV3Request) ([]common.OpenTelemetryTrace, error) {
-	// temp handling to be removed in future
-	if tracesRequest.QueryRequest.Where.Binary["trace_source"] != nil {
-		delete(tracesRequest.QueryRequest.Where.Binary, "trace_source")
-	}
+	// temp handling to be removed in future. trace_source never reaches here: the
+	// dispatch layer evaluates it (allProviderCaps TraceSource).
 	if tracesRequest.QueryRequest.Where.Binary["destination_workload_name"] != nil {
 		delete(tracesRequest.QueryRequest.Where.Binary, "destination_workload_name")
 	}
@@ -960,7 +1021,7 @@ func (s *DatadogTraceSource) QueryTraces(sc *security.RequestContext, tracesRequ
 		"DD-APPLICATION-KEY": appKey,
 	}
 
-	bodyBytes, err := fetchDatadogTraceAPI(sc, url, headers)
+	bodyBytes, err := fetchDatadogAPI(sc, url, headers, time.Now().Add(datadogRetryBudgetDefault))
 	if err != nil {
 		return nil, err
 	}
@@ -1024,17 +1085,85 @@ func (s *DatadogMetricSource) FetchMetricsQuery(
 	finalOutput := OutputMetricQuery{
 		Results: []QueryResult{},
 	}
-	for queryKey, rawQuery := range fetchMetricsRequest.Queries {
+	// How long this caller will spend waiting out a rate limit, clamped to what the
+	// layer allows -- and turned into a single deadline shared by every key below, so
+	// the bound is on the whole request rather than on each key in it.
+	retryDeadline := time.Now().Add(datadogRetryBudget(fetchMetricsRequest.RetryBudgetSeconds))
+
+	// failKey turns one key's failure into that key's result, so the others keep theirs.
+	//
+	// Every other provider already works this way (newrelic_metrics.go is the clearest
+	// example). Datadog alone returned an empty OutputMetricQuery, discarding the keys
+	// that had already succeeded -- so one rate-limited response lost a whole rightsizing
+	// run, which is why Datadog is excluded from the shared rightsizing path.
+	failKey := func(queryKey, what string, cause error) []QueryResult {
+		ctx.GetLogger().Warn("DatadogMetricSource.FetchMetricsQuery: "+what,
+			"key", queryKey, "error", cause)
+		msg := cause.Error()
+		return []QueryResult{{QueryKey: queryKey, Error: &msg}}
+	}
+
+	// Datadog is asked one key at a time -- `aggregate` applies to a whole request, so
+	// four CPU percentiles cannot share one. A default rightsizing strategy therefore
+	// sends 7 requests per workload where the old per-provider service sent 2, and
+	// serially that multiplier is the difference between "larger" and "too slow to use".
+	// This is the measured reason the loop is concurrent rather than a guess that it
+	// ought to be.
+	//
+	// Bounded, and deliberately below the key count: firing every key at once is exactly
+	// the burst Datadog rate-limits, and the retry budget above is what absorbs the 429s
+	// this makes more likely. Each goroutine writes its own slot and returns nil, so the
+	// answer does not depend on which request finishes first -- the same shape
+	// validateReferencedLabelValues uses.
+	keys := make([]string, 0, len(fetchMetricsRequest.Queries))
+	for k := range fetchMetricsRequest.Queries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	perKey := make([][]QueryResult, len(keys))
+	eg := new(errgroup.Group)
+	eg.SetLimit(datadogMaxConcurrentKeys)
+	for i := range keys {
+		i := i
+		eg.Go(func() error {
+			queryKey := keys[i]
+			rawQuery := fetchMetricsRequest.Queries[queryKey]
+			perKey[i] = datadogFetchOneKey(ctx, queryKey, rawQuery, fetchMetricsRequest,
+				site, apiKey, appKey, from, to, retryDeadline, failKey)
+			return nil
+		})
+	}
+	_ = eg.Wait()
+	for _, rs := range perKey {
+		finalOutput.Results = append(finalOutput.Results, rs...)
+	}
+
+	return finalOutput, nil
+}
+
+// datadogMaxConcurrentKeys bounds how many of a request's keys are in flight at once.
+const datadogMaxConcurrentKeys = 4
+
+// datadogFetchOneKey answers a single key, returning that key's results -- or the one
+// result describing why it could not be answered. It never returns an error: a key's
+// failure belongs to that key, not to the batch.
+func datadogFetchOneKey(
+	ctx *security.RequestContext,
+	queryKey, rawQuery string,
+	fetchMetricsRequest FetchMetricsRequest,
+	site, apiKey, appKey string,
+	from, to int64,
+	// One instant shared by every key in this request, so the bound is on the request
+	// as a whole. Under this concurrent loop a remaining-budget counter would have to
+	// be decremented from several goroutines at once; a deadline needs no coordination.
+	retryDeadline time.Time,
+	failKey func(string, string, error) []QueryResult,
+) []QueryResult {
+	{
 		injected, injErr := injectDatadogLabels(rawQuery, fetchMetricsRequest.Labels, fetchMetricsRequest.LabelMatchers)
 		if injErr != nil {
-			ctx.GetLogger().Warn("DatadogMetricSource.FetchMetricsQuery: query build failed",
-				"key", queryKey, "error", injErr)
-			errMsg := injErr.Error()
-			finalOutput.Results = append(finalOutput.Results, QueryResult{
-				QueryKey: queryKey,
-				Error:    &errMsg,
-			})
-			continue
+			return failKey(queryKey, "query build failed", injErr)
 		}
 		encodedQuery := url.QueryEscape(injected)
 		url := fmt.Sprintf("https://%s/api/v1/query?from=%d&to=%d&query=%s", site, from, to, encodedQuery)
@@ -1045,37 +1174,31 @@ func (s *DatadogMetricSource) FetchMetricsQuery(
 			"DD-APPLICATION-KEY": appKey,
 		}
 
-		body, err := common.HttpGet(url, common.HttpWithHeaders(headers))
+		bodyBytes, err := fetchDatadogAPI(ctx, url, headers, retryDeadline)
 		if err != nil {
-			return OutputMetricQuery{}, fmt.Errorf("failed to make request to datadog metrics api for query %q: %w", queryKey, err)
+			return failKey(queryKey, "request failed", err)
 		}
 
-		defer func() {
-			if cerr := body.Body.Close(); cerr != nil {
-				ctx.GetLogger().Error("datadog metrics failed to close response body", "error", cerr)
-			}
-		}()
-
-		bodyBytes, err := io.ReadAll(body.Body)
-		if err != nil {
-			return OutputMetricQuery{}, fmt.Errorf("failed to read body for query %q: %w", queryKey, err)
-		}
 		var data map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &data); err != nil {
-			return OutputMetricQuery{}, fmt.Errorf("failed to parse JSON for query %q: %w", queryKey, err)
+			return failKey(queryKey, "parsing the response failed", err)
 		}
 
 		if errMsg, ok := data["error"].(string); ok {
-			return OutputMetricQuery{}, fmt.Errorf("datadog query %q returned error: %s", queryKey, errMsg)
+			return failKey(queryKey, "datadog reported an error", errors.New(errMsg))
 		}
 		queryOutput, err := datadogMapToOutputMetricWithKey(bodyBytes, queryKey)
 		if err != nil {
-			return OutputMetricQuery{}, fmt.Errorf("failed to map datadog response for query %q: %w", queryKey, err)
+			return failKey(queryKey, "mapping the response failed", err)
 		}
-		finalOutput.Results = append(finalOutput.Results, queryOutput.Results...)
+		// Report the query that actually ran, as the other sources do. Without it a
+		// caller showing "what was asked" (the executed-query tooltip, an evidence
+		// card's metadata) had nothing to show for Datadog.
+		for i := range queryOutput.Results {
+			queryOutput.Results[i].Query = injected
+		}
+		return queryOutput.Results
 	}
-
-	return finalOutput, nil
 }
 
 type DatadogResponse struct {
@@ -1088,18 +1211,22 @@ type DatadogResponse struct {
 }
 
 type SeriesItem struct {
-	Unit        []*UnitItem `json:"unit"`
-	QueryIdx    int         `json:"query_index"`
-	Aggr        string      `json:"aggr"`
-	Metric      string      `json:"metric"`
-	TagSet      []string    `json:"tag_set"`
-	Expression  string      `json:"expression"`
-	Scope       string      `json:"scope"`
-	Interval    int         `json:"interval"`
-	Start       int64       `json:"start"`
-	End         int64       `json:"end"`
-	PointList   [][]float64 `json:"pointlist"`
-	DisplayName string      `json:"display_name"`
+	Unit       []*UnitItem `json:"unit"`
+	QueryIdx   int         `json:"query_index"`
+	Aggr       string      `json:"aggr"`
+	Metric     string      `json:"metric"`
+	TagSet     []string    `json:"tag_set"`
+	Expression string      `json:"expression"`
+	Scope      string      `json:"scope"`
+	Interval   int         `json:"interval"`
+	Start      int64       `json:"start"`
+	End        int64       `json:"end"`
+	// PointList is [[epoch_millis, value], ...]. The value is nullable: Datadog
+	// emits [ts, null] for an interval the series has no data in, which is normal
+	// on a per-pod query whose pods each lived for part of the window. Decoded as
+	// []float64 those nulls became a measured 0 — see datadogMapToOutputMetricWithKey.
+	PointList   [][]*float64 `json:"pointlist"`
+	DisplayName string       `json:"display_name"`
 }
 
 type UnitItem struct {
@@ -1138,20 +1265,32 @@ func datadogMapToOutputMetricWithKey(bodyBytes []byte, queryKey string) (OutputM
 
 		var timestamps []int64
 		var values []float64
+		gaps := 0
 		for _, point := range s.PointList {
-			if len(point) == 2 {
-				t := int64(point[0] / 1000) // ms to sec
-				v := point[1]
-				timestamps = append(timestamps, t)
-				values = append(values, v)
+			if len(point) != 2 || point[0] == nil {
+				continue
 			}
+			timestamps = append(timestamps, int64(*point[0]/1000)) // ms to sec
+			if point[1] == nil {
+				// A gap, not a zero. Carried as NaN so Result.MarshalJSON sends it as
+				// null at the right position, and counted so the caller can tell an
+				// interval with no data from one that measured zero.
+				values = append(values, math.NaN())
+				gaps++
+				continue
+			}
+			values = append(values, *point[1])
 		}
 
-		qr.Payload = append(qr.Payload, Result{
+		result := Result{
 			Metric:     metricMap,
 			Timestamps: timestamps,
 			Values:     values,
-		})
+		}
+		if gaps > 0 {
+			result.NonFinite = map[string]int{nonFiniteGap: gaps}
+		}
+		qr.Payload = append(qr.Payload, result)
 	}
 
 	return OutputMetricQuery{Results: []QueryResult{qr}}, nil

@@ -583,16 +583,66 @@ func ResolveSubjectNameViaAgent(sc *security.RequestContext, accountId, title, d
 		return ""
 	}
 
-	name := strings.TrimSpace(response.Response[0])
-	if name == "" || strings.EqualFold(name, webhookSubjectAgentNotFound) {
+	answer := strings.TrimSpace(response.Response[0])
+	if answer == "" {
 		labels["nb_llm_match"] = "not_found"
 		return ""
 	}
-	labels["nb_llm_match"] = name
-	if labels["service"] == "" {
-		labels["service"] = name
+	// Check the sentinel against the primary name, not the raw answer: a malformed
+	// reply like "Not Found, cart-service" doesn't equal "Not Found" whole, but its
+	// primary name is the sentinel, which must not be treated as a real subject.
+	primary := primarySubjectName(answer)
+	if strings.EqualFold(primary, webhookSubjectAgentNotFound) {
+		labels["nb_llm_match"] = "not_found"
+		return ""
 	}
-	return name
+	// Guards against a pipeline error (e.g. an expired Google AI CachedContent
+	// slot's 403) landing as response text instead of a Go error.
+	if !looksLikePlausibleSubject(answer) {
+		sc.GetLogger().Warn("subject_resolution: rejecting implausible extractor answer", "answer", answer)
+		labels["nb_llm_match"] = "not_found"
+		return ""
+	}
+	labels["nb_llm_match"] = answer
+	// The full answer goes on the `service` label so an alert spanning several
+	// services records all of them; only the primary one becomes the subject below.
+	if labels["service"] == "" {
+		labels["service"] = answer
+	}
+	return primary
+}
+
+// primarySubjectName reduces the extractor's answer to the single name that becomes
+// the event's subject. The agent may answer with several comma-separated services,
+// most relevant first (see AllowsMultipleOptions in llm-server), but subject_name is
+// one column with workload matching bolted to it: the comma-joined string matches no
+// workload, so the event would land with no namespace, kind or cloud_resource_id and
+// enrichers would query a workload that does not exist. Taking the first name keeps
+// the subject matchable while the `service` label retains the full list.
+//
+// Single-name answers — every answer before multi-select, and still the normal case —
+// contain no comma, and strings.Cut returns them whole.
+func primarySubjectName(answer string) string {
+	primary, _, _ := strings.Cut(answer, ",")
+	return strings.TrimSpace(primary)
+}
+
+// implausibleSubjectNameChars matches characters no real k8s name has but prose does.
+var implausibleSubjectNameChars = regexp.MustCompile(`[\s:\[\]]`)
+
+// looksLikePlausibleSubject checks per-token, not the raw string — the multi-match
+// separator (", ") itself contains a space.
+func looksLikePlausibleSubject(answer string) bool {
+	for _, tok := range strings.Split(answer, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue // a trailing/stray comma, same as primarySubjectName tolerates
+		}
+		if implausibleSubjectNameChars.MatchString(tok) {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveSubjectViaLLM resolves an event's subject via the
@@ -725,6 +775,86 @@ func ResolveSubjectFromTitlePodName(sc *security.RequestContext, e *EventIncomin
 	return false
 }
 
+// lookupPodOwnerInOnlyNamespace is lookupPodOwnerByName for a pod whose namespace
+// is unknown. A name present in more than one namespace of the account ("redis-0")
+// is a miss: picking the most recently seen one would link the alert to a workload
+// in a namespace the alert never named.
+func lookupPodOwnerInOnlyNamespace(sc *security.RequestContext, dbms *database.DatabaseManager, tenantId, accountId, podName string) (ownerName, ownerKind, ns string, ok bool) {
+	var rows []struct {
+		WorkloadName string  `db:"workload_name"`
+		WorkloadType *string `db:"workload_type"`
+		Namespace    string  `db:"namespace"`
+	}
+	query := `
+		SELECT DISTINCT ON (namespace) workload_name, workload_type, namespace
+		FROM k8s_pods
+		WHERE tenant_id = $1
+		  AND cloud_account_id = $2
+		  AND name = $3
+		  AND workload_name IS NOT NULL AND workload_name <> ''
+		ORDER BY namespace, last_seen DESC NULLS LAST
+		LIMIT 2`
+	if err := dbms.Db.Select(&rows, query, tenantId, accountId, podName); err != nil {
+		sc.GetLogger().Error("subject_resolution: pod-candidate owner lookup failed", "error", err, "pod", podName)
+		return "", "", "", false
+	}
+	if len(rows) != 1 {
+		return "", "", "", false
+	}
+	var workloadType string
+	if rows[0].WorkloadType != nil {
+		workloadType = *rows[0].WorkloadType
+	}
+	return rows[0].WorkloadName, strings.ToLower(workloadType), rows[0].Namespace, true
+}
+
+// ResolveSubjectFromPodCandidates resolves the subject from e.PodNameCandidates:
+// the first candidate that is a pod in the inventory names the alert's pod, and its
+// owning workload becomes the subject, as ResolveSubjectFromTitlePodName does for a
+// pod named in the title. A candidate is matched by exact name, so a value that is
+// not a pod (a container or service name in the same group id) is simply a miss.
+// Returns true on a match.
+func ResolveSubjectFromPodCandidates(sc *security.RequestContext, e *EventIncomingWebhook, accountId string) bool {
+	if sc == nil || sc.GetSecurityContext() == nil || e == nil || len(e.PodNameCandidates) == 0 || accountId == "" {
+		return false
+	}
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		sc.GetLogger().Error("subject_resolution: failed to get database manager", "error", err)
+		return false
+	}
+	tenantId := sc.GetSecurityContext().GetTenantId()
+
+	for _, pod := range e.PodNameCandidates {
+		if pod == "" {
+			continue
+		}
+		var owner, kind, ns string
+		var ok bool
+		if e.EventSubjectNamespace != "" {
+			owner, kind, ns, ok = lookupPodOwnerByName(sc, dbms, tenantId, accountId, e.EventSubjectNamespace, pod)
+		} else {
+			owner, kind, ns, ok = lookupPodOwnerInOnlyNamespace(sc, dbms, tenantId, accountId, pod)
+		}
+		if !ok {
+			continue
+		}
+		if e.Investigation.Labels == nil {
+			e.Investigation.Labels = map[string]string{}
+		}
+		e.Investigation.Labels["pod"] = pod
+		e.Investigation.Labels["nb_subject_resolution"] = "pod_candidate"
+		e.EventSubjectName = owner
+		e.EventSubjectKind = kind
+		if e.EventSubjectNamespace == "" {
+			e.EventSubjectNamespace = ns
+		}
+		MatchWorkloadAndEnrich(sc, e, accountId)
+		return true
+	}
+	return false
+}
+
 // hasWorkloadValidationInput reports whether an event carries anything the
 // k8s_workloads inventory can be asked about: a subject the webhook resolved
 // itself, or candidate names it offered via nb_workload_candidates (e.g. the
@@ -754,6 +884,12 @@ func enrichEventsWithSubjectResolution(sc *security.RequestContext, events []Eve
 		}
 		if events[i].Investigation.Labels == nil {
 			events[i].Investigation.Labels = map[string]string{}
+		}
+		// Pod candidates go first: a pod names its workload and namespace exactly,
+		// and resolving it here keeps the pod on the event. Only parsers that set
+		// PodNameCandidates take this path.
+		if ResolveSubjectFromPodCandidates(sc, &events[i], accountId) {
+			continue
 		}
 		if hasWorkloadValidationInput(&events[i]) {
 			MatchWorkloadAndEnrich(sc, &events[i], accountId)

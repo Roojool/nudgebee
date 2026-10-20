@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Any
+from typing import Any, Optional
 
 import tiktoken
 from google import genai
@@ -69,6 +69,60 @@ def persist_search_embedding_usage(account_id: str, embedding_model, query: str)
         logger.error(f"[EmbeddingTracker] Failed to persist search embedding usage: {e}")
 
 
+def persist_figure_description_usage(
+    account_id: str,
+    collection_name: str,
+    provider: str,
+    model: str,
+    total_tokens: int,
+    figure_count: int,
+    status: str = "success",
+    error_message: Optional[str] = None,
+) -> None:
+    """Track what describing a document's figures cost.
+
+    Written to rag_embedding_token_usage like every other load-time cost this
+    service incurs, under its own operation_type. Not
+    llm_conversation_token_usage: that table requires a conversation_id and a
+    message_id, and a knowledge-base load has neither — its existing caller
+    skips the write rather than inventing them.
+
+    The load-history query reads operation_type='batch_embedding' only, so these
+    rows add a cost record without appearing as extra loads.
+    """
+    try:
+        with engine.connect() as connection:
+            with connection.begin():
+                connection.execute(
+                    text("""
+                        INSERT INTO rag_embedding_token_usage (
+                            account_id, is_global, collection_name,
+                            embedding_provider, embedding_model,
+                            total_tokens, document_count,
+                            operation_type, request_status, error_message
+                        ) VALUES (
+                            :account_id, :is_global, :collection_name,
+                            :provider, :model,
+                            :total_tokens, :figure_count,
+                            'figure_description', :status, :error_message
+                        );
+                        """),
+                    {
+                        "account_id": account_id or "global",
+                        "is_global": not bool(account_id) or account_id == "global",
+                        "collection_name": collection_name,
+                        "provider": provider,
+                        "model": model,
+                        "total_tokens": total_tokens,
+                        "figure_count": figure_count,
+                        "status": status,
+                        "error_message": error_message,
+                    },
+                )
+    except Exception as e:
+        logger.error(f"[EmbeddingTracker] Failed to persist figure description usage: {e}")
+
+
 class EmbeddingTracker:
     def __init__(
         self,
@@ -79,9 +133,16 @@ class EmbeddingTracker:
         trigger_type="system_sync",
         module=None,
         expected_document_count=None,
+        run_id=None,
     ):
         self.total_tokens = 0
+        # Chunks embedded. Drives the token-rate logging, which is per
+        # embedded unit.
         self.total_docs = 0
+        # Source documents embedded. A long document is embedded as several
+        # chunks, so counting units would report the Load History column in
+        # chunks — it read in documents until chunking was introduced.
+        self._document_keys: set = set()
         self.account_id = account_id if account_id else "global"
         self.is_global = not bool(account_id) or account_id == "global"
         self.collection_name = collection_name
@@ -92,9 +153,12 @@ class EmbeddingTracker:
         self.trigger_type = trigger_type
         self.module = module
         self.expected_document_count = expected_document_count
+        # Identifies this load. Stamped on every point indexed in it too, so "which
+        # documents did this run touch" is a filtered query rather than a stored manifest.
+        self.run_id = run_id
         self.load_start_time = None
 
-    def record(self, *, doc_id, text, embedding_model, usage_metadata=None):
+    def record(self, *, doc_id, text, embedding_model, usage_metadata=None, document_key=None):
         """Capture provider, token usage, and model details."""
         if self.llm_provider is None:
             self.llm_provider = get_provider_name(embedding_model.__class__.__name__)
@@ -114,6 +178,7 @@ class EmbeddingTracker:
 
         self.total_tokens += tokens
         self.total_docs += 1
+        self._document_keys.add(document_key or doc_id)
         logger.info(
             f"[EmbeddingTracker] Added {tokens} tokens for {doc_id}. "
             f"Total tokens for collection '{self.collection_name}': {self.total_tokens}"
@@ -139,6 +204,8 @@ class EmbeddingTracker:
         if self.load_start_time is not None:
             load_duration = time.time() - self.load_start_time
 
+        document_count = len(self._document_keys)
+
         try:
             # Use shared engine from db_query (module-level singleton with connection pooling)
             with engine.connect() as connection:
@@ -151,7 +218,7 @@ class EmbeddingTracker:
                             operation_type, request_status, error_message,
                             knowledgebase_id, load_duration_seconds,
                             triggered_by, trigger_type, module,
-                            expected_document_count
+                            expected_document_count, batch_id
                         )
                         VALUES (
                             :account_id, :is_global, :collection_name,
@@ -160,7 +227,7 @@ class EmbeddingTracker:
                             :operation_type, :request_status, :error_message,
                             :knowledgebase_id, :load_duration_seconds,
                             :triggered_by, :trigger_type, :module,
-                            :expected_document_count
+                            :expected_document_count, :batch_id
                         );
                         """)
                     connection.execute(
@@ -172,7 +239,7 @@ class EmbeddingTracker:
                             "embedding_provider": self.llm_provider,
                             "embedding_model": self.llm_model,
                             "total_tokens": self.total_tokens,
-                            "document_count": self.total_docs,
+                            "document_count": document_count,
                             "operation_type": "batch_embedding",
                             "request_status": status,
                             "error_message": error_message,
@@ -182,20 +249,22 @@ class EmbeddingTracker:
                             "trigger_type": self.trigger_type,
                             "module": self.module,
                             "expected_document_count": self.expected_document_count,
+                            "batch_id": self.run_id,
                         },
                     )
                     logger.info(
                         f"[EmbeddingTracker] Inserted record for collection "
                         f"'{self.collection_name}' with {self.total_tokens} tokens, "
-                        f"{self.total_docs} documents, duration={load_duration:.1f}s"
+                        f"{document_count} documents, duration={load_duration:.1f}s"
                         if load_duration
                         else f"[EmbeddingTracker] Inserted record for collection "
                         f"'{self.collection_name}' with {self.total_tokens} tokens, "
-                        f"{self.total_docs} documents"
+                        f"{document_count} documents"
                     )
 
             self.total_tokens = 0
             self.total_docs = 0
+            self._document_keys = set()
 
         except Exception as e:
             logger.error(f"[EmbeddingTracker] Failed to persist records: {e}")

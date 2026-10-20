@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"nudgebee/llm/common"
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
@@ -163,6 +164,20 @@ func (m ServerExecuteTool) Call(nbRequestContext core.NbToolContext, input core.
 		return core.NBToolResponse{}, errors.New("missing args or instance field")
 	}
 
+	// A dynamic ssh integration needs a target host per call. The planner
+	// keeps only the integration name, so without host_name derive the host
+	// from the instance (a discovered VM's id, IP, name or DNS name).
+	if command.HostName == "" {
+		resolved, err := resolveCallHost(nbRequestContext, command.Instance)
+		if err != nil {
+			return core.NBToolResponse{
+				Data:   cliRecoveryEnvelope(err.Error(), "", "", ""),
+				Status: core.NBToolResponseStatusError,
+			}, err
+		}
+		nbRequestContext.ToolConfig = resolved
+	}
+
 	response, err := m.executeShellCommand(nbRequestContext, command.Instance, command.Args, command.HostName, command.UserName)
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("server: unable to execute shell script", "error", err.Error())
@@ -194,7 +209,10 @@ func (m ServerExecuteTool) executeShellCommand(nbRequestContext core.NbToolConte
 	// the direct ExecuteContainerJob path so the override actually lands at
 	// the SSH command construction in common_relay.go / workspace.go. When
 	// no overrides are supplied the existing workspace path is unchanged.
-	if !hasOverride {
+	// vm_agent integrations run through the forager proxy agent, and the
+	// workspace shim re-loads the integration by name, dropping the target
+	// host a dynamic integration needs. Send them straight to the relay.
+	if !hasOverride && !isVMAgentMode(nbRequestContext.ToolConfig.Values) {
 		wm := workspace.NewWorkspaceManager()
 		// Use the command as-is, the shim for 'ssh' in the workspace pod will handle the relay call
 		response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, map[string]string{
@@ -295,7 +313,37 @@ func (m ServerExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestConte
 	input: kill -9 12345
 	answer: delete
 	`
+	if _, ok := confirmationArgs(input)["args"]; ok {
+		return "The input is a JSON object for server_command_executor. Classify the shell command in its args field; command is the execution mode and instance, host_name, and user_name identify the target. If args is missing or cannot be classified, answer unknown.\n\n" + prompt, nil
+	}
 	return prompt, nil
+}
+
+// A confirmation of one SSH operation must not approve another command or
+// target later in the same conversation.
+func (m ServerExecuteTool) ConfirmationKey(toolInput string) string {
+	return perActionConfirmationKey(m.Name(), toolInput)
+}
+
+func (m ServerExecuteTool) ConfirmationQuestion(toolInput string) string {
+	args := confirmationArgs(toolInput)
+	command, _ := args["args"].(string)
+	instance, _ := args["instance"].(string)
+	if strings.TrimSpace(command) == "" || strings.TrimSpace(instance) == "" {
+		return ""
+	}
+	host, _ := args["host_name"].(string)
+	user, _ := args["user_name"].(string)
+	if user != "" && host != "" {
+		return fmt.Sprintf("Run command %q on SSH instance %s as %s at host %s?", command, instance, user, host)
+	}
+	if user != "" {
+		return fmt.Sprintf("Run command %q on SSH instance %s as %s?", command, instance, user)
+	}
+	if host != "" {
+		return fmt.Sprintf("Run command %q on SSH instance %s at host %s?", command, instance, host)
+	}
+	return fmt.Sprintf("Run command %q on SSH instance %s?", command, instance)
 }
 
 func (m ServerExecuteTool) ConfigSchema(ctx *security.RequestContext) core.ToolConfigSchema {
@@ -386,5 +434,7 @@ func (m ServerExecuteTool) IdentifyConfig(ctx core.NbToolContext, input core.NBT
 		}
 	}
 
-	return core.ToolConfig{}, nil
+	// 3. A discovered VM reachable through a dynamic (forager ssh_access)
+	// integration: the returned copy carries the VM's IP as `host`.
+	return resolveVMTarget(ctx, instanceName, availableConfigs)
 }

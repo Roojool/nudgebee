@@ -33,6 +33,7 @@ export default function AddAccountForm() {
           case 'slack':
             return (
               <MessagingIntegrationTile
+                key='slack'
                 provider='slack'
                 displayName='Slack'
                 installUrl='/api/integrations/slack/install'
@@ -45,6 +46,7 @@ export default function AddAccountForm() {
           case 'discord':
             return (
               <MessagingIntegrationTile
+                key='discord'
                 provider='discord'
                 displayName='Discord'
                 installUrl={null}
@@ -129,6 +131,7 @@ export default function AddAccountForm() {
           case 'msteams':
             return (
               <MessagingIntegrationTile
+                key='ms_teams'
                 provider='ms_teams'
                 displayName='Microsoft Teams'
                 installUrl='/api/integrations/ms-teams/install'

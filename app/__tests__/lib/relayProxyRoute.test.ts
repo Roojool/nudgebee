@@ -58,3 +58,39 @@ describe('/api/proxy/relay/[relay] allowlist', () => {
     expect(res.body.error).toBe('invalid_relay_endpoint');
   });
 });
+
+// The relay reaches the cluster directly (pod shell, kubectl) with no RPC action to match
+// a key scope against, so a scoped API key must be refused before any account check.
+describe('/api/proxy/relay/[relay] scoped API keys', () => {
+  const internal = jest.requireMock('@lib/internal') as { decrypt: jest.Mock; decodeSessionJWT: jest.Mock };
+  const accountAccess = jest.requireMock('@lib/accountAccess') as { hasAccountAccess: jest.Mock };
+
+  async function callWithBearer(payload: Record<string, unknown>) {
+    internal.decrypt.mockResolvedValue('session-jwt');
+    internal.decodeSessionJWT.mockResolvedValue({ payload: { user_id: 'u1', tenant_id: 't1', ...payload } });
+    accountAccess.hasAccountAccess.mockClear();
+    const res = mockRes();
+    await handler(
+      {
+        method: 'POST',
+        query: { relay: 'request' },
+        headers: { authorization: 'Bearer enc' },
+        body: { account_id: 'a1' },
+      } as unknown as NextApiRequest,
+      res
+    );
+    return res;
+  }
+
+  it('refuses a scoped key with 403 before checking account access', async () => {
+    const res = await callWithBearer({ token_scopes: ['k8s:Read'] });
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error).toBe('token_scope_denied');
+    expect(accountAccess.hasAccountAccess).not.toHaveBeenCalled();
+  });
+
+  it('lets a full-access key through to the account check', async () => {
+    await callWithBearer({});
+    expect(accountAccess.hasAccountAccess).toHaveBeenCalled();
+  });
+});

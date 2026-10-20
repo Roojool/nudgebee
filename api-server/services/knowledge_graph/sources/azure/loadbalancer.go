@@ -191,3 +191,14 @@ func collectAzureBackendAddresses(addrs []interface{}) []interface{} {
 	}
 	return out
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:        []string{"applicationgateway", "applicationgateways", "loadbalancer", "loadbalancers"},
+		NodeType:     core.NodeTypeLoadBalancer,
+		SpecificType: "AzureLoadBalancer",
+		Extract:      (*AzureSource).extractLoadBalancerMetadata,
+	})
+}

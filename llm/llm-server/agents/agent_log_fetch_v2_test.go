@@ -14,11 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFetchLogsAgentV2_EmbedsV1Identity guards the embedding contract: v2 must
-// keep v1's tool name ("fetch_logs") and Custom planner type so it slots into
-// the same factory/registration without a router change.
-func TestFetchLogsAgentV2_EmbedsV1Identity(t *testing.T) {
-	a := &FetchLogsAgentV2{FetchLogsAgent: &FetchLogsAgent{}}
+// TestFetchLogsAgent_Identity guards the tool name ("fetch_logs") and Custom
+// planner type so the agent slots into its factory/registration correctly.
+func TestFetchLogsAgent_Identity(t *testing.T) {
+	a := &FetchLogsAgent{}
 	assert.Equal(t, FetchLogsAgentName, a.GetName())
 	assert.Equal(t, core.AgentPlannerTypeCustom, a.GetPlannerType())
 }
@@ -407,7 +406,7 @@ func TestCanonicalLogQueryGeneration_Live(t *testing.T) {
 
 	// Resolve the account's real provider + canonical label-mappings + labels,
 	// exactly as the agent does at request time.
-	agent := newFetchLogsAgentV2(account)
+	agent := newFetchLogsAgent(account)
 	require.NotEmpty(t, agent.provider.Provider, "account has no services-server log provider configured")
 	fields, indices := fetchLabelsAndIndices(account, agent.provider)
 	ctx := security.NewRequestContextForTenantAccountAdmin(tenant, user, []string{account})
@@ -539,11 +538,11 @@ func TestCanonicalLogQueryGeneration_Live(t *testing.T) {
 			require.NoError(t, err)
 			t.Logf("query=%q -> %s", tc.query, out)
 
-			// Byte-stable cases pin the EXACT canonical query; JSONEq compares
-			// semantically (ignores key order/whitespace), so only a wrong
-			// operator/field/value/structure fails.
+			// Byte-stable cases pin the exact canonical structure. _ilike values
+			// are normalized because the operator is case-insensitive, so
+			// %ERROR% and %error% are semantically equivalent.
 			if tc.expectedCanonical != "" {
-				assert.JSONEq(t, tc.expectedCanonical, out, "exact canonical mismatch for %q", tc.query)
+				assertCanonicalJSONEq(t, tc.expectedCanonical, out, tc.query)
 				return
 			}
 
@@ -557,6 +556,40 @@ func TestCanonicalLogQueryGeneration_Live(t *testing.T) {
 			}
 		})
 	}
+}
+
+func assertCanonicalJSONEq(t *testing.T, expected, actual, query string) {
+	t.Helper()
+	var expectedValue, actualValue any
+	require.NoError(t, json.Unmarshal([]byte(expected), &expectedValue))
+	require.NoError(t, json.Unmarshal([]byte(actual), &actualValue))
+	assert.Equal(t, normalizeCanonicalILikeValues(expectedValue), normalizeCanonicalILikeValues(actualValue), "exact canonical mismatch for %q", query)
+}
+
+func normalizeCanonicalILikeValues(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "_ilike" {
+				if pattern, ok := child.(string); ok {
+					typed[key] = strings.ToLower(pattern)
+					continue
+				}
+			}
+			typed[key] = normalizeCanonicalILikeValues(child)
+		}
+	case []any:
+		for i, child := range typed {
+			typed[i] = normalizeCanonicalILikeValues(child)
+		}
+	}
+	return value
+}
+
+func TestAssertCanonicalJSONEq_ILikeValuesAreCaseInsensitive(t *testing.T) {
+	expected := `{"where":{"_or":[{"content":{"_ilike":"%ERROR%"}},{"content":{"_ilike":"%FATAL%"}}]}}`
+	actual := `{"where":{"_or":[{"content":{"_ilike":"%error%"}},{"content":{"_ilike":"%fatal%"}}]}}`
+	assertCanonicalJSONEq(t, expected, actual, "ERROR or FATAL")
 }
 
 // TestShouldFallbackToKubectl_DistinguishesCantAskFromNoData pins the structural point:

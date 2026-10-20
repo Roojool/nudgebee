@@ -30,7 +30,7 @@ class URLRoutes:
     AUTO_PILOT_TASK = "/auto-pilot/task/{auto_pilot_id}"
 
     # Workflow / Automation routes
-    WORKFLOW = "/workflow/{workflow_id}"
+    WORKFLOW = "/automation/{workflow_id}"
 
     # Cloud Account routes
     CLOUD_ACCOUNT_DETAILS = "/cloud-account/details/{account_id}"
@@ -733,7 +733,7 @@ class NotificationSettings(BaseSettings):
     )
     task_retry_count: int = Field(5, validation_alias=AliasChoices("TASK_RETRY_COUNT", "task_retry_count"))
     slow_task_threshold_seconds: int = Field(
-        10, validation_alias=AliasChoices("SLOW_TASK_THRESHOLD_SECONDS", "slow_task_threshold_seconds")
+        30, validation_alias=AliasChoices("SLOW_TASK_THRESHOLD_SECONDS", "slow_task_threshold_seconds")
     )
     grouped_flush_delay_seconds: int = Field(
         3600, validation_alias=AliasChoices("GROUPED_FLUSH_DELAY_SECONDS", "grouped_flush_delay_seconds")

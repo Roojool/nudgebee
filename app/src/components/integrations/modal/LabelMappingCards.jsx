@@ -23,7 +23,8 @@ import React from 'react';
 import PropTypes from 'prop-types';
 import { Box, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import { Button } from '@ui/Button';
 import FilterDropdown from '@ui/FilterDropdown';
@@ -253,7 +254,7 @@ export default function LabelMappingCards({
                       tone='secondary'
                       size='xs'
                       composition='icon-only'
-                      icon={<DeleteOutlineIcon sx={{ fontSize: 16 }} />}
+                      icon={<SafeIcon src={DeleteIconRed} alt='delete' width={13} height={13} />}
                       aria-label='Remove account'
                       onClick={() => removeCard(cardIdx)}
                       data-testid={`${testIdPrefix}-remove-card-${cardIdx}`}
@@ -319,7 +320,7 @@ export default function LabelMappingCards({
                       tone='secondary'
                       size='xs'
                       composition='icon-only'
-                      icon={<DeleteOutlineIcon sx={{ fontSize: 16 }} />}
+                      icon={<SafeIcon src={DeleteIconRed} alt='delete' width={13} height={13} />}
                       aria-label='Remove mapping'
                       disabled={card.rows.length === 1 && !row.canonical && !row.field}
                       onClick={() => removeRow(cardIdx, rowIdx)}

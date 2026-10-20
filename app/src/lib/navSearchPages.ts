@@ -155,6 +155,9 @@ export const navSearchPages: NavSearchPage[] = [
   // "Access & Users" top-level tab as sibling sub-tabs (AnchorComponent's
   // parent/child hash routing) — Users is the default sub-tab, so its path
   // carries no child fragment.
+  // Admin landing dashboard — the default no-hash tab; still enumerated so it's
+  // reachable from global search like every other tab.
+  { group: 'Admin', label: 'Overview', path: '/user-management#overview' },
   { group: 'Admin', label: 'Users', path: '/user-management#access-users' },
   { group: 'Admin', label: 'Groups', path: '/user-management#access-users/groups' },
   { group: 'Admin', label: 'Ownership', path: '/user-management#access-users/ownership' },
@@ -167,15 +170,14 @@ export const navSearchPages: NavSearchPage[] = [
   // row leading to it would dead-end.
   { group: 'Admin', label: 'Roles', path: '/user-management#access-users/roles' },
   { group: 'Admin', label: 'Audit Log', path: '/user-management#access-users/audit-log' },
-  { group: 'Admin', label: 'Notification Rules', path: '/user-management#notification-rules' },
   { group: 'Admin', label: 'Integrations', path: '/user-management#integrations' },
+  { group: 'Admin', label: 'Notification Rules', path: '/user-management#notification-rules' },
   // Relocated from the Settings modal (see docs/ia-consolidation-plan.md,
   // PR 3) into one "AI & Tools" top-level tab, same sibling-sub-tab shape as
   // Access & Users above. Agents is the default sub-tab, so its path carries
   // no child fragment.
   { group: 'Admin', label: 'Agents', path: '/user-management#ai-tools' },
   { group: 'Admin', label: 'Tools & MCP', path: '/user-management#ai-tools/tools-mcp' },
-  { group: 'Admin', label: 'Functions', path: '/user-management#ai-tools/functions' },
   { group: 'Admin', label: 'Providers', path: '/user-management#ai-tools/providers' },
   { group: 'Admin', label: 'Gateway', path: '/user-management#ai-tools/gateway' },
   // EE-only sub-tabs (`eeOnly` in aiToolsConfig.js) are dropped from the Admin
@@ -304,7 +306,6 @@ export const integrationProviders: string[] = [
   'SOLARWINDS',
   'ES',
   'PINOT',
-  'HIVE',
   // queue
   'RABBITMQ',
   // ci_cd

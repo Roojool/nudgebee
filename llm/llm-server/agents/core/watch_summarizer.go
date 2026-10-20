@@ -124,7 +124,11 @@ func (s *llmSummarizer) renderPrompt(ctx *security.RequestContext, w watch.Watch
 		"source_command":    truncatePromptInput(extractSourceCommand(w.SourceConfig), 500),
 		"predicate_summary": truncatePromptInput(predicate, 300),
 		"terminal_status":   string(status),
-		"raw_outcome":       truncatePromptInput(rawOutcome, 2000),
+		// raw_outcome is the polled command's own output (or the error text
+		// from trying to run it), and this summary is appended verbatim to the
+		// user's chat thread. Frame it as untrusted data so a crafted pod name,
+		// workflow name or log line cannot steer the message the user reads.
+		"raw_outcome": watch.WrapUntrusted(truncatePromptInput(rawOutcome, 2000)),
 	}
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, data); err != nil {

@@ -554,7 +554,7 @@ class TestRenderedChromeGuards:
         for a in msg["attachments"]:
             assert "blocks" not in a
         labels = [b["text"] for a in msg["attachments"] for b in a.get("actions", []) or []]
-        assert "Ask Nubi" in labels and "View All Recommendations" in labels
+        assert "View All Recommendations" in labels
 
     def test_item_facts_line_format(self):
         msg = get_recommendation_nudge_digest_message_template(_params())

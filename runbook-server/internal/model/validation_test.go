@@ -406,6 +406,44 @@ func TestValidateWorkflow(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "filter_invalid_syntax")
 	})
+
+	t.Run("Event trigger - accounts list accepted", func(t *testing.T) {
+		wf := eventWorkflow(map[string]any{"event_type": "alert", "accounts": []any{"acct-a", "acct-b"}})
+		assert.NoError(t, model.ValidateWorkflow(wf))
+	})
+
+	t.Run("Event trigger - accounts not an array rejected", func(t *testing.T) {
+		wf := eventWorkflow(map[string]any{"event_type": "alert", "accounts": "acct-a"})
+		err := model.ValidateWorkflow(wf)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "accounts_invalid_type")
+	})
+
+	t.Run("Event trigger - empty accounts item rejected", func(t *testing.T) {
+		wf := eventWorkflow(map[string]any{"event_type": "alert", "accounts": []any{"acct-a", ""}})
+		err := model.ValidateWorkflow(wf)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "accounts_invalid_item")
+	})
+}
+
+func TestTrigger_ListenAccounts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		trigger model.Trigger
+		want    []string
+	}{
+		{"event without accounts listens to own", model.Trigger{Type: model.WorkflowTriggerEvent, Params: map[string]any{"event_type": "x"}}, []string{"own"}},
+		{"event with empty accounts listens to own", model.Trigger{Type: model.WorkflowTriggerEvent, Params: map[string]any{"accounts": []any{}}}, []string{"own"}},
+		{"event accounts replace own", model.Trigger{Type: model.WorkflowTriggerEvent, Params: map[string]any{"accounts": []any{"a", "b"}}}, []string{"a", "b"}},
+		{"optimization clusters are listen accounts", model.Trigger{Type: model.WorkflowTriggerOptimization, Params: map[string]any{"clusters": []string{"c"}}}, []string{"c"}},
+		{"optimization ignores event accounts param", model.Trigger{Type: model.WorkflowTriggerOptimization, Params: map[string]any{"accounts": []any{"a"}}}, []string{"own"}},
+		{"other trigger types listen to own", model.Trigger{Type: model.WorkflowTriggerSchedule, Params: map[string]any{"accounts": []any{"a"}}}, []string{"own"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.trigger.ListenAccounts("own"))
+		})
+	}
 }
 
 // TestValidateWorkflow_TriggerNilParams pins the behaviour of every trigger type when

@@ -65,6 +65,11 @@ type sshParams struct {
 	HostName        string `json:"host_name,omitempty"`
 	UserName        string `json:"user_name,omitempty"`
 	AccountId       string `json:"account_id,omitempty"`
+	// Host is an alias for HostName (HostName wins if both are set on the
+	// k8s path; Host wins on the vm_agent path). Port targets a non-default
+	// ssh port on both paths; 0 keeps the default.
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
 }
 
 func (m SSH) Name() string {
@@ -422,7 +427,16 @@ func (m SSH) Execute(ctx playbooks.PlaybookActionContext, rawParams map[string]a
 		return nil, errors.New("integration not found")
 	}
 
-	resp, err := m.executeInternal(params.AccountId, integration.Configs, params)
+	if params.Port < 0 || params.Port > 65535 {
+		return nil, fmt.Errorf("invalid port %d: must be 1-65535", params.Port)
+	}
+
+	var resp map[string]any
+	if sshUsesProxyAgent(integration.Configs) {
+		resp, err = m.executeViaProxyAgent(params.AccountId, integration, params)
+	} else {
+		resp, err = m.executeInternal(params.AccountId, integration.Configs, withK8sHostAlias(params))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -432,6 +446,68 @@ func (m SSH) Execute(ctx playbooks.PlaybookActionContext, rawParams map[string]a
 		"query":                rawParams,
 	}
 	return playbooks.NewPlaybookActionResponseJson(resp, map[string]any{}, []playbooks.PlaybookActionResponseInsight{}, metadata), err
+}
+
+// sshProxyModeLookup / executeProxySSH are indirections so tests can assert the
+// vm_agent relay payload without a database or relay server.
+var (
+	sshProxyModeLookup = playbooks.LookupSSHProxyMode
+	executeProxySSH    = playbooks.ExecuteProxySSHCommand
+)
+
+func sshConfigValue(configs []core.IntegrationConfigValue, name string) string {
+	for _, c := range configs {
+		if strings.EqualFold(c.Name, name) {
+			return strings.TrimSpace(c.Value)
+		}
+	}
+	return ""
+}
+
+// sshUsesProxyAgent reports whether the integration is served by a proxy agent
+// (forager) rather than the k8s workspace-pod path.
+func sshUsesProxyAgent(configs []core.IntegrationConfigValue) bool {
+	return sshConfigValue(configs, "connection_mode") == "vm_agent"
+}
+
+// executeViaProxyAgent runs the command through the forager ssh-proxy that
+// owns this vm_agent integration (relay ssh_command), the same call the
+// proxy_ssh_command action makes. Target host: per-call host/host_name >
+// integration host; a dynamic-mode proxy with neither fails before the relay.
+func (m SSH) executeViaProxyAgent(accountId string, integration core.IntegrationDto, params sshParams) (map[string]any, error) {
+	datasourceKey := sshConfigValue(integration.Configs, "datasource_key")
+	if datasourceKey == "" {
+		if integration.Id == "" {
+			return nil, errors.New("vm_agent integration missing datasource_key config value")
+		}
+		datasourceKey = integration.Id
+	}
+
+	paramHost := params.Host
+	if paramHost == "" {
+		paramHost = params.HostName
+	}
+	host, err := playbooks.ResolveProxySSHTarget(paramHost, sshConfigValue(integration.Configs, "host"), params.Port, integration.Name, sshProxyModeLookup(integration.Id))
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := executeProxySSH(playbooks.ProxySSHCommand{
+		AccountID:     accountId,
+		DatasourceKey: datasourceKey,
+		AgentType:     sshConfigValue(integration.Configs, "agent_type"),
+		Command:       params.Command,
+		Host:          host,
+		Port:          params.Port,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = map[string]any{}
+	}
+	result["command"] = params.Command
+	return result, nil
 }
 
 // resolveSSHTarget computes the user@host pair that executeInternal
@@ -509,6 +585,27 @@ func sshShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// withK8sHostAlias maps the `host` param onto the k8s path's per-call
+// host_name override (host_name wins if both are set); resolveSSHTarget
+// regex-validates it before interpolation.
+func withK8sHostAlias(params sshParams) sshParams {
+	if params.HostName == "" {
+		params.HostName = params.Host
+	}
+	return params
+}
+
+// buildK8sSSHCommand renders the workspace-pod ssh command. userAndHost must
+// come from resolveSSHTarget (regex-vetted); port is an int (0 = default, no
+// -p flag, so the command is byte-identical to the pre-port template).
+func buildK8sSSHCommand(userAndHost string, port int, command string) string {
+	portFlag := ""
+	if port > 0 {
+		portFlag = fmt.Sprintf(" -p %d", port)
+	}
+	return fmt.Sprintf(`mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10%s %s %s`, portFlag, userAndHost, sshShellQuote(command))
+}
+
 func (m SSH) executeInternal(accountId string, configs []core.IntegrationConfigValue, params sshParams) (map[string]any, error) {
 	secretName := ""
 	for _, integrationConfig := range configs {
@@ -544,7 +641,7 @@ func (m SSH) executeInternal(accountId string, configs []core.IntegrationConfigV
 	// firewalled) surface within 10s; without it the only signal is the 60s
 	// pod-execution timeout, which looks like "command hung" to the LLM and
 	// triggers expensive retry loops.
-	finalCommand := fmt.Sprintf(`mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 %s %s`, userAndHost, sshShellQuote(params.Command))
+	finalCommand := buildK8sSSHCommand(userAndHost, params.Port, params.Command)
 
 	cliResp, err := relay.CommandExecutor(accountId, finalCommand, secretName, map[string]string{})
 

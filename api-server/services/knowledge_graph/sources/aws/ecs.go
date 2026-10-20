@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 	"strings"
 )
 
@@ -147,4 +148,54 @@ func extractECSClusterNameFromServiceARN(arn string) string {
 
 	// First part is the cluster name
 	return pathParts[0]
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "AmazonECS",
+		NodeType:     core.NodeTypeCloudResource,
+		SpecificType: "ECSCluster",
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonECS",
+		Types:        []string{"cluster"},
+		NodeType:     core.NodeTypeManagedCluster,
+		SpecificType: "ECSCluster",
+		Extract:      (*AWSSource).extractClusterMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonECS",
+		Types:        []string{"service"},
+		NodeType:     core.NodeTypeWorkload,
+		SpecificType: "ECSService",
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// ECS services run in their cluster.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeWorkload, Name: "ecs_service",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createECSServiceEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). A service owns its RUNS_IN edge to its
+// cluster; both services and clusters can be created from their rows.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"ECSService"},
+		Creatable:     true,
+		Context:       []core.NodeType{core.NodeTypeManagedCluster},
+		Signature:     signature(edgeKind(core.RelationshipRunsIn, "ecs_cluster")),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createECSServiceEdges([]*core.DbNode{node}, lookup, req), nil
+	})
+
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"ECSCluster"},
+		Creatable:     true,
+	}, nil)
 }

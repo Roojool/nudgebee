@@ -87,12 +87,21 @@ resources:
   # of ~556Mi baseline, so steady state is ~1Gi. The request is deliberately above
   # that at 1.5Gi so the scheduler reserves headroom rather than the bare figure;
   # the 4Gi limit absorbs retrieval bursts. Do not lower the request to 1Gi.
+  #
+  # Memory left as-is on purpose. Measured averages are lower than the note above
+  # assumes (419-702Mi on small estates, 493Mi on the largest), so the 1.5Gi request
+  # is likely conservative — but the note is a deliberate decision by the owner and
+  # is not being reversed on observation alone. See docs/sizing-and-tiers.md.
+  # CPU is different: p95 is 6-191m on every deployment except one carrying benchmark
+  # load, where sustained reranking pushed it to 1.4 cores and it was throttled 57% of
+  # the time against this 2000m limit. Keep the limit generous; the request was 500m
+  # against a 6-191m p95.
   limits:
     cpu: 2000m
     memory: 4Gi
   requests:
-    cpu: 500m
-    memory: 1536Mi
+    cpu: 200m
+    memory: 1.5Gi
 
 livenessProbe:
   httpGet:

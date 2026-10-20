@@ -269,6 +269,67 @@ const apiIntegrations = {
     }
   },
 
+  // Activity Log for one webhook integration: the paginated event list (newest
+  // first) plus the two widget counts (total, processed), in a single round trip.
+  // Scoped by integration_id; tenant isolation + integrations RBAC are enforced
+  // server-side by the query-engine table definitions.
+  listWebhookEvents: async function ({ integrationId, accountId, startDate, endDate, limit = 10, offset = 0 }) {
+    // Shared base filter: integration scope + optional account / date-range
+    // narrowing. Applied to the list AND both count widgets so the numbers and
+    // the rows always describe the same filtered set.
+    const base = { integration_id: { _eq: integrationId } };
+    if (accountId) {
+      base.account_id = { _eq: accountId };
+    }
+    if (startDate && endDate) {
+      base._and = [
+        { event_created_at: { _gte: new Date(startDate).toISOString() } },
+        { event_created_at: { _lte: new Date(endDate).toISOString() } },
+      ];
+    }
+    const scopeWhere = gqlStringify(base);
+    const processedWhere = gqlStringify({ ...base, processing_status: { _eq: 'processed' } });
+    const LIST_WEBHOOK_EVENTS = `
+    query ListWebhookEvents($limit: Int!, $offset: Int!) {
+      webhook_events: integrations_list_webhook_events(where: ${scopeWhere}, limit: $limit, offset: $offset, order_by: [{column: "event_created_at", order: desc}]) {
+        rows {
+          id
+          event_title
+          event_type
+          event_status
+          event_priority
+          event_url
+          event_created_at
+          processing_status
+          raw
+        }
+      }
+      total: integrations_aggregate_webhook_events(where: ${scopeWhere}) {
+        rows {
+          count
+        }
+      }
+      processed: integrations_aggregate_webhook_events(where: ${processedWhere}) {
+        rows {
+          count
+        }
+      }
+    }
+    `;
+    try {
+      const response = await queryGraphQL(LIST_WEBHOOK_EVENTS, 'ListWebhookEvents', { limit, offset });
+      const data = response?.data?.data || {};
+      return {
+        events: data.webhook_events?.rows || [],
+        total: data.total?.rows?.[0]?.count || 0,
+        processed: data.processed?.rows?.[0]?.count || 0,
+      };
+    } catch (err) {
+      console.log('failed to list webhook events-', err);
+      return { events: [], total: 0, processed: 0 };
+    }
+  },
+
   addIntegrations: async function (data) {
     const ADD_INTEGRATION = `
     mutation AddIntegrations($data: CreateIntegrationConfigRequest!) {

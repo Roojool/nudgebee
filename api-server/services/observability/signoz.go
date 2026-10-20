@@ -8,20 +8,234 @@ import (
 	"nudgebee/services/query"
 	"nudgebee/services/relay"
 	"nudgebee/services/security"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
 // SignozSource is a LogSource implementation for Signoz.
 type SignozSource struct{}
 
-func (s *SignozSource) GetLabelMapping() map[string]string {
-	return map[string]string{}
+// signozLogLabelMapping maps the canonical log vocabulary onto SigNoz's own
+// attribute names.
+//
+// SigNoz stores OTel resource attributes under their dotted semantic-convention
+// names (`k8s.namespace.name`) and the log level in the `severity_text` column.
+// FlattenSignozQuery passes a field straight through as an attribute key, so an
+// unmapped canonical name (`namespace`, `level`) reaches SigNoz as an attribute
+// that does not exist and matches nothing — with a success status and no error.
+// Measured on SigNoz v0.51 and v0.145: `level = ERROR` and `namespace = x` both
+// returned 0 rows where `severity_text` / `k8s.namespace.name` returned the data,
+// which is how Nubi answered "no ERROR logs" over logs that existed.
+//
+// `message` is the spelling every producer is moving to (#39573); SigNoz calls the
+// log line `body`. The rest mirrors cubeAPMLogLabelMapping (also dotted OTel
+// names), except `service` and the level, which SigNoz keeps as `service.name`
+// and `severity_text`. Deployments whose shipper uses other names remap
+// per-account via the label-mapping override rather than editing this table.
+var signozLogLabelMapping = map[string]string{
+	"message":   "body",
+	"namespace": signozNamespaceKey,
+	"pod":       signozPodKey,
+	"container": "k8s.container.name",
+	"node":      "k8s.node.name",
+	"workload":  "k8s.deployment.name",
+	"app":       "k8s.deployment.name",
+	"cluster":   "k8s.cluster.name",
+	"host":      "host.name",
+	"hostname":  "host.name",
+	"service":   "service.name",
+	"severity":  "severity_text",
+	"level":     "severity_text",
 }
 
+// signozLabelValueParams resolves the attribute key and tag type for a label-value
+// lookup. A canonical name is mapped through signozLogLabelMapping and looked up
+// as a resource attribute: the caller's tag type described the canonical label,
+// not the SigNoz key it became. Every mapped key is an OTel resource attribute
+// except severity_text and body, which are columns SigNoz answers under any tag
+// type. Measured on v0.51 and v0.145: "resource" returned values for
+// k8s.namespace.name, service.name and severity_text; "tag" and an empty tag type
+// returned nothing for the resource attributes.
+func signozLabelValueParams(labelName string, tagType any) (string, any) {
+	if mapped, ok := signozLogLabelMapping[labelName]; ok {
+		return mapped, "resource"
+	}
+	return labelName, tagType
+}
+
+// signozSeriesPoints reads one aggregate series' points. SigNoz returns them as
+// `values: [{timestamp, value}]` with the value as a numeric STRING ("2");
+// `points` with float values is accepted too. Reading only `points` as floats
+// made every log-group count 0 on both v0.51 and v0.145, and the Log Groups
+// page — which hides zero-count groups — always empty.
+//
+// Timestamps come back in Unix SECONDS, the LogGroup contract every other
+// provider follows (the Log Groups page multiplies by 1000); SigNoz reports
+// milliseconds. Each point is moved from its bucket's start to its end, capped at
+// the query's end: the page shows the latest point as "Last Time" and anchors the
+// drill-down there, and a bucket start is up to an hour before the logs it counts.
+func signozSeriesPoints(series map[string]any, endTimeMs int64) ([]int64, []float64) {
+	endSec := logGroupTimestampSeconds(endTimeMs)
+	raw, ok := series["values"].([]any)
+	if !ok {
+		raw, _ = series["points"].([]any)
+	}
+	timestamps := make([]int64, 0, len(raw))
+	values := make([]float64, 0, len(raw))
+	for _, p := range raw {
+		point, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		val, okVal := signozNumber(point["value"])
+		ts, okTs := signozNumber(point["timestamp"])
+		if !okVal || !okTs {
+			continue
+		}
+		bucketEnd := logGroupTimestampSeconds(int64(ts)) + signozLogGroupStepSeconds
+		if endSec > 0 && bucketEnd > endSec {
+			bucketEnd = endSec
+		}
+		timestamps = append(timestamps, bucketEnd)
+		values = append(values, val)
+	}
+	return timestamps, values
+}
+
+// signozLogGroupStepSeconds is the bucket width of both SigNoz log-group queries;
+// signozSeriesPoints converts bucket starts to bucket ends with it.
+const signozLogGroupStepSeconds = 3600
+
+// signozSeverityKey is the SigNoz column canonical `level`/`severity` map to.
+const signozSeverityKey = "severity_text"
+
+// signozSeverityGroups maps each level mapSeverity DISPLAYS to the stored
+// severity_text spellings it displays them from (WARNING and WARN both show as
+// "warn"). TestSignozSeverityGroupsMatchDisplay keeps the two in step.
+var signozSeverityGroups = map[string][]string{
+	"debug": {"debug", "trace"},
+	"info":  {"info", "information"},
+	"warn":  {"warn", "warning"},
+	"error": {"error"},
+	"fatal": {"fatal", "critical"},
+}
+
+// signozSeverityFilter makes an equality or membership filter on severity_text
+// match every stored spelling of the level it names. SigNoz compares
+// severity_text case-sensitively and stores what the shipper sent (usually
+// "ERROR"), while Nudgebee displays the level lowercased and folded (mapSeverity),
+// so a filter copied from the screen — `level = error`, `level = warn` — matched
+// nothing: Nubi answered "0 ERROR logs" over logs that existed. A displayed level
+// expands to every stored spelling it is displayed from; any other value (an
+// explicit stored name such as "trace") only to its own case variants. Eq/Neq
+// become in/not-in over the expanded set. Anything else — other operators, a
+// non-string or empty value — is returned exactly as given.
+func signozSeverityFilter(op query.BinaryWhereClauseType, value any) (query.BinaryWhereClauseType, any) {
+	var values []any
+	newOp := op
+	unchanged := value // what an early return hands back
+	switch op {
+	case Eq, EqF:
+		newOp, values = In, []any{value}
+	case Nq, NqF:
+		newOp, values = NotIn, []any{value}
+	case In, NotIn:
+		switch v := value.(type) {
+		case []any:
+			values = v
+		case []string:
+			for _, s := range v {
+				values = append(values, s)
+			}
+			unchanged = values // FlattenSignozQuery only accepts []any for in/nin
+		default:
+			return op, value
+		}
+	default:
+		return op, value
+	}
+
+	seen := map[string]bool{}
+	var expanded []any
+	add := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			expanded = append(expanded, s)
+		}
+	}
+	for _, v := range values {
+		str, ok := v.(string)
+		if !ok || str == "" {
+			return op, unchanged
+		}
+		names, displayed := signozSeverityGroups[strings.ToLower(str)]
+		if !displayed {
+			names = []string{strings.ToLower(str)}
+		}
+		add(str)
+		for _, name := range names {
+			add(name)
+			add(strings.ToUpper(name))
+			first, size := utf8.DecodeRuneInString(name)
+			add(string(unicode.ToUpper(first)) + name[size:])
+		}
+	}
+	return newOp, expanded
+}
+
+// signozErrorSeverities is every stored severity_text spelling of the levels the
+// log-group queries count (error and fatal), from the same table filters use.
+func signozErrorSeverities() []any {
+	_, v := signozSeverityFilter(In, []any{"error", "fatal"})
+	return v.([]any)
+}
+
+// signozNumber accepts a finite JSON number or numeric string. NaN and ±Inf
+// (ParseFloat accepts "NaN"/"Inf") are rejected: int64(math.Round(NaN)) is an
+// implementation-defined garbage count.
+func signozNumber(v any) (float64, bool) {
+	var f float64
+	switch n := v.(type) {
+	case float64:
+		f = n
+	case string:
+		parsed, err := strconv.ParseFloat(n, 64)
+		if err != nil {
+			return 0, false
+		}
+		f = parsed
+	default:
+		return 0, false
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return f, true
+}
+
+func (s *SignozSource) GetLabelMapping() map[string]string {
+	return signozLogLabelMapping
+}
+
+// signozWorkloadKeys are the attributes the OTel k8sattributes processor stores a
+// workload's name under, one per kind. Deployment first: it is what
+// signozLogLabelMapping maps app and workload to.
+var signozWorkloadKeys = []string{
+	"k8s.deployment.name", "k8s.statefulset.name", "k8s.daemonset.name", "k8s.job.name", "k8s.cronjob.name",
+}
+
+// signozExpandedLabelKeys makes app and workload match a workload of any kind:
+// mapped to k8s.deployment.name alone they missed StatefulSets, DaemonSets, Jobs
+// and CronJobs.
+var signozExpandedLabelKeys = map[string][]string{"app": signozWorkloadKeys, "workload": signozWorkloadKeys}
+
+func (s *SignozSource) ExpandedLabelKeys() map[string][]string { return signozExpandedLabelKeys }
+
 func (s *SignozSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_like"}
+	return signozSupportedOperators
 }
 
 const (
@@ -57,85 +271,265 @@ type FlattenedClause struct {
 	Op    string            `json:"op"`
 }
 
-func FlattenSignozQuery(q query.QueryWhereClause) ([]FlattenedClause, error) {
-	var result []FlattenedClause
+// signozOperators maps every where-clause operator SigNoz can run to its filter op.
+// Both the catalog tokens the UI and Nubi send (_nregex, _has_key, _icontains …)
+// and the SigNoz-local spellings the enricher's item conversion produces
+// (_not_regex, _exist …) are accepted. SigNoz's contains/ncontains are already
+// case-insensitive, so the i-variants map onto them. _is_null is handled in
+// signozLeaf because its op depends on the value.
+var signozOperators = map[query.BinaryWhereClauseType]string{
+	Eq: "=", EqF: "=", Nq: "!=", NqF: "!=",
+	In: "in", NotIn: "nin",
+	Like: "like", NLike: "nlike", ILike: "regex", // ILike: see signozILikeRegex
+	Contains: "contains", query.IContains: "contains",
+	NotContains: "ncontains", query.NIContains: "ncontains",
+	RegEx: "regex", query.NRegex: "nregex", NotRegEx: "nregex",
+	HasKey: "exists", Exist: "exists", NotExist: "nexists",
+	Lt: "<", Lte: "<=", Gt: ">", Gte: ">=",
+}
 
-	// Handle binary clause
-	for field, conds := range q.Binary {
-		for op, value := range conds {
-			var signozOp string
-			switch op {
-			case Eq, EqF:
-				signozOp = "="
-			case Nq, NqF:
-				signozOp = "!="
-			case In:
-				signozOp = "in"
-				if _, ok := value.([]any); !ok {
-					return nil, fmt.Errorf("value for 'in' operator must be an array")
-				}
-			case NotIn:
-				signozOp = "nin"
-				if _, ok := value.([]any); !ok {
-					return nil, fmt.Errorf("value for 'nin' operator must be an array")
-				}
-			case Like:
-				signozOp = "like"
-			case NLike:
-				signozOp = "nlike"
-			case Contains:
-				signozOp = "contains"
-			case NotContains:
-				signozOp = "ncontains"
-			case Exist:
-				signozOp = "exists"
-			case NotExist:
-				signozOp = "nexists"
-			case RegEx:
-				signozOp = "regex"
-			case NotRegEx:
-				signozOp = "nregex"
+// signozSupportedOperators is what both SigNoz sources advertise to the UI and
+// Nubi: the catalog token for every operator signozOperators runs.
+var signozSupportedOperators = []string{
+	"_eq", "_neq", "_in", "_not_in", "_like", "_nlike", "_ilike",
+	"_contains", "_icontains", "_nicontains", "_regex", "_nregex",
+	"_has_key", "_is_null", "_gt", "_gte", "_lt", "_lte",
+}
 
-			default:
-				return nil, fmt.Errorf("unsupported operator: %s", op)
-			}
-			result = append(result, FlattenedClause{
-				Key:   map[string]string{"key": field},
-				Value: value,
-				Op:    signozOp,
-			})
+// signozNegatedOperators gives each operator its complement, used to push a NOT
+// down to the leaves (SigNoz has no NOT). A negated filter on an attribute a row
+// lacks matches that row, as NOT(=) should: measured on v0.145, `user.tier != gold`
+// returned the 3 non-gold rows plus the 6 rows without the attribute.
+var signozNegatedOperators = map[query.BinaryWhereClauseType]query.BinaryWhereClauseType{
+	Eq: Nq, Nq: Eq, EqF: NqF, NqF: EqF,
+	In: NotIn, NotIn: In,
+	Like: NLike, NLike: Like,
+	Contains: query.NIContains, query.IContains: query.NIContains, NotContains: query.IContains, query.NIContains: query.IContains,
+	RegEx: query.NRegex, query.NRegex: RegEx, NotRegEx: RegEx,
+	HasKey: NotExist, Exist: NotExist, NotExist: Exist,
+	Lt: Gte, Gte: Lt, Lte: Gt, Gt: Lte,
+}
+
+// signozMaxQueries caps how many builder queries one where-clause may expand to.
+// Each OR branch is one SigNoz query (its builder filter cannot express OR), and
+// the queries run in a single request, so the cap bounds the ClickHouse work one
+// log fetch can cause.
+const signozMaxQueries = 25
+
+// signozLeaf translates one binary condition into a SigNoz filter item.
+func signozLeaf(field string, op query.BinaryWhereClauseType, value any) (FlattenedClause, error) {
+	if field == signozSeverityKey {
+		op, value = signozSeverityFilter(op, value)
+	}
+	// SigNoz's `!=` is a SUBSTRING match on resource attributes, not an exact
+	// one, while `=` is exact. Measured on v0.145 against a 15-row set:
+	// `service.name != "e2e"` returned 0 of 15 (it excluded all three e2e-*
+	// services) and `k8s.pod.name != "checkout"` returned 10 of 15 (it excluded
+	// the checkout-* pod), so a user filtering `namespace != prod` silently also
+	// loses `prod-east` and `production`.
+	//
+	// `nin` with a single element is exact on every field class measured — resource
+	// attribute, top-level column (severity_text) and log attribute — and keeps the
+	// rest of `!=`'s semantics, including matching rows that lack the attribute
+	// entirely (`user.tier != gold` and `user.tier nin [gold]` both returned the
+	// same 9 rows). So never emit `!=`.
+	//
+	// This covers NOT as well: signozNegatedOperators pushes a NOT down to the
+	// leaves as Eq -> Nq, which lands here. signozSeverityFilter already does the
+	// same rewrite for the severity key, for its own case-folding reasons.
+	//
+	// The rewrite is unconditional: a caller may write `_neq` with a list value
+	// ({"ns": {"_neq": ["a", "b"]}}), and only the wrapping is conditional. Making
+	// the whole rewrite conditional on a non-list value left `!=` reachable for
+	// exactly that input.
+	if op == Nq {
+		op = NotIn
+		if _, isList := value.([]any); !isList {
+			value = []any{value}
 		}
 	}
-	// Handle AND
+	if op == ILike {
+		pattern, isString := value.(string)
+		if !isString {
+			return FlattenedClause{}, fmt.Errorf("value for '_ilike' must be a string")
+		}
+		value = signozILikeRegex(pattern)
+	}
+	signozOp, ok := signozOperators[op]
+	switch {
+	case op == IsNull:
+		isNull, isBool := value.(bool)
+		if !isBool {
+			return FlattenedClause{}, fmt.Errorf("value for '_is_null' must be true or false")
+		}
+		signozOp = "exists"
+		if isNull {
+			signozOp = "nexists"
+		}
+	case !ok:
+		return FlattenedClause{}, fmt.Errorf("unsupported operator: %s", op)
+	case op == In || op == NotIn:
+		if _, isList := value.([]any); !isList {
+			return FlattenedClause{}, fmt.Errorf("value for '%s' operator must be an array", signozOp)
+		}
+	}
+	return FlattenedClause{Key: map[string]string{"key": field}, Value: value, Op: signozOp}, nil
+}
+
+// signozILikeRegex turns a LIKE pattern into the case-insensitive regex SigNoz runs
+// for _ilike. SigNoz v0.51 has no ilike operator (HTTP 400, measured), while regex
+// with an inline (?i) works on v0.51 and v0.145: % is any run, _ any one character,
+// everything else literal, anchored like LIKE.
+func signozILikeRegex(pattern string) string {
+	var b strings.Builder
+	b.WriteString("(?i)^")
+	for _, r := range pattern {
+		switch r {
+		case '%':
+			b.WriteString(".*")
+		case '_':
+			b.WriteByte('.')
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	b.WriteByte('$')
+	return b.String()
+}
+
+// signozNegate returns NOT q, with the negation pushed onto the leaves by De Morgan.
+// A clause is the AND of its binary conditions, its And children, the OR of its Or
+// children, and its Not child; NOT of that is the OR of each part negated.
+func signozNegate(q query.QueryWhereClause) (query.QueryWhereClause, error) {
+	var parts []query.QueryWhereClause
+	for field, conds := range q.Binary {
+		for op, value := range conds {
+			if op == IsNull {
+				isNull, ok := value.(bool)
+				if !ok {
+					return query.QueryWhereClause{}, fmt.Errorf("value for '_is_null' must be true or false")
+				}
+				parts = append(parts, query.QueryWhereClause{Binary: query.BinaryWhereClause{field: {IsNull: !isNull}}})
+				continue
+			}
+			neg, ok := signozNegatedOperators[op]
+			if !ok {
+				return query.QueryWhereClause{}, fmt.Errorf("operator %s cannot be negated in SigNoz queries", op)
+			}
+			parts = append(parts, query.QueryWhereClause{Binary: query.BinaryWhereClause{field: {neg: value}}})
+		}
+	}
 	for _, sub := range q.And {
-		subResult, err := FlattenSignozQuery(sub)
+		n, err := signozNegate(sub)
+		if err != nil {
+			return query.QueryWhereClause{}, err
+		}
+		parts = append(parts, n)
+	}
+	if len(q.Or) > 0 {
+		var all []query.QueryWhereClause
+		for _, sub := range q.Or {
+			n, err := signozNegate(sub)
+			if err != nil {
+				return query.QueryWhereClause{}, err
+			}
+			all = append(all, n)
+		}
+		parts = append(parts, query.QueryWhereClause{And: all})
+	}
+	if q.Not != nil {
+		parts = append(parts, *q.Not)
+	}
+	return query.QueryWhereClause{Or: parts}, nil
+}
+
+// signozDNF rewrites a where-clause as an OR of AND-terms, one SigNoz builder
+// query per term. SigNoz's v3/v4 builder filter cannot express OR on any version:
+// a nested group is rejected with 400, and `filters.op: "OR"` is silently run as
+// AND (measured on v0.51 and v0.145: 0 rows where 6 matched). So OR becomes
+// separate queries whose rows are merged (signozMergeRows), and NOT is pushed to
+// the leaves. A clause with no conditions is one empty term (match everything).
+func signozDNF(q query.QueryWhereClause) ([][]FlattenedClause, error) {
+	terms := [][]FlattenedClause{{}}
+	and := func(other [][]FlattenedClause) error {
+		if len(terms)*len(other) > signozMaxQueries {
+			return fmt.Errorf("this filter needs %d SigNoz queries (OR branches multiply); the limit is %d — simplify the OR conditions", len(terms)*len(other), signozMaxQueries)
+		}
+		next := make([][]FlattenedClause, 0, len(terms)*len(other))
+		for _, a := range terms {
+			for _, b := range other {
+				term := make([]FlattenedClause, 0, len(a)+len(b))
+				next = append(next, append(append(term, a...), b...))
+			}
+		}
+		terms = next
+		return nil
+	}
+
+	for field, conds := range q.Binary {
+		for op, value := range conds {
+			leaf, err := signozLeaf(field, op, value)
+			if err != nil {
+				return nil, err
+			}
+			for i := range terms {
+				terms[i] = append(terms[i], leaf)
+			}
+		}
+	}
+	for _, sub := range q.And {
+		subTerms, err := signozDNF(sub)
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, subResult...)
+		if err := and(subTerms); err != nil {
+			return nil, err
+		}
 	}
-
-	// Handle OR
-	for range q.Or {
-		return nil, fmt.Errorf("OR operator is not supported in Signoz queries")
-		// subResult, err := FlattenSignozQuery(sub)
-		// if err != nil {
-		// 	return nil, err
-		// }
-		// result = append(result, subResult...)
+	if len(q.Or) > 0 {
+		var alternatives [][]FlattenedClause
+		for _, sub := range q.Or {
+			subTerms, err := signozDNF(sub)
+			if err != nil {
+				return nil, err
+			}
+			alternatives = append(alternatives, subTerms...)
+			if len(alternatives) > signozMaxQueries {
+				return nil, fmt.Errorf("this filter needs more than %d SigNoz queries (OR branches multiply) — simplify the OR conditions", signozMaxQueries)
+			}
+		}
+		if err := and(alternatives); err != nil {
+			return nil, err
+		}
 	}
-
-	// Handle NOT
 	if q.Not != nil {
-		return nil, fmt.Errorf("NOT operator is not supported in Signoz queries")
-		// subResult, err := FlattenSignozQuery(*q.Not)
-		// if err != nil {
-		// 	return nil, err
-		// }
-		// result = append(result, subResult...)
+		negated, err := signozNegate(*q.Not)
+		if err != nil {
+			return nil, err
+		}
+		negTerms, err := signozDNF(negated)
+		if err != nil {
+			return nil, err
+		}
+		if err := and(negTerms); err != nil {
+			return nil, err
+		}
 	}
+	return terms, nil
+}
 
-	return result, nil
+// FlattenSignozQuery translates a where-clause that SigNoz can run as a single
+// builder query (no OR after NOT is pushed down) into its filter items. Callers
+// that can run several queries use signozDNF.
+func FlattenSignozQuery(q query.QueryWhereClause) ([]FlattenedClause, error) {
+	terms, err := signozDNF(q)
+	if err != nil {
+		return nil, err
+	}
+	if len(terms) != 1 {
+		return nil, fmt.Errorf("this filter needs %d SigNoz queries (it contains OR); a single query was required", len(terms))
+	}
+	return terms[0], nil
 }
 
 // signozResponseSnippet returns a truncated JSON rendering of a relay response
@@ -190,140 +584,52 @@ func extractSignozError(m map[string]any) string {
 }
 
 func (s *SignozSource) QueryLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) ([]OutputLog, error) {
-	if fetchLogRequest.Query == "" {
-		flattenedClauses, err := FlattenSignozQuery(fetchLogRequest.QueryRequest.Where)
-		if err != nil {
-			return nil, fmt.Errorf("failed to flatten query: %w", err)
-		}
-		queryJSON, err := json.Marshal(flattenedClauses)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal flattened query: %w", err)
-		}
-		fetchLogRequest.Query = string(queryJSON)
-	}
-	var parsedQuery any
-	if err := common.UnmarshalJson([]byte(fetchLogRequest.Query), &parsedQuery); err != nil {
-		return nil, fmt.Errorf("failed to parse Query JSON for signoz: %w", err)
-	}
-	orderBy := []map[string]any{
-		{"columnName": "timestamp", "order": "desc"},
-	}
-	if len(fetchLogRequest.SortFields) > 0 {
-		orderBy = make([]map[string]any, len(fetchLogRequest.SortFields))
-		for i, sf := range fetchLogRequest.SortFields {
-			orderBy[i] = map[string]any{
-				"columnName": sf.ColumnName,
-				"order":      sf.Order,
-			}
-		}
-	}
-	limit := 1000
-	if fetchLogRequest.Limit > 0 {
-		limit = fetchLogRequest.Limit
-	}
-	steps := 60
-	if fetchLogRequest.StepInterval > 0 {
-		steps = fetchLogRequest.StepInterval
-	}
-	offset := 0
-	if fetchLogRequest.Offset > 0 {
-		offset = fetchLogRequest.Offset
-	}
-	var op = "AND"
-	if fetchLogRequest.Request != nil {
-		if val, ok := fetchLogRequest.Request["op"]; ok {
-			if opStr, ok := val.(string); ok && opStr != "" {
-				op = opStr
-			}
-		}
-	}
-	signozLogRequest := relay.ActionExecuteBody{
-		AccountID:  fetchLogRequest.AccountId,
-		ActionName: "signoz_query_range",
-		ActionParams: map[string]any{
-			"start":     fetchLogRequest.StartTime,
-			"end":       fetchLogRequest.EndTime,
-			"step":      60,
-			"variables": map[string]any{},
-			"compositeQuery": map[string]any{
-				"queryType": "builder",
-				"panelType": "list",
-				"fillGaps":  false,
-				"builderQueries": map[string]any{
-					"A": map[string]any{
-						"dataSource":         "logs",
-						"queryName":          "A",
-						"aggregateOperator":  "noop",
-						"aggregateAttribute": map[string]any{},
-						"timeAggregation":    "rate",
-						"spaceAggregation":   "sum",
-						"functions":          []any{},
-						"filters": map[string]any{
-							"op":    op,
-							"items": parsedQuery,
-						},
-						"expression":   "A",
-						"disabled":     false,
-						"stepInterval": steps,
-						"having":       []any{},
-						"limit":        nil,
-						"orderBy":      orderBy,
-						"groupBy":      []any{},
-						"legend":       "",
-						"reduceTo":     "avg",
-						"offset":       offset,
-						"pageSize":     limit,
-					},
-				},
+	list, err := signozFetchLogRows(fetchLogRequest, func(body map[string]any) ([]any, error) {
+		resp, err := relay.Execute(relay.RelayExecuteRequest{
+			NoSinks: true,
+			Cache:   false,
+			Body: relay.ActionExecuteBody{
+				AccountID:    fetchLogRequest.AccountId,
+				ActionName:   "signoz_query_range",
+				ActionParams: body,
+				NoSinks:      true,
 			},
-		},
-		NoSinks: true,
-	}
-
-	resp, err := relay.Execute(relay.RelayExecuteRequest{
-		NoSinks: true,
-		Cache:   false,
-		Body:    signozLogRequest,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute signoz query: %w", err)
+		}
+		data1, ok := resp["data"].(map[string]any)
+		if !ok || data1 == nil {
+			ctx.GetLogger().Error("signoz: query_range response missing 'data'", "response", signozResponseSnippet(resp))
+			return nil, fmt.Errorf("signoz query_range: 'data' missing from relay response: %s", signozResponseSnippet(resp))
+		}
+		if errMsg := extractSignozError(data1); errMsg != "" {
+			return nil, fmt.Errorf("signoz query_range returned error: %s", errMsg)
+		}
+		data2, ok := data1["data"].(map[string]any)
+		if !ok || data2 == nil {
+			ctx.GetLogger().Error("signoz: query_range response missing 'data.data'", "response", signozResponseSnippet(resp))
+			return nil, fmt.Errorf("signoz query_range: 'data.data' missing from relay response: %s", signozResponseSnippet(resp))
+		}
+		if errMsg := extractSignozError(data2); errMsg != "" {
+			return nil, fmt.Errorf("signoz query_range returned error: %s", errMsg)
+		}
+		// signoz_query_range nests the rows at data.data.result (envelope→data→result),
+		// not data.data.data.result — read straight from data2.
+		result, ok := data2["result"].([]any)
+		if !ok || result == nil {
+			// Well-formed envelope but no result payload and no explicit error.
+			// Surface the actual body so a malformed query or an unexpected Signoz
+			// shape is diagnosable instead of silently degrading to the fallback.
+			ctx.GetLogger().Error("signoz: query_range response missing 'data.data.result'", "response", signozResponseSnippet(resp))
+			return nil, fmt.Errorf("signoz query_range: unexpected response shape (no result payload): %s", signozResponseSnippet(resp))
+		}
+		return result, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute signoz query: %w", err)
+		return nil, err
 	}
-
-	data1, ok := resp["data"].(map[string]any)
-	if !ok || data1 == nil {
-		ctx.GetLogger().Error("signoz: query_range response missing 'data'", "response", signozResponseSnippet(resp))
-		return nil, fmt.Errorf("signoz query_range: 'data' missing from relay response: %s", signozResponseSnippet(resp))
-	}
-	if errMsg := extractSignozError(data1); errMsg != "" {
-		return nil, fmt.Errorf("signoz query_range returned error: %s", errMsg)
-	}
-	data2, ok := data1["data"].(map[string]any)
-	if !ok || data2 == nil {
-		ctx.GetLogger().Error("signoz: query_range response missing 'data.data'", "response", signozResponseSnippet(resp))
-		return nil, fmt.Errorf("signoz query_range: 'data.data' missing from relay response: %s", signozResponseSnippet(resp))
-	}
-	if errMsg := extractSignozError(data2); errMsg != "" {
-		return nil, fmt.Errorf("signoz query_range returned error: %s", errMsg)
-	}
-	// signoz_query_range nests the rows at data.data.result (envelope→data→result),
-	// not data.data.data.result — read straight from data2.
-	result, ok := data2["result"].([]any)
-	if !ok || result == nil {
-		// Well-formed envelope but no result payload and no explicit error.
-		// Surface the actual body so a malformed query or an unexpected Signoz
-		// shape is diagnosable instead of silently degrading to the fallback.
-		ctx.GetLogger().Error("signoz: query_range response missing 'data.data.result'", "response", signozResponseSnippet(resp))
-		return nil, fmt.Errorf("signoz query_range: unexpected response shape (no result payload): %s", signozResponseSnippet(resp))
-	}
-	if len(result) == 0 {
-		return []OutputLog{}, nil
-	}
-	firstMap, ok := result[0].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("first element is not an object")
-	}
-	list, ok := firstMap["list"].([]any)
-	if !ok || list == nil {
+	if len(list) == 0 {
 		return []OutputLog{}, nil
 	}
 
@@ -390,14 +696,15 @@ func (s *SignozSource) QueryLabels(ctx *security.RequestContext, fetchLogRequest
 }
 
 func (s *SignozSource) QueryLabelValues(ctx *security.RequestContext, fetchLogRequest FetchLogLabelValuesRequest) ([]OutputLogLabelValue, error) {
+	attributeKey, tagType := signozLabelValueParams(fetchLogRequest.LabelName, fetchLogRequest.Request["tagType"])
 	signozLogRequest := relay.ActionExecuteBody{
 		AccountID:  fetchLogRequest.AccountId,
 		ActionName: "signoz_value_suggest",
 		ActionParams: map[string]any{
-			"attributeKey":               fetchLogRequest.LabelName,
+			"attributeKey":               attributeKey,
 			"filterAttributeKeyDataType": fetchLogRequest.Request["filterAttributeKeyDataType"],
 			"searchText":                 fetchLogRequest.Request["searchText"],
-			"tagType":                    fetchLogRequest.Request["tagType"],
+			"tagType":                    tagType,
 		},
 		NoSinks: true,
 	}
@@ -619,7 +926,7 @@ func (s *SignozSource) QueryLogGroup(ctx *security.RequestContext, req FetchLogG
 		ActionParams: map[string]any{
 			"start":     req.StartTime,
 			"end":       req.EndTime,
-			"step":      3600,
+			"step":      signozLogGroupStepSeconds,
 			"variables": map[string]any{},
 			"compositeQuery": map[string]any{
 				"queryType": "builder",
@@ -640,7 +947,7 @@ func (s *SignozSource) QueryLogGroup(ctx *security.RequestContext, req FetchLogG
 						},
 						"expression":   "A",
 						"disabled":     false,
-						"stepInterval": 3600,
+						"stepInterval": signozLogGroupStepSeconds,
 						"having":       []any{},
 						"limit":        100,
 						"orderBy": []map[string]any{
@@ -648,8 +955,8 @@ func (s *SignozSource) QueryLogGroup(ctx *security.RequestContext, req FetchLogG
 						},
 						"groupBy": []map[string]any{
 							{"key": "severity_text", "dataType": "string", "type": "tag", "isColumn": false},
-							{"key": "k8s_namespace_name", "dataType": "string", "type": "resource", "isColumn": false},
-							{"key": "k8s_pod_name", "dataType": "string", "type": "resource", "isColumn": false},
+							{"key": signozNamespaceKey, "dataType": "string", "type": "resource", "isColumn": false},
+							{"key": signozPodKey, "dataType": "string", "type": "resource", "isColumn": false},
 						},
 						"legend":   "",
 						"reduceTo": "avg",
@@ -679,7 +986,7 @@ func (s *SignozSource) buildLogGroupFilters(req FetchLogGroupRequest) []map[stri
 	filters := []map[string]any{
 		{
 			"key":   map[string]string{"key": "severity_text"},
-			"value": []string{"ERROR", "CRITICAL", "FATAL", "error", "critical", "fatal"},
+			"value": signozErrorSeverities(),
 			"op":    "in",
 		},
 	}
@@ -689,14 +996,14 @@ func (s *SignozSource) buildLogGroupFilters(req FetchLogGroupRequest) []map[stri
 
 	if selectedNamespace != "" {
 		filters = append(filters, map[string]any{
-			"key":   map[string]string{"key": "k8s_namespace_name"},
+			"key":   map[string]string{"key": signozNamespaceKey},
 			"value": selectedNamespace,
 			"op":    "=",
 		})
 	}
 	if selectedWorkload != "" {
 		filters = append(filters, map[string]any{
-			"key":   map[string]string{"key": "k8s_pod_name"},
+			"key":   map[string]string{"key": signozPodKey},
 			"value": selectedWorkload,
 			"op":    "contains",
 		})
@@ -706,7 +1013,7 @@ func (s *SignozSource) buildLogGroupFilters(req FetchLogGroupRequest) []map[stri
 }
 
 // parseSignozLogGroupResponse parses the Signoz query_range response for aggregation queries.
-func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTime int64) (LogGroupOutput, error) {
+func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTimeMs int64) (LogGroupOutput, error) {
 	data1, ok := resp["data"].(map[string]any)
 	if !ok || data1 == nil {
 		return LogGroupOutput{}, nil
@@ -753,10 +1060,10 @@ func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTime 
 		group := LogGroup{}
 
 		// Map Signoz label names to standard names
-		if ns := labelMap["k8s_namespace_name"]; ns != "" {
+		if ns := firstNonEmpty(labelMap[signozNamespaceKey], labelMap[signozLegacyNamespaceKey]); ns != "" {
 			group.Namespace = ns
 		}
-		if pod := labelMap["k8s_pod_name"]; pod != "" {
+		if pod := firstNonEmpty(labelMap[signozPodKey], labelMap[signozLegacyPodKey]); pod != "" {
 			group.Workload = extractWorkloadFromPodName(pod)
 			group.Sample = pod // Use pod name as sample since Signoz groups by pod, not message
 		}
@@ -774,22 +1081,7 @@ func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTime 
 			group.PatternHash = generateRawHash(group.Workload)
 		}
 
-		// Extract values: Signoz returns {points: [{timestamp, value}, ...]}
-		points, _ := seriesMap["points"].([]any)
-		timestamps := make([]int64, 0, len(points))
-		values := make([]float64, 0, len(points))
-		for _, p := range points {
-			point, ok := p.(map[string]any)
-			if !ok {
-				continue
-			}
-			if ts, ok := point["timestamp"].(float64); ok {
-				timestamps = append(timestamps, int64(ts))
-			}
-			if val, ok := point["value"].(float64); ok {
-				values = append(values, val)
-			}
-		}
+		timestamps, values := signozSeriesPoints(seriesMap, endTimeMs)
 
 		group.Timestamps = timestamps
 		group.Values = values

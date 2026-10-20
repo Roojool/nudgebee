@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Typography } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
 import { DragIndicator } from '@mui/icons-material';
+import { ds } from '@utils/colors';
 
 interface DraggableOutputFieldProps {
   taskId: string;
@@ -14,6 +15,7 @@ interface DraggableOutputFieldProps {
   isConfig?: boolean; // true for workflow configs
   isSecret?: boolean; // true for secrets (uses Secret['key'] template)
   description?: string; // Optional description for the field
+  template?: string; // Template to drop, when none of the kinds above builds it (e.g. trigger fields)
 }
 
 const DraggableOutputField: React.FC<DraggableOutputFieldProps> = ({
@@ -27,9 +29,13 @@ const DraggableOutputField: React.FC<DraggableOutputFieldProps> = ({
   isConfig = false,
   isSecret = false,
   description,
+  template,
 }) => {
   // Generate the template expression based on whether it's an input, config, secret, or task output
   const getTemplateExpression = () => {
+    if (template) {
+      return template;
+    }
     if (isSecret) {
       return `{{ Secrets['${fieldName}'] }}`;
     }
@@ -163,7 +169,7 @@ const DraggableOutputField: React.FC<DraggableOutputFieldProps> = ({
           <Typography
             sx={{
               fontSize: 'var(--ds-text-caption)',
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               color: 'var(--ds-blue-600)',
               lineHeight: 1.2,
               overflow: 'hidden',

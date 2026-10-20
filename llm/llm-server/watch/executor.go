@@ -50,6 +50,12 @@ func getSecurityContextBuilder() SecurityContextBuilder {
 // summarizer (30s), responder (5s) and notifier (10s) phases.
 const managerWriteTimeout = 5 * time.Second
 
+// Phases a poll can fail in, used as the `phase` metric attribute.
+const (
+	pollPhaseObserve   = "observe"
+	pollPhasePredicate = "predicate"
+)
+
 // Executor runs a single poll for a single watch. It is stateless across
 // polls; all state lives on the Watch row.
 //
@@ -89,9 +95,9 @@ func (e *Executor) SetSummarizerTimeout(d time.Duration) { e.summarizerTimeoutOv
 // transient state needed across polls lives in the DB row.
 //
 // Lifecycle:
-//  1. expiry check     — if past expires_at, mark EXPIRED + notify
-//  2. observe          — run the configured Source.Observe()
-//  3. predicate eval   — terminate / reschedule / record failure
+//  1. observe          — run the configured Source.Observe()
+//  2. predicate eval   — terminate / reschedule / record failure
+//  3. expiry check     — if still unmet and past expires_at, mark EXPIRED + notify
 //  4. terminal notify  — single message to the conversation, no per-poll noise
 //
 // Budget enforcement is intentionally delegated: any LLM-backed call made
@@ -126,13 +132,9 @@ func (e *Executor) RunOnePoll(parent context.Context, w Watch) {
 		slog.String("predicate_kind", string(w.PredicateKind)),
 	)
 
-	if e.handleExpiry(rctx, logger, w) {
-		return
-	}
-
 	src, ok := GetSource(w.SourceKind)
 	if !ok {
-		e.terminate(rctx, logger, w, StatusFailed, "", fmt.Sprintf("source_kind %q is not registered", w.SourceKind))
+		e.terminate(rctx, logger, w, TerminalUpdate{Status: StatusFailed, ErrMsg: fmt.Sprintf("source_kind %q is not registered", w.SourceKind)})
 		return
 	}
 
@@ -142,7 +144,7 @@ func (e *Executor) RunOnePoll(parent context.Context, w Watch) {
 
 	obs, obsErr := src.Observe(pollRctx, w)
 	if obsErr != nil {
-		e.recordFailure(rctx, logger, w, fmt.Sprintf("observe failed: %v", obsErr))
+		e.recordFailure(rctx, logger, w, fmt.Sprintf("observe failed: %v", obsErr), nil, pollPhaseObserve)
 		return
 	}
 
@@ -150,13 +152,13 @@ func (e *Executor) RunOnePoll(parent context.Context, w Watch) {
 	if predErr != nil {
 		// Compilation passed at create time but somehow not now — treat
 		// as terminal failure; agent re-create is the recovery path.
-		e.terminate(rctx, logger, w, StatusFailed, "", fmt.Sprintf("predicate compile: %v", predErr))
+		e.terminate(rctx, logger, w, TerminalUpdate{Status: StatusFailed, ErrMsg: fmt.Sprintf("predicate compile: %v", predErr), Polled: true, Observation: &obs.Data})
 		return
 	}
 
 	result, evalErr := pred.Eval(pollRctx, w, obs)
 	if evalErr != nil {
-		e.recordFailure(rctx, logger, w, fmt.Sprintf("predicate eval failed: %v", evalErr))
+		e.recordFailure(rctx, logger, w, fmt.Sprintf("predicate eval failed: %v", evalErr), &obs.Data, pollPhasePredicate)
 		return
 	}
 	met := result.Met
@@ -169,7 +171,14 @@ func (e *Executor) RunOnePoll(parent context.Context, w Watch) {
 		if w.PredicateNegate {
 			summary = "[negated] " + summary
 		}
-		e.terminate(rctx, logger, w, StatusCompleted, summary, "")
+		e.terminate(rctx, logger, w, TerminalUpdate{Status: StatusCompleted, Final: summary, Polled: true, Observation: &obs.Data})
+		return
+	}
+
+	// Expire only on an observation that missed: checking first left the last
+	// poll interval unobserved -> a late success reported EXPIRED (#39021).
+	// A failing poll past expiry expires too — see recordFailure.
+	if e.handleExpiry(rctx, logger, w, obs.Data) {
 		return
 	}
 
@@ -182,30 +191,50 @@ func (e *Executor) RunOnePoll(parent context.Context, w Watch) {
 	}
 }
 
-// handleExpiry returns true if the watch should stop polling due to
-// expires_at. The notification carries whatever summary we can produce
-// from the most recent state.
-func (e *Executor) handleExpiry(rctx *security.RequestContext, logger *slog.Logger, w Watch) bool {
+// handleExpiry returns true if the watch should stop polling due to expires_at.
+// observation is this tick's unmet observation, recorded on the terminal row.
+func (e *Executor) handleExpiry(rctx *security.RequestContext, logger *slog.Logger, w Watch, observation string) bool {
 	if !time.Now().After(w.ExpiresAt) {
 		return false
 	}
 	summary := "watch expired before condition was met"
-	if w.LastPollResult != nil && *w.LastPollResult != "" {
-		summary = "expired; last observation: " + truncate(*w.LastPollResult, 500)
+	if observation != "" {
+		summary = "expired; last observation: " + truncate(observation, 500)
 	}
-	e.terminate(rctx, logger, w, StatusExpired, summary, "")
+	e.terminate(rctx, logger, w, TerminalUpdate{
+		Status: StatusExpired, Final: summary, Polled: true, Observation: &observation,
+	})
 	return true
 }
 
-func (e *Executor) recordFailure(rctx *security.RequestContext, logger *slog.Logger, w Watch, msg string) {
+// recordFailure books a transient poll failure, or terminates as FAILED once
+// the consecutive-failure budget is spent. observation is whatever the source
+// managed to return (nil when Observe itself failed) — it is preserved on
+// the terminal row so a FAILED watch still shows what the last poll saw.
+func (e *Executor) recordFailure(rctx *security.RequestContext, logger *slog.Logger, w Watch, msg string, observation *string, phase string) {
 	maxFailures := config.Config.WatchMaxFailures
 	if maxFailures <= 0 {
 		maxFailures = 3
 	}
-	logger.Warn("watch.executor: poll failed", "failure_count", w.FailureCount+1, "msg", msg)
+	// Past expires_at a transient failure must not buy more time: poll_interval_sec
+	// has no upper clamp, so rescheduling here runs the watch up to 3x that interval
+	// beyond its deadline and ends FAILED, breaking the max_duration_sec contract.
+	if time.Now().After(w.ExpiresAt) {
+		logger.Warn("watch.executor: poll failed past expiry, expiring", "phase", phase, "msg", msg)
+		recordPollFailure(rctx.GetContext(), phase, true)
+		e.terminate(rctx, logger, w, TerminalUpdate{
+			Status: StatusExpired, Final: "expired; last poll failed: " + msg,
+			Polled: true, Observation: observation,
+		})
+		return
+	}
 
-	if w.FailureCount+1 >= maxFailures {
-		e.terminate(rctx, logger, w, StatusFailed, "", msg)
+	terminal := w.FailureCount+1 >= maxFailures
+	logger.Warn("watch.executor: poll failed", "failure_count", w.FailureCount+1, "phase", phase, "terminal", terminal, "msg", msg)
+	recordPollFailure(rctx.GetContext(), phase, terminal)
+
+	if terminal {
+		e.terminate(rctx, logger, w, TerminalUpdate{Status: StatusFailed, ErrMsg: msg, Polled: true, Observation: observation})
 		return
 	}
 
@@ -220,9 +249,10 @@ func (e *Executor) recordFailure(rctx *security.RequestContext, logger *slog.Log
 	}
 }
 
-func (e *Executor) terminate(rctx *security.RequestContext, logger *slog.Logger, w Watch, status Status, summary, errMsg string) {
+func (e *Executor) terminate(rctx *security.RequestContext, logger *slog.Logger, w Watch, t TerminalUpdate) {
+	status, summary, errMsg := t.Status, t.Final, t.ErrMsg
 	markCtx, markCancel := context.WithTimeout(rctx.GetContext(), managerWriteTimeout)
-	rows, err := e.manager.MarkTerminal(markCtx, w.TenantID, w.ID, status, summary, errMsg)
+	rows, err := e.manager.MarkTerminal(markCtx, w.TenantID, w.ID, t)
 	markCancel()
 	if err != nil {
 		logger.Error("watch.executor: mark terminal failed", "error", err, "status", string(status))

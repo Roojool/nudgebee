@@ -691,6 +691,15 @@ def _run_test_core(
     score_reason = ""
     trace = ""
 
+    # Fetch the execution trace whenever a conversation exists — including
+    # for a failed test. A crash mid-task still has real evidence (the
+    # verdict judge below needs it); a setup failure that never started a
+    # conversation has none (convo_id is empty, so this is a no-op for it).
+    if convo_id:
+        trace = get_execution_trace(convo_id, session.account_id) or ""
+        if not trace:
+            trace = get_planner_response(convo_id, session.account_id) or ""
+
     if not test_failed and session.llm:
         try:
             from llm.agents.common.ragas_evaluation import evaluate_single
@@ -702,12 +711,6 @@ def _run_test_core(
             rel_score = eval_result.quality
             score_reason = eval_result.reason
 
-            # Planner evaluation
-            trace = (
-                get_execution_trace(convo_id, session.account_id) if convo_id else ""
-            )
-            if not trace:
-                trace = get_planner_response(convo_id, session.account_id) or ""
             if trace:
                 from llm.agents.common.benchmark import _evaluate_planner
                 from llm.agents.common.eval_markers import PLANNER_LABEL
@@ -752,6 +755,42 @@ def _run_test_core(
     else:
         final_status = "fail"
 
+    # --- Verdict: independent qualitative judge (runs in the background) ---
+    # Only for a terminal outcome: a "running" row (poll budget elapsed,
+    # conversation still in flight) is finalized later by the reconciler,
+    # which queues its own judge call. Unlike RAGAS above, a failed test is
+    # judged too when there's a trace to judge from. The row is stored as
+    # "pending" and the call is queued after the store, so the next test
+    # starts without waiting for the verdict.
+    verdict_context = None
+    if session.llm and convo_id and final_status in ("pass", "fail"):
+        from llm.agents.common.verdict_judge import should_skip_verdict
+
+        if not should_skip_verdict(final_status, trace):
+            verdict_context = {
+                "test_id": test_id,
+                "query": user_prompt,
+                "setup": test_case.get("before_test", ""),
+                "expected_answer": ground_truth_str,
+                "actual_answer": answer,
+                "execution_trace": trace,
+                "tool_names": (
+                    tool_names_data.get("tool_names", []) if tool_names_data else []
+                ),
+                "tool_calls_total": (
+                    token_metrics.get("total_tool_calls", 0) if token_metrics else 0
+                ),
+                "tool_calls_successful": (
+                    token_metrics.get("successful_tool_calls", 0)
+                    if token_metrics
+                    else 0
+                ),
+                "error_message": error_message,
+                "error_category": error_category,
+                "status": final_status,
+                "tags": test_case.get("tags", []),
+            }
+
     # Store to DB
     if run_id:
         store_test_result(
@@ -770,6 +809,9 @@ def _run_test_core(
                 "planner_relevancy": planner_score,
                 "score_reason": score_reason,
                 "execution_trace": trace if not test_failed else "",
+                "verdict_status": "pending" if verdict_context else None,
+                "verdict_result": None,
+                "verdict_error": None,
                 "duration_seconds": round(duration, 2),
                 "setup_duration": setup_duration,
                 "llm_duration": elapsed,
@@ -808,6 +850,10 @@ def _run_test_core(
                 "error_category": error_category or "",
             },
         )
+        if verdict_context:
+            from llm.agents.common.verdict_judge import submit_verdict
+
+            submit_verdict(run_id, global_index, convo_id, verdict_context, session.llm)
 
     status = final_status
     logger.info(

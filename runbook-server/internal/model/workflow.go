@@ -347,6 +347,39 @@ type Trigger struct {
 	Layout   *WorkflowTaskLayout `yaml:"layout,omitempty" json:"layout,omitempty"`
 }
 
+// ListenAccounts returns the accounts whose events fire this trigger: params.accounts
+// (event) or params.clusters (optimization), else the workflow's own account.
+func (t Trigger) ListenAccounts(ownAccountID string) []string {
+	key := ""
+	switch t.Type {
+	case WorkflowTriggerEvent:
+		key = "accounts"
+	case WorkflowTriggerOptimization:
+		key = "clusters"
+	default:
+		return []string{ownAccountID}
+	}
+	var accounts []string
+	switch v := t.Params[key].(type) {
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				accounts = append(accounts, s)
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if s != "" {
+				accounts = append(accounts, s)
+			}
+		}
+	}
+	if len(accounts) == 0 {
+		return []string{ownAccountID}
+	}
+	return accounts
+}
+
 // HasManualTrigger reports whether the definition declares a manual trigger.
 //
 // AI invocation is restricted to manually-triggerable automations: a schedule /
@@ -481,11 +514,27 @@ func (t Trigger) Validate(sl validator.StructLevel) {
 			"event_type": {},
 			"filter":     {},
 			"on":         {},
+			"accounts":   {},
 		}
 		for param := range t.Params {
 			if _, exists := allowedParams[param]; !exists {
 				sl.ReportError(t.Params, "params", "Params", "unsupported_event_param", "Unsupported parameter: "+param)
 				return
+			}
+		}
+
+		// `accounts` lists the accounts whose events fire this trigger (default: own).
+		if val, ok := t.Params["accounts"]; ok && val != nil {
+			arr, arrOk := val.([]any)
+			if !arrOk {
+				sl.ReportError(t.Params, "params", "Params", "accounts_invalid_type", "accounts must be an array")
+				return
+			}
+			for _, item := range arr {
+				if s, strOk := item.(string); !strOk || s == "" {
+					sl.ReportError(t.Params, "params", "Params", "accounts_invalid_item", "accounts items must be non-empty strings")
+					return
+				}
 			}
 		}
 
@@ -869,6 +918,8 @@ type WorkflowEventTriggerRule struct {
 	Filter         string          `db:"filter"`
 	TriggerType    WorkflowTrigger `db:"trigger_type"`
 	LifecyclePhase string          `db:"lifecycle_phase"`
+	// ListenAccountID is the account whose events fire this rule; empty means AccountID.
+	ListenAccountID string `db:"listen_account_id"`
 }
 
 // CheckTriggerMatchRequest asks whether a payload would fire a trigger. The trigger
@@ -889,6 +940,7 @@ const (
 	CheckTriggerGateEventType CheckTriggerMatchGate = "event_type"
 	CheckTriggerGatePhase     CheckTriggerMatchGate = "lifecycle_phase"
 	CheckTriggerGateFilter    CheckTriggerMatchGate = "filter"
+	CheckTriggerGateAccount   CheckTriggerMatchGate = "account"
 )
 
 // CheckTriggerMatchResponse reports whether the payload matched. Error is set

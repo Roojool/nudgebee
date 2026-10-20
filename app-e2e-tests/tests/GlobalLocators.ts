@@ -129,4 +129,18 @@ export class CommonLocators {
   getOption(name: string): Locator {
     return this.page.getByRole("option", { name });
   }
+
+  // The cloud account Services resources table renders no testid, so its id is the anchor.
+  get serviceResourceTable(): Locator {
+    return this.page.locator("#service-resource-listing-table");
+  }
+
+  getResourceRowCollapseButton(): Locator {
+    return this.serviceResourceTable.getByRole("button", { name: "Collapse row" }).first();
+  }
+
+  // CustomTable renders no tab strip for a single expandable tab, so Details is the bare tabpanel.
+  getResourceDetailsPanel(): Locator {
+    return this.serviceResourceTable.getByRole("tabpanel").first();
+  }
 }

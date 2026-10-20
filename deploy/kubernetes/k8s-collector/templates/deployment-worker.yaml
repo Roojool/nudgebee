@@ -58,6 +58,7 @@ spec:
           env:
             - name: COLLECTOR_MODE
               value: "worker"
+            {{- include "k8s_collector.otelEnv" . | nindent 12 }}
           envFrom:
             - secretRef:
                 name: {{ include "nudgebee.secretName" . | quote }}

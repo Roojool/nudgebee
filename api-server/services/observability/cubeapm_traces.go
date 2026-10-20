@@ -12,6 +12,7 @@ import (
 	"nudgebee/services/integrations"
 	"nudgebee/services/query"
 	"nudgebee/services/security"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,6 +82,8 @@ var cubeAPMTraceLabelMapping = map[string]string{
 	"span_name":                 "span_name",
 	"span_kind":                 "span_kind",
 	"http_status_code":          "http.response.status_code",
+	"http_method":               "http.request.method",
+	"deployment_environment":    "env",
 	"status_code":               "status_code",
 	"trace_id":                  "trace_id",
 	"span_id":                   "span_id",
@@ -103,6 +106,7 @@ var cubeAPMTraceLabelMapping = map[string]string{
 var cubeAPMTraceFieldAliases = map[string][]string{
 	"_resource.k8s.namespace.name": {"_resource.k8s.namespace.name", "_resource.service.namespace"},
 	"http.response.status_code":    {"http.response.status_code", "http.status_code", "rpc.grpc.status_code"},
+	"http.request.method":          {"http.request.method", "http.method"},
 	"peer.service":                 {"peer.service", "server.address", "net.peer.name", "net.sock.peer.addr", "http.host"},
 	"resource":                     {"http.route", "http.target", "url.path", "url.full", "http.url", "db.statement"},
 }
@@ -196,6 +200,40 @@ func cubeAPMFilterValues(val any) []string {
 	}
 }
 
+// cubeAPMLikeRegex renders a SQL LIKE pattern (`%`, `_`, `\%`, `\_`) as a LogsQL
+// regex. LogsQL's `:~` matches anywhere in the value, so the pattern is anchored to
+// keep LIKE's whole-value meaning. It is case-insensitive, as on Tempo, because the
+// Traces tab's resource search sends `_like` and relies on that; (?s) lets `%` span
+// the newlines of a multi-line db.statement, as SQL LIKE does.
+func cubeAPMLikeRegex(pattern string) string {
+	return "(?is)^(?:" + cubeAPMLikePattern(pattern) + ")$"
+}
+
+// cubeAPMLikePattern turns a SQL LIKE pattern into a regex body: `%` is any run, `_`
+// any one character, `\%` and `\_` are literals. Same translation as main's
+// tempoLikePattern, which prod does not have yet; once the Tempo source is on prod
+// this should call that instead.
+func cubeAPMLikePattern(p string) string {
+	var b strings.Builder
+	runes := []rune(p)
+	for i := 0; i < len(runes); i++ {
+		switch r := runes[i]; {
+		// Only `\%`, `\_` and `\\` are escapes (sqllike.go); any other backslash is a
+		// literal, so a Windows path like `C:\assets` keeps its separator.
+		case r == '\\' && i+1 < len(runes) && (runes[i+1] == '%' || runes[i+1] == '_' || runes[i+1] == '\\'):
+			b.WriteString(regexp.QuoteMeta(string(runes[i+1])))
+			i++
+		case r == '%':
+			b.WriteString(".*")
+		case r == '_':
+			b.WriteString(".")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	return b.String()
+}
+
 // cubeAPMTraceWhere rewrites a canonical where-clause into one over LogsQL field
 // names, ready for buildCubeAPMConditions.
 //
@@ -229,13 +267,15 @@ func cubeAPMTraceWhere(where query.QueryWhereClause) (query.QueryWhereClause, er
 			values := cubeAPMFilterValues(where.Binary[label][op])
 
 			var matchOp query.BinaryWhereClauseType
-			negate := false
+			negate, like := false, false
 			switch op {
 			case query.Eq, query.In:
 				matchOp = query.Eq
 			case query.Nq, query.NotIn:
 				matchOp, negate = query.Eq, true
-			case query.Contains, query.ILike, query.Regex:
+			case query.Like, query.ILike:
+				matchOp, like = query.Regex, true
+			case query.Contains, query.Regex:
 				matchOp = op
 			default:
 				return query.QueryWhereClause{}, fmt.Errorf("unsupported operator %q for CubeAPM traces (field %q)", op, label)
@@ -244,8 +284,12 @@ func cubeAPMTraceWhere(where query.QueryWhereClause) (query.QueryWhereClause, er
 			var terms []query.QueryWhereClause
 			for _, field := range fields {
 				for _, v := range values {
+					v = cubeAPMNormalizeTraceValue(field, v)
+					if like {
+						v = cubeAPMLikeRegex(v)
+					}
 					terms = append(terms, query.QueryWhereClause{Binary: query.BinaryWhereClause{
-						field: {matchOp: cubeAPMNormalizeTraceValue(field, v)},
+						field: {matchOp: v},
 					}})
 				}
 			}

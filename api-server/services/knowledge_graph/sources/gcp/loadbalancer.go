@@ -1109,3 +1109,71 @@ func (s *GCPSource) createLoadBalancerChainEdges(lookup *sources.NodeLookup, cli
 	s.logger.Info("created GCP LB chain edges", "edge_count", len(edges))
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	cloudLoadBalancingRows := resourceKind{
+		Service:      "Cloud Load Balancing",
+		NodeType:     core.NodeTypeLoadBalancer,
+		SpecificType: "GCPLoadBalancer",
+		Extract:      (*GCPSource).extractGCPForwardingRuleMetadata,
+	}
+	registerKind(resourceKind{
+		Service:  "Cloud Load Balancing",
+		Types:    []string{"target-http-proxy", "target-https-proxy", "health-check"},
+		NodeType: core.NodeTypeCloudResource,
+	})
+	registerKind(resourceKind{
+		Service:  "Cloud Load Balancing",
+		Types:    []string{"url-map"},
+		NodeType: core.NodeTypeRouteTable,
+	})
+	registerKind(resourceKind{
+		Service:      "Cloud Load Balancing",
+		Types:        []string{"backend-service", "target-pool"},
+		NodeType:     core.NodeTypeBackendPool,
+		SpecificType: "GCPBackendService",
+		Extract:      (*GCPSource).extractGCPTargetPoolMetadata,
+	})
+	registerKind(cloudLoadBalancingRows)
+	registerKind(cloudLoadBalancingRows.withTypes("forwarding-rule"))
+}
+
+// Per-resource updates (see patch.go). Every part of the load-balancer chain
+// (forwarding rules, backend services, URL maps, target proxies, health checks)
+// is created or enriched from gcloud by the ensureGCP*Nodes passes.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{
+			"GCPLoadBalancer", string(core.NodeTypeLoadBalancer),
+			"GCPBackendService", string(core.NodeTypeBackendPool),
+			string(core.NodeTypeRouteTable), // URL maps
+			gcpHealthCheckKind, gcpTargetProxyKind,
+		},
+		AccountLevel: true,
+	}, nil)
+}
+
+// Kinds of the load-balancer chain resources that are stored as CloudResource.
+const (
+	gcpHealthCheckKind = "GCPHealthCheck"
+	gcpTargetProxyKind = "GCPTargetProxy"
+)
+
+// loadBalancerChainKind recognises a health check or target proxy node. Both are
+// CloudResource nodes, like every unmapped GCP row, so they are identified by the
+// row type ensureGCPHealthCheckNodes and ensureGCPTargetProxyNodes stamp and the
+// inventory rows carry.
+func loadBalancerChainKind(node *core.DbNode) (sources.ResourceKind, bool) {
+	if node.NodeType != core.NodeTypeCloudResource {
+		return sources.ResourceKind{}, false
+	}
+	switch rowType, _ := node.Properties["type"].(string); rowType {
+	case rowTypeHealthCheck:
+		return sources.ResourceKind{NodeType: node.NodeType, SpecificType: gcpHealthCheckKind}, true
+	case rowTypeTargetHTTPProxy, rowTypeTargetHTTPSProxy:
+		return sources.ResourceKind{NodeType: node.NodeType, SpecificType: gcpTargetProxyKind}, true
+	}
+	return sources.ResourceKind{}, false
+}

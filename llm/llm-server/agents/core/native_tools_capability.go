@@ -22,6 +22,12 @@ var nativeToolProviders = map[string]bool{
 	"anthropic":         true,
 }
 
+const (
+	PlannerEngineAuto   = "auto"
+	PlannerEngineReAct3 = "react3"
+	PlannerEngineReAct4 = "react4"
+)
+
 // SupportsNativeTools reports whether the given provider (and, in future,
 // model) can run the provider-native tool-calling planner (ReAct4). It is
 // fail-closed: an unknown or unlisted provider returns false so the agent
@@ -41,7 +47,7 @@ func SupportsNativeTools(provider, model string) bool {
 // unit-tested without a live LLM config.
 //
 // ReAct4 is selected only when all hold:
-//   - the react4 flag is enabled OR the agent pins itself to ReAct4
+//   - the planner engine is not forced to react3 OR the agent pins itself to ReAct4
 //     (NBAgentReAct4Provider — an evaluation mirror such as
 //     k8s_orchestrator_react4);
 //   - the agent's DECLARED intent is ReAct or Orchestrating (the only intents
@@ -49,12 +55,25 @@ func SupportsNativeTools(provider, model string) bool {
 //     never do);
 //   - the resolved provider/model supports native tool calling.
 //
-// Note that `pinned` bypasses only the flag, never the capability gate: a
+// Note that `pinned` bypasses only the engine selection, never the capability gate: a
 // pinned agent on a provider without native tool support still falls back to
 // ReAct3 rather than failing.
-func shouldUseReAct4(declared AgentPlannerType, react4Enabled, pinned bool, provider, model string) bool {
-	if !react4Enabled && !pinned {
-		return false
+func shouldUseReAct4(declared AgentPlannerType, plannerEngine string, pinned bool, provider, model string) bool {
+	if plannerEngine == "" {
+		plannerEngine = PlannerEngineAuto
+	}
+	switch strings.ToLower(strings.TrimSpace(plannerEngine)) {
+	case PlannerEngineAuto, PlannerEngineReAct4:
+		// Supported ReAct4 engine paths: continue to intent and capability gates.
+	case PlannerEngineReAct3:
+		if !pinned {
+			return false
+		}
+	default:
+		// Unknown engine: fail closed to ReAct3 unless explicitly pinned.
+		if !pinned {
+			return false
+		}
 	}
 	if declared != AgentPlannerTypeReAct && declared != AgentPlannerTypeOrchestrating {
 		return false

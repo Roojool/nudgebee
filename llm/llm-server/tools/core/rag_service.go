@@ -51,10 +51,21 @@ type ragQueryRequest struct {
 	// runbooks) become decisively ordered, at the cost of one extra LLM call
 	// inside retrieval.
 	UseReranking *bool `json:"use_reranking,omitempty"`
+	// TraceID names the row rag-server writes to llm_retrieval_trace for this
+	// search. Supplied by this side so the judge can update that row afterwards
+	// with what it decided — without it the row gets a server-generated id this
+	// service never learns, and the verdict has nowhere to land.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 type RAGSearchResult struct {
-	Document        string         `json:"document"`
+	Document string `json:"document"`
+	// Chunk is the passage that matched, present only in rag-server's ranked
+	// mode, where Document carries the whole parent document instead. It is what
+	// the score refers to, so it is what a relevance judgement should read, and
+	// it says which part of a long document answered the question. Empty in
+	// threshold mode, where Document IS the chunk.
+	Chunk           string         `json:"chunk"`
 	Metadata        map[string]any `json:"metadata"`
 	SimilarityScore float32        `json:"similarity_score"`
 }
@@ -104,7 +115,29 @@ func addRAGAuth(req *http.Request) {
 	}
 }
 
+// retrievalTraceIDKey carries the caller-chosen trace id for ONE search.
+// Concurrent searches (the KB pre-step runs up to four) each derive their own
+// context, so one id never covers two rows.
+type retrievalTraceIDKeyType struct{}
+
+var retrievalTraceIDKey retrievalTraceIDKeyType
+
+// WithRetrievalTraceID returns ctx carrying the id rag-server should use for the
+// trace row of the search made with it, and the id itself.
+func WithRetrievalTraceID(ctx context.Context) (context.Context, string) {
+	id := uuid.NewString()
+	return context.WithValue(ctx, retrievalTraceIDKey, id), id
+}
+
+func retrievalTraceIDFrom(ctx context.Context) string {
+	if id, ok := ctx.Value(retrievalTraceIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
 func executeRAGCall(ctx context.Context, payload ragQueryRequest) (RAGSearchResults, error) {
+	payload.TraceID = retrievalTraceIDFrom(ctx)
 	// Stamp trace_id/span_id from the caller's context so RAG round-trips
 	// correlate with the conversation's other log lines in Loki.
 	logger := common.TraceLogger(ctx)
@@ -291,6 +324,17 @@ func QueryRAGCollectionReranked(ctx context.Context, userId, accountId, query, m
 // that already know the tenant scope (e.g. memory-v2 compose, which
 // sends the tenant UUID as account_id) should pass it.
 func QueryRAGCollection(ctx context.Context, userId, accountId, tenantId, query, module, collectionName string, numberOfResults int, conversationID string, messageId string, agentId string, trackTokenUsage bool, metadataFilter ...map[string]any) RAGSearchResults {
+	results, _ := QueryRAGCollectionErr(ctx, userId, accountId, tenantId, query, module, collectionName, numberOfResults, conversationID, messageId, agentId, trackTokenUsage, metadataFilter...)
+	return results
+}
+
+// QueryRAGCollectionErr is QueryRAGCollection with the retrieval error kept.
+//
+// "the corpus had nothing for this turn" and "the call failed" are different
+// facts that an empty slice cannot tell apart. Callers that record why a
+// retrieval produced nothing — the memory layers distinguish rag_empty from
+// rag_error — need the error so an outage is not logged as normal operation.
+func QueryRAGCollectionErr(ctx context.Context, userId, accountId, tenantId, query, module, collectionName string, numberOfResults int, conversationID string, messageId string, agentId string, trackTokenUsage bool, metadataFilter ...map[string]any) (RAGSearchResults, error) {
 	payload := ragQueryRequest{
 		AccountID:       accountId,
 		TenantID:        tenantId,
@@ -310,9 +354,9 @@ func QueryRAGCollection(ctx context.Context, userId, accountId, tenantId, query,
 
 	response, err := executeRAGCall(ctx, payload)
 	if err != nil {
-		return RAGSearchResults{}
+		return RAGSearchResults{}, err
 	}
-	return response
+	return response, nil
 }
 
 type ragServerCreateRequest struct {
@@ -767,4 +811,100 @@ func DeleteMemoryFromRAG(accountId, id string) error {
 	}
 
 	return nil
+}
+
+// RetrievalQueryMaxBytes bounds every query that reaches an embedder.
+//
+// Bytes, not tokens, because this package cannot count the tokens that matter.
+// The limit being protected belongs to the embedding model (bge-small-en-v1.5,
+// 512 WordPiece tokens), and llm-server's own CountTokens speaks the chat
+// model's BPE instead — measured over 60 real queries it reports 1.33x fewer
+// tokens than bge on aggregate and up to 2x fewer on a single query, because
+// hyphenated resource names shatter into WordPiece but survive BPE.
+//
+// 600 is sized against bge directly: the densest real query measured 0.54
+// bge-tokens per byte, so 600 bytes is at most ~325 tokens — inside the window
+// with room to spare, and checked with len(). Built queries run 7 tokens at the
+// median and 45 at the maximum, so this bound is a backstop, not a budget.
+const RetrievalQueryMaxBytes = 600
+
+// retrievalHintKeys are the QueryConfig.Labels keys naming the subject of a
+// turn, in priority order.
+var retrievalHintKeys = []string{
+	"subject_name", "subject_namespace", "subject_type", "subject_node",
+	"service", "services", "alertname", "aggregation_key",
+}
+
+// BuildRetrievalQuery derives what a retrieval path embeds.
+//
+// Three cases, in order. A query the model itself wrote (a tool's query or
+// keyword argument) wins: it has stated intent that nothing inferred can beat.
+// A question that already fits the bound is returned untouched — it was never
+// the problem, and natural language carries intent a list of labels cannot.
+// Only past the bound is the query rebuilt from the turn's subject, because
+// what sits there is a rendered task prompt whose opening is identical across
+// every copy: truncating it keeps the shared boilerplate and drops the part
+// that identifies the turn.
+//
+// Returns "" when there is nothing to build from, so callers keep their
+// existing behaviour rather than embed something worse.
+func BuildRetrievalQuery(preferred string, qc NBQueryConfig, question string) string {
+	if p := strings.TrimSpace(preferred); p != "" {
+		return common.TruncateHead(p, RetrievalQueryMaxBytes)
+	}
+
+	// A question that already fits the embedder is left alone. Natural language
+	// states intent that a list of labels cannot, so rewriting a query that was
+	// never too long is risk without benefit.
+	if q := strings.TrimSpace(question); q != "" && len(q) <= RetrievalQueryMaxBytes {
+		return q
+	}
+
+	// Past the bound the question is a rendered task prompt, not a question:
+	// its opening is identical across every copy, so truncating it keeps the
+	// shared boilerplate and drops what identifies the turn. Build from the
+	// subject instead.
+	seen := make(map[string]struct{})
+	var parts []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		key := strings.ToLower(v)
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		parts = append(parts, v)
+	}
+
+	add(qc.Workload)
+	add(qc.Namespace)
+	for _, k := range retrievalHintKeys {
+		// Labels is map[string]any, so a slice can arrive either shape: JSON
+		// decoding yields []any, a Go-side caller can hand over []string.
+		// Missing one drops the label silently, which is worse than the branch.
+		switch v := qc.Labels[k].(type) {
+		case string:
+			add(v)
+		case []string:
+			for _, item := range v {
+				add(item)
+			}
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					add(s)
+				}
+			}
+		}
+	}
+
+	// Nothing to build from. Callers keep their existing behaviour rather than
+	// embed something worse.
+	if len(parts) == 0 {
+		return ""
+	}
+	return common.TruncateHead(strings.Join(parts, " "), RetrievalQueryMaxBytes)
 }

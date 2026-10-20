@@ -135,3 +135,12 @@ func (s *GCPSource) ensureGCPCDNNodes(nodes []*core.DbNode, lookup *sources.Node
 	}
 	return nodes
 }
+
+// Per-resource updates (see patch.go). CDN backends are created from gcloud by
+// ensureGCPCDNNodes.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{string(core.NodeTypeCDN)},
+		AccountLevel:  true,
+	}, nil)
+}

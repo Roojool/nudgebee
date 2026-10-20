@@ -8,6 +8,7 @@ import (
 
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/database/models"
+	"nudgebee/services/internal/database/pgbatch"
 	"nudgebee/services/vulnmatcher"
 
 	"github.com/jmoiron/sqlx"
@@ -17,20 +18,6 @@ import (
 const (
 	recommendationCategory = "Security"
 	recommendationRuleName = "vm_package_vulnerability"
-
-	// findingRowColumns is the column count in the recommendation upsert
-	// below; findingBatchSize keeps each NamedExec's bind-parameter count
-	// (rows*columns) under Postgres's 65535 limit. A single real host's
-	// finding set can run into the thousands, so this isn't just a
-	// defensive margin — a busy host hits the unbatched limit outright.
-	findingRowColumns = 16
-	findingBatchSize  = 65535 / findingRowColumns
-
-	// packageRowColumns/packageBatchSize apply the same bind-parameter cap
-	// to the vm_package upsert — a host's installed package count can run
-	// into the thousands too.
-	packageRowColumns = 15
-	packageBatchSize  = 65535 / packageRowColumns
 )
 
 // packageRow is vm_package's insert shape as a struct rather than
@@ -108,10 +95,10 @@ func upsertPackages(tenantID, cloudAccountID, cloudResourceID, osFamily, osVersi
 			return nil, fmt.Errorf("vmpackage: archive stale packages: %w", err)
 		}
 
-		for start := 0; start < len(rows); start += packageBatchSize {
-			end := min(start+packageBatchSize, len(rows))
-			if _, err := tx.NamedExec(
-				`INSERT INTO vm_package
+		// A host's installed package count runs into the thousands, so the
+		// upsert is batched under Postgres's bind-parameter limit.
+		if err := pgbatch.NamedExec(tx,
+			`INSERT INTO vm_package
 				   (tenant_id, cloud_account_id, cloud_resource_id, os_family, os_version, pkg_type, name, version,
 				    arch, epoch, source_name, source_version, is_active, last_seen_at, updated_at)
 				 VALUES
@@ -121,10 +108,9 @@ func upsertPackages(tenantID, cloudAccountID, cloudResourceID, osFamily, osVersi
 				 DO UPDATE SET is_active = true, last_seen_at = EXCLUDED.last_seen_at, updated_at = EXCLUDED.updated_at,
 				               os_family = EXCLUDED.os_family, os_version = EXCLUDED.os_version,
 				               source_version = EXCLUDED.source_version`,
-				rows[start:end],
-			); err != nil {
-				return nil, fmt.Errorf("vmpackage: upsert packages: %w", wrapPQError(err))
-			}
+			rows,
+		); err != nil {
+			return nil, fmt.Errorf("vmpackage: upsert packages: %w", wrapPQError(err))
 		}
 		return nil, nil
 	})
@@ -182,10 +168,10 @@ func persistFindings(tenantID, cloudAccountID, cloudResourceID string, findings 
 			}
 		}
 
-		for start := 0; start < len(rows); start += findingBatchSize {
-			end := min(start+findingBatchSize, len(rows))
-			if _, err := tx.NamedExec(
-				`INSERT INTO recommendation
+		// A busy host's finding set runs into the thousands, so the upsert is
+		// batched under Postgres's bind-parameter limit.
+		if err := pgbatch.NamedExec(tx,
+			`INSERT INTO recommendation
 				   (status, tenant_id, cloud_account_id, recommendation, severity, category, rule_name,
 				    estimated_savings, recommendation_action, resource_id, account_object_id, updated_at,
 				    finops_score, finops_band, finops_score_breakdown, vulnerability_id)
@@ -201,10 +187,9 @@ func persistFindings(tenantID, cloudAccountID, cloudResourceID string, findings 
 				               severity = EXCLUDED.severity,
 				               recommendation_action = EXCLUDED.recommendation_action,
 				               vulnerability_id = EXCLUDED.vulnerability_id`,
-				rows[start:end],
-			); err != nil {
-				return nil, fmt.Errorf("vmpackage: upsert findings: %w", wrapPQError(err))
-			}
+			rows,
+		); err != nil {
+			return nil, fmt.Errorf("vmpackage: upsert findings: %w", wrapPQError(err))
 		}
 		return nil, nil
 	})

@@ -30,6 +30,29 @@ echo "Running Postgres migrations (atlas)..."
 # not auto-create schemas it does not own. IF NOT EXISTS keeps this idempotent.
 psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "CREATE SCHEMA IF NOT EXISTS nudgebee;"
 
+# Existing application connections must still be able to resolve tables after
+# reconciliation or newly applied Atlas migrations place them in public.
+public_in_path=$(psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -tAq -c \
+    "SELECT 'public' = ANY(current_schemas(false))")
+if [ "$public_in_path" != "t" ]; then
+    echo "ERROR: public is absent from the database connection's search_path; application connections would not resolve migrated tables." >&2
+    exit 1
+fi
+
+# A historical role-named installation created a known set of application
+# tables in nudgebee before this job started putting public first. Relocate
+# only those tables, only for that role, before gap backfills or Atlas run.
+# The SQL moves them atomically and gives up quickly if live app traffic holds
+# a lock; retrying the hook after the workload quiets is safe.
+database_role=$(psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -tAq -c 'SELECT current_user')
+if [ "$database_role" = "nudgebee" ]; then
+    echo "Checking known role-schema tables for reconciliation..."
+    if ! psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f ./reconcile-role-schema.sql; then
+        echo "ERROR: role-schema reconciliation failed without moving any tables; review conflicts or retry when database traffic is quiet." >&2
+        exit 1
+    fi
+fi
+
 # Stepwise table-presence probes. A single CASE expression with both branches
 # referencing both tracker tables would fail at parse time on any DB where one
 # is missing (Postgres plans every WHEN/THEN arm before evaluation, and
@@ -135,10 +158,119 @@ else
     echo "Fresh DB (no atlas revisions, no legacy tracker); applying from scratch."
 fi
 
+# Unqualified CREATE TABLE statements must land in public: some migrations
+# immediately refer to the new table as public.<name>. The default PostgreSQL
+# search_path is "$user", public, so the nudgebee role resolves the nudgebee
+# revisions schema first. Do not change the role or APP_DATABASE_URL used by
+# other services; set the path on Atlas's connection only.
+atlas_database_url="$APP_DATABASE_URL"
+current_schema=$(psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -tAq -c 'SELECT current_schema()')
+if [ "$current_schema" != "public" ]; then
+    if [ -z "$current_schema" ]; then
+        echo "ERROR: migration connection has no current schema." >&2
+        exit 1
+    fi
+    can_create_public=$(psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -tAq -c \
+        "SELECT has_schema_privilege(current_user, 'public', 'CREATE')")
+    if [ "$can_create_public" != "t" ]; then
+        echo "ERROR: migration user cannot create tables in public." >&2
+        exit 1
+    fi
+
+    # Reordering the path must not change existing relation, function, or
+    # type resolution. Fail closed if a name exists in both public and a later
+    # schema; even an unqualified function call could otherwise change meaning.
+    conflicting_objects=$(psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -tAq -c "
+      WITH names AS (
+        SELECT 'relation ' || c.relname AS name, n.nspname
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        UNION ALL
+        SELECT 'function ' || p.proname, n.nspname
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        UNION ALL
+        SELECT 'type ' || t.typname, n.nspname
+        FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+      )
+      SELECT string_agg(DISTINCT p.name, ', ' ORDER BY p.name)
+      FROM names p JOIN names other ON other.name = p.name
+      WHERE p.nspname = 'public'
+        AND other.nspname <> 'public'
+        AND other.nspname = ANY (current_schemas(false));
+    ")
+    if [ -n "$conflicting_objects" ]; then
+        echo "ERROR: cannot put public first; object names exist in both public and the current search path: $conflicting_objects" >&2
+        exit 1
+    fi
+
+    # Any unqualified CREATE TABLE checks its creation schema only. A pending
+    # migration would create a second public table if its name already exists
+    # only in a later search-path schema. Atlas status limits this check to
+    # files the database has not applied yet.
+    pending_files=$(atlas migrate status \
+        -c file://atlas.hcl --env default --url "$APP_DATABASE_URL" \
+        --format '{{ range .Pending }}{{ .Name }}{{ "\n" }}{{ end }}')
+    existing_nonpublic_relations=$(psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -tAq -c "
+      SELECT DISTINCT c.relname
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname <> 'public'
+        AND n.nspname = ANY (current_schemas(false));
+    ")
+    pending_collisions=$(ATLAS_PENDING_FILES="$pending_files" \
+        EXISTING_NONPUBLIC_RELATIONS="$existing_nonpublic_relations" python3 - <<'PY'
+import os
+from pathlib import Path
+from validate_migrations import created_tables
+
+existing = set(os.environ["EXISTING_NONPUBLIC_RELATIONS"].splitlines())
+collisions = set()
+for name in os.environ["ATLAS_PENDING_FILES"].splitlines():
+    if Path(name).name != name or not name.endswith(".up.sql"):
+        raise SystemExit(f"ERROR: unexpected pending migration name: {name}")
+    sql = (Path("migrations/app") / name).read_text(encoding="utf-8-sig")
+    for schema, table, _ in created_tables(sql):
+        if schema is None and table in existing:
+            collisions.add(table)
+print(", ".join(sorted(collisions)))
+PY
+    )
+    if [ -n "$pending_collisions" ]; then
+        echo "ERROR: pending CREATE TABLE would duplicate existing non-public relations: $pending_collisions" >&2
+        exit 1
+    fi
+
+    atlas_search_path=$(psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -tAq -c "
+      SELECT 'public' || COALESCE(',' || string_agg(quote_ident(schema_name), ',' ORDER BY position), '')
+      FROM unnest(current_schemas(false)) WITH ORDINALITY AS schemas(schema_name, position)
+      WHERE schema_name <> 'public';
+    ")
+    atlas_database_url=$(ATLAS_SEARCH_PATH="$atlas_search_path" python3 - <<'PY'
+import os
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+
+url = urlsplit(os.environ["APP_DATABASE_URL"])
+params = parse_qsl(url.query, keep_blank_values=True)
+if any(key == "search_path" for key, _ in params):
+    raise SystemExit("ERROR: cannot override an explicit search_path in APP_DATABASE_URL")
+options = next((value for key, value in params if key == "options"), "")
+params = [(key, value) for key, value in params if key != "options"]
+params.append(("options", (options + " -csearch_path=" + os.environ["ATLAS_SEARCH_PATH"]).strip()))
+# PostgreSQL URI parameters decode %20 as a space, not form-style '+'.
+print(urlunsplit(url._replace(query=urlencode(params, quote_via=quote))))
+PY
+    )
+    atlas_current_schema=$(psql "$atlas_database_url" -v ON_ERROR_STOP=1 -tAq -c 'SELECT current_schema()')
+    if [ "$atlas_current_schema" != "public" ]; then
+        echo "ERROR: Atlas connection would not use public as its current schema." >&2
+        exit 1
+    fi
+    echo "Atlas migration search_path: $atlas_search_path"
+fi
+
 echo "Applying migrations via atlas..."
 atlas migrate apply \
     -c file://atlas.hcl --env default \
-    --url "$APP_DATABASE_URL" \
+    --url "$atlas_database_url" \
     --tx-mode file
 echo "Postgres migrations OK."
 
@@ -194,12 +326,30 @@ if [ "${MIGRATE_SKIP_RABBITMQ:-0}" = "1" ]; then
     echo "Skipping RabbitMQ migrations (MIGRATE_SKIP_RABBITMQ=1)"
 else
     echo "Running RabbitMQ migrations..."
-    until curl -sf -u "$RABBIT_MQ_USERNAME:$RABBIT_MQ_PASSWORD" "http://$RABBIT_MQ_HOST:15672/api/overview" > /dev/null; do
+    # Bounded, and never fatal. These scripts only configure the broker and are
+    # idempotent, so a run skipped here is applied by the next deploy. The wait
+    # used to be unbounded: a broker that never comes back (down, moved, wrong
+    # credentials) held the Job open forever, and on-prem that Job is a
+    # post-install,post-upgrade Helm hook with backoffLimit: 0 -- the upgrade
+    # hangs instead of finishing. A failing script was fatal for the same
+    # reason, since the runner is under `set -e`.
+    rabbit_ready=0
+    rabbit_deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$rabbit_deadline" ]; do
+      if curl -sf --max-time 5 -u "$RABBIT_MQ_USERNAME:$RABBIT_MQ_PASSWORD" "http://$RABBIT_MQ_HOST:15672/api/overview" > /dev/null; then
+        rabbit_ready=1
+        break
+      fi
       echo "Waiting for RabbitMQ management API..."
       sleep 3
     done
-    for script in ./migrations/rabbitmq/*.sh; do
-      echo "running: $script"
-      sh "$script"
-    done
+    if [ "$rabbit_ready" = "1" ]; then
+      for script in ./migrations/rabbitmq/*.sh; do
+        echo "running: $script"
+        sh "$script" || echo "WARN: $script failed; continuing (it re-runs on the next deploy)" >&2
+      done
+    else
+      echo "WARN: RabbitMQ management API at $RABBIT_MQ_HOST:15672 unreachable for 3m;" \
+           "skipping RabbitMQ migrations (they re-run on the next deploy)." >&2
+    fi
 fi

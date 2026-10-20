@@ -3,24 +3,22 @@ import { Box, Typography } from '@mui/material';
 import { Modal } from '@ui/Modal';
 import { useBrandingConfig } from '@hooks/useTenantBranding';
 import { Button } from '@ui/Button';
-import { Input } from '@ui/Input';
-import CustomTable from '@shared/tables/CustomTable';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import InfoIcon from '@mui/icons-material/Info';
-import { DeleteIconRed } from '@assets';
-import SafeIcon from '@shared/icons/SafeIcon';
-import dayjs from 'dayjs';
 import apiUser from '@api1/user/';
 import { getAppBaseUrl } from '@lib/externalUrls';
+import TokenList from './TokenList';
+import CreateTokenDialog from './CreateTokenDialog';
 
-const ApiTokens = ({ open, title, onClose }) => {
+// `defaultKind` is the type the Create form starts on. Pass a single-purpose kind, never
+// 'all': a key that opens both the app API and the gateway must only ever be picked on purpose.
+const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
   const { title: baseTitle } = useBrandingConfig();
   const [loading, setLoading] = useState(false);
   const [tokens, setTokens] = useState([]);
-  const [showCreateForm, setShowCreateForm] = useState(false);
-  const [tokenName, setTokenName] = useState('');
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [createdToken, setCreatedToken] = useState(null);
   const [createdTokenName, setCreatedTokenName] = useState(null);
   const [showInstructions, setShowInstructions] = useState(false);
@@ -30,6 +28,7 @@ const ApiTokens = ({ open, title, onClose }) => {
     if (open) {
       fetchTokens();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const fetchTokens = async () => {
@@ -50,26 +49,26 @@ const ApiTokens = ({ open, title, onClose }) => {
     }
   };
 
-  const createToken = async () => {
-    if (!tokenName.trim()) {
+  // Resolves true once the key exists, so the create form knows whether to clear itself.
+  const createToken = async ({ name, kind, expiresAt, limits, scopes }) => {
+    if (!name) {
       snackbar.error('Token name is required');
-      return;
+      return false;
     }
 
     try {
       setLoading(true);
-      const response = await apiUser.createUserToken(tokenName);
+      const response = await apiUser.createUserToken({ name, kind, expiresAt, limits, scopes });
 
-      // Check for errors in different response formats
       if (response.errors && response.errors.length > 0) {
         snackbar.error(`Failed to create API token - ${parseHttpResponseBodyMessage(response)}`);
       } else if (response.data && response.data.token) {
         setCreatedToken(response.data.token);
-        setCreatedTokenName(tokenName.trim());
-        setTokenName('');
-        setShowCreateForm(false);
+        setCreatedTokenName(name);
+        setShowCreateDialog(false);
         fetchTokens();
         snackbar.success('API Token created successfully');
+        return true;
       } else {
         snackbar.error('Failed to create API token - Invalid response');
       }
@@ -78,9 +77,10 @@ const ApiTokens = ({ open, title, onClose }) => {
     } finally {
       setLoading(false);
     }
+    return false;
   };
 
-  const deleteToken = async (tokenId, tokenName) => {
+  const revokeToken = (tokenId, tokenName) => {
     setDeleteDialog({ open: true, token: { id: tokenId, name: tokenName } });
   };
 
@@ -92,7 +92,7 @@ const ApiTokens = ({ open, title, onClose }) => {
 
     try {
       setLoading(true);
-      const response = await apiUser.deleteUserToken(token.name);
+      const response = await apiUser.deleteUserToken({ id: token.id });
       if (response.errors && response.errors.length > 0) {
         snackbar.error(`Failed to delete API token - ${parseHttpResponseBodyMessage(response)}`);
       } else {
@@ -117,19 +117,11 @@ const ApiTokens = ({ open, title, onClose }) => {
   };
 
   const handleClose = () => {
-    setShowCreateForm(false);
-    setTokenName('');
+    setShowCreateDialog(false);
     setCreatedToken(null);
     setCreatedTokenName(null);
     setDeleteDialog({ open: false, token: null });
     onClose();
-  };
-
-  const formatDate = (date) => {
-    if (!date) {
-      return 'Never';
-    }
-    return dayjs(date).format('MMM DD, YYYY HH:mm');
   };
 
   return (
@@ -142,7 +134,8 @@ const ApiTokens = ({ open, title, onClose }) => {
         width='md'
         sx={{
           '& .MuiPaper-root': {
-            maxWidth: ds.space.mul(0, 400),
+            // Wide enough for every kind's columns in one table (it was 800px when each tab held one kind).
+            maxWidth: ds.space.mul(0, 550),
             '& .MuiDialogContent-root': {
               padding: `${ds.space[6]} ${ds.space.mul(0, 20)} 0px ${ds.space.mul(0, 20)}`,
             },
@@ -172,7 +165,7 @@ const ApiTokens = ({ open, title, onClose }) => {
                   bgcolor: ds.background[100],
                   borderRadius: ds.radius.sm,
                   border: `1px solid ${ds.gray[200]}`,
-                  fontFamily: 'monospace',
+                  fontFamily: ds.font.mono,
                   fontSize: ds.text.bodyLg,
                   wordBreak: 'break-all',
                 }}
@@ -194,90 +187,22 @@ const ApiTokens = ({ open, title, onClose }) => {
             </Box>
           )}
 
-          {/* Create Token Form */}
-          {showCreateForm && (
-            <Box
-              sx={{
-                p: ds.space.mul(0, 10),
-                border: `1px solid ${ds.gray[200]}`,
-                borderRadius: ds.radius.lg,
-                bgcolor: ds.background[100],
-              }}
-            >
-              <Typography sx={{ fontSize: ds.text.title, fontWeight: ds.weight.semibold, color: ds.gray[700], mb: ds.space[4] }}>
-                Create New API Token
-              </Typography>
-              <Box sx={{ mb: ds.space[4] }}>
-                <Input size='sm' label='Token Name' value={tokenName} placeholder='Enter a descriptive name for your token' onChange={setTokenName} />
-              </Box>
-              <Box sx={{ display: 'flex', gap: ds.space[3], justifyContent: 'flex-end' }}>
-                <Button
-                  size='md'
-                  tone='secondary'
-                  onClick={() => {
-                    setShowCreateForm(false);
-                    setTokenName('');
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button size='md' onClick={createToken} disabled={loading || !tokenName.trim()}>
-                  Create Token
-                </Button>
-              </Box>
-            </Box>
-          )}
-
           {/* Tokens List */}
           <Box>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: ds.space[4] }}>
-              <Typography sx={{ fontSize: ds.text.title, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>API Tokens</Typography>
-              {!showCreateForm && (
-                <Button
-                  size='md'
-                  onClick={() => {
-                    setShowCreateForm(true);
-                    setCreatedToken(null);
-                    setCreatedTokenName(null);
-                  }}
-                >
-                  Create New Token
-                </Button>
-              )}
-            </Box>
-
-            {tokens.length === 0 ? (
-              <Box
-                sx={{
-                  textAlign: 'center',
-                  py: ds.space.mul(0, 20),
-                  color: ds.gray[500],
+            <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', mb: ds.space[4] }}>
+              <Button
+                size='md'
+                onClick={() => {
+                  setShowCreateDialog(true);
+                  setCreatedToken(null);
+                  setCreatedTokenName(null);
                 }}
               >
-                <Typography>No API tokens found. Create your first token to get started.</Typography>
-              </Box>
-            ) : (
-              <CustomTable
-                headers={['Name', 'Created', 'Last Used', 'Actions']}
-                tableData={tokens.map((token) => [
-                  { text: token.name, component: <Typography variant='body2'>{token.name}</Typography> },
-                  { text: formatDate(token.created_at), component: <Typography variant='body2'>{formatDate(token.created_at)}</Typography> },
-                  { text: formatDate(token.accessed_at), component: <Typography variant='body2'>{formatDate(token.accessed_at)}</Typography> },
-                  {
-                    component: (
-                      <Button
-                        tone='ghost'
-                        composition='icon-only'
-                        size='sm'
-                        onClick={() => deleteToken(token.id, token.name)}
-                        icon={<SafeIcon src={DeleteIconRed} alt='delete' width={18} height={18} />}
-                        aria-label='Delete token'
-                      />
-                    ),
-                  },
-                ])}
-              />
-            )}
+                Create Token
+              </Button>
+            </Box>
+
+            <TokenList tokens={tokens} onRevoke={revokeToken} />
           </Box>
 
           {/* Action Buttons */}
@@ -307,6 +232,8 @@ const ApiTokens = ({ open, title, onClose }) => {
           </Box>
         </Box>
       </Modal>
+
+      <CreateTokenDialog open={showCreateDialog} defaultKind={defaultKind} onClose={() => setShowCreateDialog(false)} onCreate={createToken} />
 
       {/* Instructions Modal */}
       <Modal
@@ -342,7 +269,7 @@ const ApiTokens = ({ open, title, onClose }) => {
               bgcolor: ds.blue[100],
               borderRadius: ds.radius.sm,
               fontSize: ds.text.small,
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               border: `1px solid ${ds.gray[200]}`,
               wordBreak: 'break-all',
               overflowX: 'auto',
@@ -362,7 +289,7 @@ const ApiTokens = ({ open, title, onClose }) => {
               bgcolor: ds.blue[100],
               borderRadius: ds.radius.sm,
               fontSize: ds.text.small,
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               border: `1px solid ${ds.gray[200]}`,
               wordBreak: 'break-all',
               overflowX: 'auto',
@@ -395,6 +322,7 @@ const ApiTokens = ({ open, title, onClose }) => {
         width='sm'
         title='Delete API Token'
         confirmText='Delete'
+        confirmTone='danger'
         onConfirm={confirmDeleteToken}
         loader={loading}
       >

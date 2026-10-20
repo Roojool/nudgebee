@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -87,4 +88,24 @@ func TestWorkflowSearchToolWrapsTransportErrors(t *testing.T) {
 	_, err := WorkflowSearchTool{}.Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"query": "x"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to search automations")
+}
+
+func TestInjectAutomationURLs(t *testing.T) {
+	prev := config.Config.BaseUrl
+	config.Config.BaseUrl = "https://app.example.com/"
+	t.Cleanup(func() { config.Config.BaseUrl = prev })
+
+	raw := []byte(`{"workflows":[{"id":"wf-1","name":"restart"}],"total_invocable":7}`)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(injectAutomationURLs(raw, "acct-1"), &parsed))
+	assert.EqualValues(t, 7, parsed["total_invocable"])
+	wf := parsed["workflows"].([]any)[0].(map[string]any)
+	assert.Equal(t, "https://app.example.com/automation/wf-1?accountId=acct-1", wf["url"])
+	assert.Equal(t, "restart", wf["name"])
+
+	assert.Equal(t, raw, injectAutomationURLs(raw, ""), "no account leaves the response untouched")
+	for _, passthrough := range [][]byte{[]byte(`not json`), []byte(`{"error":"nope"}`)} {
+		assert.Equal(t, passthrough, injectAutomationURLs(passthrough, "acct-1"))
+	}
 }

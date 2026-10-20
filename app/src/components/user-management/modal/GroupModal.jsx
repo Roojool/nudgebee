@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Box, IconButton } from '@mui/material';
+import { Box } from '@mui/material';
 import Typography from '@mui/material/Typography';
 import { Input } from '@ui/Input';
 import { useForm } from 'react-hook-form';
@@ -60,14 +60,6 @@ const PROVIDER_ICON_MAP = {
   Azure: AzureIcon,
   GCP: GCPIcon,
   K8s: KubernetesIcon,
-};
-
-const trashBtnSx = {
-  width: ds.space[6],
-  height: ds.space[6],
-  borderRadius: 'var(--ds-radius-sm)',
-  padding: 'var(--ds-space-1)',
-  '&:hover': { background: ds.red[200] },
 };
 
 // Forces tables inside RBAC/members surfaces to respect modal width.
@@ -791,13 +783,15 @@ function GroupModal({ open, handleClose, groupData, handleSnackBarData }) {
       { component: <Label text={user?.status} /> },
       {
         component: (
-          <IconButton
-            sx={trashBtnSx}
+          <Button
+            tone='ghost'
+            size='md'
+            composition='icon-only'
+            aria-label='Remove member'
+            icon={<SafeIcon alt='delete icon' src={DeleteIcon} height='20' width='20' />}
             onClick={() => handleUserDelete(user?.username)}
             disabled={!canManage('usergroups', 'Write') && currentUser?.user?.email == user?.username}
-          >
-            <SafeIcon alt='delete icon' src={DeleteIcon} height='20' width='20' />
-          </IconButton>
+          />
         ),
       },
     ];
@@ -830,9 +824,14 @@ function GroupModal({ open, handleClose, groupData, handleSnackBarData }) {
       { component: <Label text={filterUser.status} /> },
       {
         component: (
-          <IconButton sx={trashBtnSx} onClick={() => handleDeleteAdd(filterUser.username)}>
-            <SafeIcon alt='delete icon' src={DeleteIcon} height='20' width='20' />
-          </IconButton>
+          <Button
+            tone='ghost'
+            size='md'
+            composition='icon-only'
+            aria-label='Remove member'
+            icon={<SafeIcon alt='delete icon' src={DeleteIcon} height='20' width='20' />}
+            onClick={() => handleDeleteAdd(filterUser.username)}
+          />
         ),
       },
     ];
@@ -895,9 +894,14 @@ function GroupModal({ open, handleClose, groupData, handleSnackBarData }) {
         { text: roleLabel, roleValue: accountRole },
         {
           component: (
-            <IconButton sx={trashBtnSx} onClick={() => handleAccountDelete(filterAccount.id, accountRole)}>
-              <SafeIcon alt='delete icon' src={DeleteIcon} height='20' width='20' />
-            </IconButton>
+            <Button
+              tone='ghost'
+              size='md'
+              composition='icon-only'
+              aria-label='Remove account role'
+              icon={<SafeIcon alt='delete icon' src={DeleteIcon} height='20' width='20' />}
+              onClick={() => handleAccountDelete(filterAccount.id, accountRole)}
+            />
           ),
         },
       ];

@@ -51,7 +51,7 @@ func TestSkillFetching_IntegrationIsolationAndQueryCache(t *testing.T) {
 	for _, query := range []string{"first question", "second question", "first question"} {
 		ctx.Query = query
 		results := map[string]skillData{"a": {ID: "kb-a", KBType: "integration", IntegrationID: &a}, "b": {ID: "kb-b", KBType: "integration", IntegrationID: &b}}
-		enrichIntegrationSkillsFromRAG(ctx, results)
+		enrichIntegrationSkillsFromRAG(ctx, core.NBToolCallRequest{}, results)
 		require.Len(t, results, 2)
 		assert.Equal(t, "integration-a_knowledge_base:"+query, results["a"].Data)
 		assert.Equal(t, "integration-b_knowledge_base:"+query, results["b"].Data)
@@ -69,7 +69,7 @@ func TestSkillFetching_IntegrationMissingIsNotEmptySuccess(t *testing.T) {
 	t.Cleanup(func() { config.Config.RAGServerUrl = old })
 	ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: t.Name()}
 	results := map[string]skillData{"empty": {ID: "empty", KBType: "integration"}, "manual": {ID: "manual", Data: "keep"}}
-	enrichIntegrationSkillsFromRAG(ctx, results)
+	enrichIntegrationSkillsFromRAG(ctx, core.NBToolCallRequest{}, results)
 	assert.NotContains(t, results, "empty")
 	assert.Equal(t, "keep", results["manual"].Data)
 }
@@ -100,7 +100,7 @@ func TestSkillFetching_IgnoresLegacyIntegrationNameCache(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: t.Name()}
 	require.NoError(t, common.CacheSet(core.CacheNamespaceLlmSkillContent, "skill:"+ctx.AccountId+":legacy", []byte(`{"id":"old","kb_type":"integration","data":"WRONG-OLD-QUERY"}`)))
-	mock.ExpectQuery(`SELECT kb.id, kb.name`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "description", "kb_type", "kb_source", "integration_id", "note_category"}).AddRow("fresh", "legacy", "", "", "integration", "confluence", "integration-a", "sop"))
+	mock.ExpectQuery(`SELECT kb.id, kb.name`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "description", "kb_type", "kb_source", "integration_id", "note_category", "data_format"}).AddRow("fresh", "legacy", "", "", "integration", "confluence", "integration-a", "sop", ""))
 	results, _ := (LoadSkillsTool{}).fetchSkillsBatch(ctx, &common.DatabaseManager{Db: db}, []string{"legacy"})
 	assert.Empty(t, results["legacy"].Data)
 	assert.Equal(t, "fresh", results["legacy"].ID)
@@ -116,7 +116,7 @@ func TestSkillFetching_ManualCandidateUsesIDNotConflictingName(t *testing.T) {
 	require.NoError(t, common.CacheSet(core.CacheNamespaceLlmSkillContent, "skill:"+ctx.AccountId+":runbook", []byte(`{"id":"other","kb_type":"manual","data":"WRONG-NAME-CACHE"}`)))
 	id := "knowledge:manual-canonical"
 	require.NoError(t, core.StoreKnowledgeCandidate(ctx.AccountId, ctx.ConversationId, ctx.MessageId, core.KnowledgeCandidate{ID: id, KBID: "selected", Title: "Runbook", Content: "old snapshot"}))
-	mock.ExpectQuery(`SELECT id, name, LEFT.* FROM llm_knowledgebases`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "note_category"}).AddRow("selected", "Runbook", "RIGHT-CONTENT", "sop"))
+	mock.ExpectQuery(`SELECT id, name, .*LEFT.* FROM llm_knowledgebases`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "note_category"}).AddRow("selected", "Runbook", "RIGHT-CONTENT", "sop"))
 	resp, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": id}})
 	require.NoError(t, err)
 	require.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
@@ -126,7 +126,7 @@ func TestSkillFetching_ManualCandidateUsesIDNotConflictingName(t *testing.T) {
 	require.Len(t, resp.References, 1)
 	assert.Equal(t, "selected", resp.References[0].Url)
 	// Disabled/deleted/foreign candidates cannot keep serving their cached bodies.
-	mock.ExpectQuery(`SELECT id, name, LEFT.* FROM llm_knowledgebases`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "note_category"}))
+	mock.ExpectQuery(`SELECT id, name, .*LEFT.* FROM llm_knowledgebases`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "note_category"}))
 	resp, err = (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": id}})
 	require.NoError(t, err)
 	assert.Equal(t, core.NBToolResponseStatusError, resp.Status)
@@ -138,12 +138,26 @@ func TestSkillFetching_OversizedContentDoesNotPromiseContinuation(t *testing.T) 
 	ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: t.Name()}
 	db, mock := skillFetchingDB(t)
 	defer func() { _ = db.Close() }()
-	mock.ExpectQuery(`SELECT kb.id, kb.name`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "description", "kb_type", "kb_source", "integration_id", "note_category"}).AddRow("large", "large", strings.Repeat("x", core.MaxKnowledgeCandidateBytes+1), "", "manual", nil, nil, "fact"))
+	mock.ExpectQuery(`SELECT kb.id, kb.name`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "description", "kb_type", "kb_source", "integration_id", "note_category", "data_format"}).AddRow("large", "large", strings.Repeat("x", core.MaxKnowledgeCandidateBytes+1), "", "manual", nil, nil, "fact", ""))
 	resp, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": "large"}})
 	require.NoError(t, err)
 	assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
 	assert.Contains(t, resp.Data, "Only a bounded excerpt")
 	assert.NotContains(t, resp.Data, "next_offset")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSkillFetching_PDFKnowledgeNeverServesBase64(t *testing.T) {
+	useLegacySkillLoading(t)
+	ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: t.Name()}
+	db, mock := skillFetchingDB(t)
+	defer func() { _ = db.Close() }()
+	// The query blanks a PDF's data; the row still carries its format.
+	mock.ExpectQuery(`CASE WHEN kb.data_format = 'pdf' THEN '' ELSE LEFT\(kb.data, 4097\) END`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "description", "kb_type", "kb_source", "integration_id", "note_category", "data_format"}).AddRow("guide", "guide", "", "Guide.pdf", "manual", nil, nil, "", "pdf"))
+	resp, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": "guide"}})
+	require.NoError(t, err)
+	assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+	assert.Contains(t, resp.Data, "use search_skills")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -169,7 +183,7 @@ func TestSkillFetching_ManualNameCacheCannotBypassDisabledRow(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: t.Name()}
 	require.NoError(t, common.CacheSet(core.CacheNamespaceLlmSkillContent, "skill:"+ctx.AccountId+":disabled", []byte(`{"id":"old","kb_type":"manual","data":"STALE-CONTENT"}`)))
-	mock.ExpectQuery(`SELECT kb.id, kb.name`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "description", "kb_type", "kb_source", "integration_id", "note_category"}))
+	mock.ExpectQuery(`SELECT kb.id, kb.name`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "description", "kb_type", "kb_source", "integration_id", "note_category", "data_format"}))
 	resp, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": "disabled"}})
 	require.NoError(t, err)
 	require.Equal(t, core.NBToolResponseStatusError, resp.Status)

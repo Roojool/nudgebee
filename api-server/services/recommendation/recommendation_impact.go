@@ -207,6 +207,7 @@ func resolveK8sRecommendationImpact(kg *core.Service, tenantID, accountID string
 	if err != nil || impact == nil {
 		return nil, false
 	}
+	impact.RetainDirectDependents()
 	return impact, true
 }
 
@@ -226,6 +227,7 @@ func resolveCloudRecommendationImpact(kg *core.Service, tenantID, accountID, res
 	if err != nil || impact == nil {
 		return nil, false
 	}
+	impact.RetainDirectDependents()
 	return impact, true
 }
 
@@ -243,7 +245,7 @@ func resolveCloudRecommendationImpact(kg *core.Service, tenantID, accountID, res
 //
 // The graph traversal is memoized per resolved identity via cache; the band is
 // derived per call because it also depends on this recommendation's change class.
-func annotateBreakdownWithImpact(kg *core.Service, tenantID, accountID, namespace, workload, resourceID string, class ChangeClass, breakdown map[string]any, cache map[string]*core.ImpactSummary) {
+func annotateBreakdownWithImpact(kg *core.Service, tenantID, accountID, namespace, workload, resourceID, ruleName string, class ChangeClass, breakdown map[string]any, cache map[string]*core.ImpactSummary) {
 	if kg == nil || breakdown == nil {
 		return
 	}
@@ -281,7 +283,7 @@ func annotateBreakdownWithImpact(kg *core.Service, tenantID, accountID, namespac
 	if imp == nil {
 		return
 	}
-	band, reason := DeriveSafetyBand(imp, class)
+	band, reason := DeriveSafetyBandForRule(ruleName, imp, class)
 	breakdown["safety_band"] = string(band)
 	if class != ChangeClassUnknown {
 		breakdown["change_class"] = string(class)

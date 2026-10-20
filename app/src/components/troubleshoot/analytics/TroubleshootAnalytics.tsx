@@ -7,7 +7,7 @@ import { digestsList, digestGet, type Digest } from '@api1/digests';
 import { Skeleton } from '@ui/Skeleton';
 import { Banner } from '@ui/Banner';
 import { Stat, type DeltaTone } from '@ui/Stat';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import TimeSeriesChart from '@components/common/charts/TimeSeriesChart';
 import { useBriefingWindow } from '@components/troubleshoot/briefing/useBriefingData';
 import { resolveTimeSaved } from '@components/troubleshoot/analytics/timeSaved';
@@ -111,12 +111,12 @@ const ageLabel = (days: number | null): string => {
   return `recurring for ${Math.floor(days / 7)} weeks`;
 };
 
-// Every card sits inside one white panel now. WidgetCard's default elevation is
-// a big diffuse shadow that reads as "white card" against a grey page but casts
-// grey onto a white panel — so it's swapped for a light crisp shadow that gives
+// Every card sits inside one white panel now. Card's default elevation is a
+// diffuse shadow that reads as "white card" against a grey page but casts grey
+// onto a white panel — so it's swapped for a light crisp shadow that gives
 // each tile just enough lift to read as a tile without dirtying the surface.
-// mt:0 cancels WidgetCard's default top margin in the grids.
-const CARD_SX = { mt: 0, boxShadow: '0 1px 3px rgba(16, 24, 40, 0.08)' } as const;
+// The padding keeps WidgetCard's 16px 24px, so moving to Card doesn't shift the layout.
+const CARD_SX = { padding: 'var(--ds-space-4) var(--ds-space-5)', boxShadow: '0 1px 3px rgba(16, 24, 40, 0.08)' } as const;
 
 // `action` is an optional right-aligned slot on the heading row — used to sit the
 // Viewing/Account/date filters parallel to the "Overview" title inside the panel.
@@ -138,14 +138,14 @@ const SectionHeading = ({ children, action }: { children: React.ReactNode; actio
 );
 
 const Panel = ({ title, definition, children }: { title: string; definition: string; children: React.ReactNode }) => (
-  <WidgetCard sx={{ ...CARD_SX, minWidth: 0 }}>
+  <Card sx={{ ...CARD_SX, minWidth: 0 }}>
     <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>{title}</Typography>
     {/* Inline rather than behind a tooltip: this tab is read by people who do not
         know our internals, and a metric whose meaning is one hover away is a
         metric that gets misread. */}
     <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600], marginBottom: 'var(--ds-space-3)' }}>{definition}</Typography>
     {children}
-  </WidgetCard>
+  </Card>
 );
 
 /**
@@ -180,17 +180,11 @@ const DeltaStat = ({
   const period = `vs previous ${previous.toLocaleString()}`;
 
   return (
-    <WidgetCard
-      {...(onClick
-        ? {
-            role: 'button',
-            tabIndex: 0,
-            onClick,
-            onKeyDown: (event: React.KeyboardEvent) => {
-              if (event.key === 'Enter' || event.key === ' ') onClick();
-            },
-          }
-        : {})}
+    // interactive gives role='button', tabIndex 0 and Enter/Space activation; the sx '&:hover'
+    // below replaces Card's own hover, so the tile keeps its blue-border hover without a lift.
+    <Card
+      interactive={Boolean(onClick)}
+      onClick={onClick}
       sx={{
         ...CARD_SX,
         cursor: onClick ? 'pointer' : 'default',
@@ -208,7 +202,7 @@ const DeltaStat = ({
           direction,
         }}
       />
-    </WidgetCard>
+    </Card>
   );
 };
 
@@ -642,7 +636,7 @@ export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
       <Box>
         <SectionHeading action={filters}>Overview</SectionHeading>
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', lg: 'repeat(4, 1fr)' }, gap: 'var(--ds-space-3)' }}>
-          <WidgetCard sx={CARD_SX}>
+          <Card sx={CARD_SX}>
             <Stat
               size='md'
               label='Investigations finished'
@@ -654,12 +648,12 @@ export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
               // the ratio is a deliberate follow-up rather than part of this fix.
               sub='finished in this window'
             />
-          </WidgetCard>
+          </Card>
           {/* Coverage and MTTU come from the same aggregate row, so the numerator,
               the denominator and the clock all share one unit. Shown together on
               purpose: a fast MTTU next to low coverage says "quick on the few we
               do", which is the honest reading — either number alone flatters. */}
-          <WidgetCard sx={CARD_SX}>
+          <Card sx={CARD_SX}>
             <Stat
               size='md'
               label='Problems we explained'
@@ -679,8 +673,8 @@ export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
                     : 'Counts problems important enough for us to investigate on our own — repeat alerts and low-severity noise are left out.',
               }}
             />
-          </WidgetCard>
-          <WidgetCard sx={CARD_SX}>
+          </Card>
+          <Card sx={CARD_SX}>
             <Stat
               size='md'
               label='Time to explain a problem'
@@ -693,11 +687,11 @@ export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
                   : 'too few explained to give a typical time'
               }
             />
-          </WidgetCard>
+          </Card>
           {(() => {
             const { completed, savedHours, savedCost, measurable } = resolveTimeSaved(effort);
             return (
-              <WidgetCard sx={CARD_SX}>
+              <Card sx={CARD_SX}>
                 <Stat
                   size='md'
                   label='Engineer time saved'
@@ -716,7 +710,7 @@ export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
                       : undefined
                   }
                 />
-              </WidgetCard>
+              </Card>
             );
           })()}
         </Box>
@@ -733,15 +727,15 @@ export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
             onClick={() => onDrillDown({ status: 'ALL', ...scope, eventComputedPriority: 'P1' })}
           />
           {/* No previous-period comparison, so no delta — but it sits in a row with
-              two that do, so the same WidgetCard + Stat keeps its sizing aligned. */}
-          <WidgetCard sx={CARD_SX}>
+              two that do, so the same Card + Stat keeps its sizing aligned. */}
+          <Card sx={CARD_SX}>
             <Stat
               size='md'
               label='Problems we have seen before'
               value={`${recurrenceRate}%`}
               sub={`${recurring.length.toLocaleString()} of the ${chains.length.toLocaleString()} busiest had happened before`}
             />
-          </WidgetCard>
+          </Card>
         </Box>
         <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600], marginTop: 'var(--ds-space-2)' }}>
           Compared against the {Math.max(1, Math.round((window.endMs - window.startMs) / 3600000))} hours immediately before this window.
@@ -1007,10 +1001,10 @@ export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
           <SectionHeading>What should we do this week?</SectionHeading>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
             {findings.map((finding) => (
-              // WidgetCard (not Card variant='accent') keeps the same elevation as
+              // Card with CARD_SX (not variant='accent') keeps the same shadow as
               // every other card on this tab; the blue left-edge stays as an sx
               // accent so the whole surface reads as one shadow system.
-              <WidgetCard
+              <Card
                 key={finding.key}
                 sx={{
                   ...CARD_SX,
@@ -1048,7 +1042,7 @@ export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
                 >
                   {finding.actionText} →
                 </Box>
-              </WidgetCard>
+              </Card>
             ))}
           </Box>
         </Box>

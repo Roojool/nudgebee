@@ -3,7 +3,7 @@ import { Box } from '@mui/material';
 import { Modal } from '@ui/Modal';
 import { Chip, hashHue } from '@components/common/ds/Chip';
 import Text from '@shared/format/Text';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import Tabs from '@shared/navigation/Tabs';
 import apiWorkflow from '@api1/workflow';
 import { useRouter } from 'next/router';
@@ -35,6 +35,7 @@ import {
 } from '@assets';
 import { Button } from '@ui/Button';
 import Loader from '@shared/Loader';
+import SearchInput from '@ui/SearchInput';
 
 interface WorkflowTemplatesModalProps {
   open: boolean;
@@ -46,6 +47,10 @@ interface WorkflowTemplatesModalProps {
   eventContext?: Record<string, string>;
   onCreateWithAI?: () => void;
 }
+
+// Upper bound on templates fetched per category; search narrows server-side.
+const TEMPLATE_FETCH_LIMIT = 200;
+const SEARCH_DEBOUNCE_MS = 300;
 
 // Categories for the tabs
 const TEMPLATE_CATEGORIES = [
@@ -204,9 +209,8 @@ const TemplateCard = ({ workflow, onUseTemplate, index }: { workflow: any; onUse
   const badge = CATEGORY_BADGE_CONFIG[workflow.category] || DEFAULT_BADGE;
 
   return (
-    <WidgetCard
+    <Card
       sx={{
-        mt: 0,
         padding: 'var(--ds-space-4) var(--ds-space-5)',
         display: 'flex',
         flexDirection: 'column',
@@ -346,7 +350,7 @@ const TemplateCard = ({ workflow, onUseTemplate, index }: { workflow: any; onUse
           Use Template
         </Button>
       </Box>
-    </WidgetCard>
+    </Card>
   );
 };
 
@@ -364,7 +368,14 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
   const [workflows, setWorkflows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const router = useRouter();
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   // Event context the template list is filtered by (source / alert name), shown
   // as labels under the modal title so it's obvious why the list is narrowed.
@@ -375,12 +386,13 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
     return chips;
   }, [eventSources, alertNames]);
 
-  // Union of labels across the loaded templates, for the filter chip row.
+  // Union of labels across the loaded templates, for the filter chip row. Selected
+  // labels are kept even when a search narrows them out, so they stay toggleable.
   const availableLabels = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>(selectedLabels);
     workflows.forEach((w) => (Array.isArray(w?.tags?.labels) ? w.tags.labels : []).forEach((l: string) => set.add(l)));
     return Array.from(set).sort();
-  }, [workflows]);
+  }, [workflows, selectedLabels]);
 
   // Templates narrowed by the selected labels (match ANY selected label).
   const displayedWorkflows = useMemo(() => {
@@ -428,10 +440,17 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
   const fetchWorkflows = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
     setLoading(true);
-    setSelectedLabels([]); // reset label filter when the template set changes
     try {
       const category = selectedCategory === 'all' ? undefined : selectedCategory;
-      const response: any = await apiWorkflow.listTemplates(category, undefined, 50, undefined, eventSources, alertNames, subjectTypes);
+      const response: any = await apiWorkflow.listTemplates(
+        category,
+        debouncedQuery || undefined,
+        TEMPLATE_FETCH_LIMIT,
+        undefined,
+        eventSources,
+        alertNames,
+        subjectTypes
+      );
       if (seq !== fetchSeqRef.current) {
         return; // a newer fetch superseded this one
       }
@@ -447,7 +466,25 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategory, filterKey, debouncedQuery]);
+
+  // Reset the label filter and cards when the template set changes (the loader
+  // shows instead of the previous category). Not keyed on the search, so typing
+  // keeps the picked chips and the current cards stay up while results refresh.
+  useEffect(() => {
+    setSelectedLabels([]);
+    setWorkflows([]);
   }, [selectedCategory, filterKey]);
+
+  // The parent keeps this modal mounted, so clear the search and chips on close —
+  // a reopen should not come back pre-filtered.
+  useEffect(() => {
+    if (!open) {
+      setSearchQuery('');
+      setDebouncedQuery('');
+      setSelectedLabels([]);
+    }
+  }, [open]);
 
   useEffect(() => {
     if (open) {
@@ -490,6 +527,17 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
             ))}
           </Box>
         )}
+
+        {/* Search */}
+        <Box sx={{ mb: 'var(--ds-space-3)' }}>
+          <SearchInput
+            id='wf-template-search'
+            label='Search templates'
+            value={searchQuery}
+            onChange={setSearchQuery}
+            onClear={() => setSearchQuery('')}
+          />
+        </Box>
 
         {/* Category Tabs */}
         <Box id='wf-template-categories' sx={{ mb: 'var(--ds-space-2)' }}>
@@ -537,7 +585,7 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
             flex: 1,
           }}
         >
-          {loading ? (
+          {loading && workflows.length === 0 ? (
             <Box
               sx={{
                 display: 'flex',
@@ -558,7 +606,13 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
               }}
             >
               <Text
-                value={selectedLabels.length > 0 ? 'No templates match the selected labels' : 'No templates available'}
+                value={
+                  debouncedQuery
+                    ? `No templates match "${debouncedQuery}"`
+                    : selectedLabels.length > 0
+                    ? 'No templates match the selected labels'
+                    : 'No templates available'
+                }
                 sx={{ color: ds.gray[400] }}
               />
             </Box>

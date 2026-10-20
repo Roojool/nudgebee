@@ -107,11 +107,6 @@ jest.mock('@ui/Skeleton', () => ({
   Skeleton: ({ ariaLabel }: any) => <div data-testid='skeleton' aria-label={ariaLabel} />,
 }));
 
-jest.mock('@ui/WidgetCard', () => ({
-  __esModule: true,
-  default: ({ children }: any) => <div data-testid='widget-card'>{children}</div>,
-}));
-
 jest.mock('@ui/Chart', () => {
   const Chart: any = () => null;
   Chart.Line = ({ chartTitle, dataset, labels }: any) => (

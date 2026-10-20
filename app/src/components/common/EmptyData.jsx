@@ -23,7 +23,9 @@ const EmptyData = ({ id, img, heading, subHeading, height = '308px', sx = {}, ch
             },
           }}
         >
-          <h2 id={`${id}-no-data`}>{heading}</h2>
+          {/* Only when the caller named the table: `${undefined}-no-data` would put the
+              same id on every unnamed empty state sharing a page. */}
+          <h2 id={id ? `${id}-no-data` : undefined}>{heading}</h2>
           {subHeading && <Typography>{subHeading}</Typography>}
           {children}
         </Box>

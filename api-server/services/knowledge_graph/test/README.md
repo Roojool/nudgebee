@@ -106,8 +106,8 @@ DeduplicateNodesWithIDMapping → DeduplicateEdgesWithPriority
 
 - **Node-type completeness** lives in [`../sources`](../sources)
   (`all_types_completeness_test.go`, `dispatch_completeness_test.go`) because it reads
-  **unexported** registry maps (`awsResourceTypeMap`, `gcpResourceTypeMap`,
-  `azureTypeToNodeType`). It asserts every registry entry maps to a conscious `NodeType`
+  **unexported** kind registries (`sources/<cloud>/kinds.go`). It asserts every
+  declared resource kind maps to a conscious `NodeType`
   and fails when a new type is added without a decision. Run:
   `go test ./knowledge_graph/sources/ -run 'Completeness|AllTypes'`.
 - **Python discovery seam**: `collector-server/k8s-collector/app/tests/test_discovery_shape.py`

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import PropTypes from 'prop-types';
-import { Box, Typography, Stack, Alert, CircularProgress } from '@mui/material';
+import { Box, Typography, Stack, CircularProgress } from '@mui/material';
 import { Card } from '@ui/Card';
 import { Chip } from '@ui/Chip';
 import { Divider } from '@ui/Divider';
@@ -296,8 +296,10 @@ const DynamicForm = ({ actionKey, onChange, errors = {}, initialValues = {}, act
 
     const getErrorStyles = (error) => (error ? errorBorderStyle : {});
 
-    // showErrorAlert: when the wrapped child renders its own error message (DS Input does), the
-    // outer Alert would duplicate it. Pass `false` for those fields.
+    // showErrorAlert: when the wrapped child renders its own error message (DS Input and Select
+    // do, via `error`), the wrapper's message would duplicate it. Pass `false` for those fields.
+    // The wrapper's message matches their error caption, so every field's error looks the same
+    // (design-system.md: a field's own validation error is a caption, not a Callout).
     const fieldWrapper = (children, showDescription = true, showErrorAlert = true) => (
       <Box sx={{ mb: ds.space[5] }}>
         <Typography
@@ -323,9 +325,13 @@ const DynamicForm = ({ actionKey, onChange, errors = {}, initialValues = {}, act
           </Typography>
         )}
         {showErrorAlert && errorText && typeof errorText === 'string' && (
-          <Alert severity='error' sx={{ mt: ds.space[2] }}>
+          <Box
+            component='span'
+            role='alert'
+            sx={{ display: 'block', mt: 'var(--ds-space-1)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-red-600)' }}
+          >
             {errorText}
-          </Alert>
+          </Box>
         )}
       </Box>
     );
@@ -339,8 +345,10 @@ const DynamicForm = ({ actionKey, onChange, errors = {}, initialValues = {}, act
           disabled
           onChange={() => {}}
           placeholder={`${(field.display_name || key).toLowerCase()}`}
+          error={typeof errorText === 'string' && errorText ? errorText : undefined}
         />,
-        true
+        true,
+        false
       );
     }
 
@@ -451,7 +459,10 @@ const DynamicForm = ({ actionKey, onChange, errors = {}, initialValues = {}, act
               options={field.possible_values ?? []}
               disabled={field.possible_values?.length === 0 || isLoading}
               onChange={(next) => handleChange(currentPath, next)}
-            />
+              error={typeof errorText === 'string' && errorText ? errorText : undefined}
+            />,
+            true,
+            false
           );
         }
         break;
@@ -509,7 +520,10 @@ const DynamicForm = ({ actionKey, onChange, errors = {}, initialValues = {}, act
               onChange={(next) => handleChange(currentPath, next)}
               disabled={isLoading}
               label={snakeToTitleCase(key)}
-            />
+              error={typeof errorText === 'string' && errorText ? errorText : undefined}
+            />,
+            true,
+            false
           );
         }
         return fieldWrapper(

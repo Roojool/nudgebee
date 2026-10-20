@@ -1,7 +1,6 @@
 package observability
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -69,7 +68,7 @@ func TestSplunkEnterpriseTraceWhereClauseRefusesFullyDroppedGroup(t *testing.T) 
 	}}
 	_, err := buildSplunkEnterpriseTraceWhereClause(where)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no field this span schema can express")
+	assert.Contains(t, err.Error(), "no field this schema can express")
 }
 
 func TestSplunkEnterpriseTraceWhereClauseKeepsExpressibleSiblings(t *testing.T) {
@@ -221,8 +220,8 @@ func TestConvertSplunkEnterpriseSpansFallsBackToIngestTime(t *testing.T) {
 // The label dropdown is the one place a wrong quoting choice is silent: a query that
 // matches nothing renders as "this field has no values", not as an error.
 func TestSplunkEnterpriseTraceLabelValuesLeavesDottedFieldsUnquoted(t *testing.T) {
-	spl := fmt.Sprintf(`search index="%s" %s=* | top limit=%d %s | fields %s`,
-		"otel_traces", "service.name", splunkEnterpriseLabelValueLimit, "service.name", "service.name")
+	spl := buildSplunkEnterpriseTraceLabelValuesSPL(splunkEnterpriseTraceFilter{}, "otel_traces", "service.name")
+	assert.Equal(t, `search index="otel_traces" service.name=* | top limit=100 service.name | fields service.name`, spl)
 	assert.NotContains(t, spl, "'service.name'",
 		"quoting a dotted field inside search/top/fields makes it match nothing in SPL")
 	assert.Contains(t, spl, "top limit=100 service.name")
@@ -302,7 +301,7 @@ func TestBuildSplunkEnterpriseTraceGroupSPL(t *testing.T) {
 	t.Run("limit is clamped", func(t *testing.T) {
 		wide, err := buildSplunkEnterpriseTraceGroupSPL(TracesV3Request{}, "otel_traces", 99999)
 		require.NoError(t, err)
-		assert.Contains(t, wide, "| head 100")
+		assert.Contains(t, wide, "| sort limit=100 -nb_tr_count, ")
 	})
 }
 

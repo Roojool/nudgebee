@@ -214,7 +214,7 @@ const CsvImportDialog = ({ open, onClose, onImported }) => {
               sx={{
                 width: '100%',
                 minHeight: '180px',
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 fontSize: ds.text.small,
                 padding: `${ds.space.mul(0, 5)} ${ds.space[3]}`,
                 borderRadius: ds.radius.md,
@@ -364,7 +364,7 @@ const CsvSchemaPanel = () => (
     <Box
       component='pre'
       sx={{
-        fontFamily: 'monospace',
+        fontFamily: ds.font.mono,
         fontSize: ds.text.caption,
         margin: 0,
         padding: `${ds.space.mul(0, 3)} ${ds.space[2]}`,

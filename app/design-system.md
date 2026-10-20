@@ -21,7 +21,7 @@ the right component **and** call it correctly without opening every file.
 **Where components live:**
 
 - `@ui/*` → `src/components/common/ds/*` — the **design-system primitives** (the in-scope set; §4
-  documents all 45).
+  documents all 44).
 - `@shared/*` → `src/components/common/*` — **domain compositions** built from primitives
   (`CustomTable`, `MarkDowns`, `Form`, `CustomDropdown`, …). Referenced here where a decision rule
   needs them; not part of the §4 primitive reference.
@@ -40,14 +40,13 @@ app-specific component built from primitives.
 
 ### Layout & page shell
 
-| Component                         | Where | Use when                                                                                                                                                                                                                                                                                                                                                         |
-| --------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ListingLayout`                   | ds/   | The card shell for any table/listing screen — `Toolbar` + `Body` + `Footer` slots.                                                                                                                                                                                                                                                                               |
-| `Card`                            | ds/   | **Canonical content card** — `variant` (elevated/outlined/accent/**tinted**) × `size` (sm/md/lg) × `elevation` (raised/flat). Slots: `header` / `footer` / `children`. Use for all new card surfaces. **`variant='tinted'` + `tone`** gives a coloured-background panel (neutral→gray-100, info→blue-100, success→green-100, warning→amber-100, danger→red-100). |
-| `WidgetCard` · `CustomBorderCard` | ds/   | Legacy plain content cards — consolidated into `Card`. Co-exist; **don't introduce new uses.**                                                                                                                                                                                                                                                                   |
-| `CollapsableCard`                 | ds/   | A single collapsible card (one unit — _not_ an accordion). Composes `Card` for the surface.                                                                                                                                                                                                                                                                      |
-| `Accordion`                       | ds/   | 3+ sibling collapsibles as one group. For a single collapsible unit use `CollapsableCard`.                                                                                                                                                                                                                                                                       |
-| `Divider` · `List`                | ds/   | Rules and simple item lists.                                                                                                                                                                                                                                                                                                                                     |
+| Component          | Where | Use when                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------ | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ListingLayout`    | ds/   | The card shell for any table/listing screen — `Toolbar` + `Body` + `Footer` slots.                                                                                                                                                                                                                                                                                                                                         |
+| `Card`             | ds/   | **Canonical content card** — `variant` (elevated/outlined/accent/**tinted**) × `size` (sm/md/lg) × `elevation` (raised/flat). Slots: `header` / `footer` / `children`. Use for all new card surfaces. **`variant='tinted'` + `tone`** gives a coloured-background panel (neutral→gray-100, info→blue-100, success→green-100, warning→amber-100, danger→red-100). Replaces the removed `WidgetCard` and `CustomBorderCard`. |
+| `CollapsableCard`  | ds/   | A single collapsible card (one unit — _not_ an accordion). Composes `Card` for the surface.                                                                                                                                                                                                                                                                                                                                |
+| `Accordion`        | ds/   | 3+ sibling collapsibles as one group. For a single collapsible unit use `CollapsableCard`.                                                                                                                                                                                                                                                                                                                                 |
+| `Divider` · `List` | ds/   | Rules and simple item lists.                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### Tables & data display
 
@@ -62,7 +61,6 @@ app-specific component built from primitives.
 **Deprecated — labels & status:**
 
 - `common/CustomLabels` — **removed** (no longer in the tree). Use `ds/Label`. `CustomLabels` auto-derived tone from text content; `ds/Label` requires an explicit `tone` (`neutral`/`info`/`success`/`warning`/`critical`).
-- `common/NBStatusBadge` (`@shared/widgets/NBStatusBadge`) — still in use for the K8s status-badge pattern; prefer `ds/StatusIndicator` / `ds/Label` for new code.
 
 ### Content & formatting
 
@@ -111,6 +109,7 @@ app-specific component built from primitives.
 | `DropdownMenu` · `ThreeDotsMenu`                             | ds/     | Action menus. `ThreeDotsMenu` is the kebab/overflow wrapper (`<DropdownMenu trigger={icon-only Button}>`). Per spec there is no separate `ButtonMenu` primitive — compose `DropdownMenu` with a labelled trigger.                     |
 | `CopyButton` · `DownloadButton`                              | common/ | Icon-only copy-to-clipboard (`@shared/buttons/CopyButton`) and download trigger (`@shared/buttons/DownloadButton`, wraps `ds/Button` + `file-saver`). Prefer these over wiring `saveAs` manually.                                     |
 | `Banner` · `Toast`                                           | ds/     | Inline page banners / transient toast notifications. **Toast is imperative** — `import { toast } from '@ui/Toast'`, mount `<Toast />` once in `_app.tsx`, then `toast.success('…')`. See the Toast note below.                        |
+| `Callout`                                                    | ds/     | Compact inline hint in the flow of a form — sits under the field it explains, no margins of its own. Not a page notice; that's `Banner`.                                                                                              |
 | `EmptyState` · `Skeleton` · `ProgressBar` · `ProgressLinear` | ds/     | Empty / loading / progress states. Error boundaries: `@shared/ErrorBoundary` (no `ds/ErrorBoundary`).                                                                                                                                 |
 | `Modal`                                                      | ds/     | Centered overlay — plain shell **or** confirm/cancel decision dialog (pick the footer mode). The unified `Modal` absorbed the legacy `Dialog`/`NDialog`. There is no separate `ds/Dialog`, `ds/Popover`, or `ds/Inspector` primitive. |
 | `Tooltip`                                                    | ds/     | Hover text / explainer / interactive tooltip. `variant` (`default`/`explainer`/`interactive`), `title`, `desc`, `placement`, `linkUrl`/`linkText`.                                                                                    |
@@ -202,6 +201,11 @@ re-styling MUI's Menu or Popover**:
 - **`OverlaySearch`** — search input row pinned at the top of a surface.
 - **`OverlaySelectAll`** — "Select All" / "Clear All" row for multi-select lists.
 
+MUI `Paper` still backs the floating surfaces these don't cover — the `CustomDrawer` panel, the
+query-builder suggestion dropdowns, and `Autocomplete`'s `PaperComponent` slot. `ds/Card` is a
+static page container and can't stand in for those, so the import gate doesn't ask it to; do use
+`ds/Card` when you want a card.
+
 All live in `ds/internal/Overlay.tsx`. They're **not for app code** — only consumed by other `ds/*`
 components (`DropdownMenu`, `Select`, `FilterDropdown`). The visual tokens that drive them live in
 `--ds-overlay-*` (see `app/src/styles/theme-tokens.css`).
@@ -262,6 +266,15 @@ import { ds } from '@utils/colors';
 - **Never hardcode** a color, spacing, radius, or font size that has a `--ds-*` token.
 - **Prefer Option B** (`ds.*`) in `.tsx`/`.ts`; use raw `var(--ds-*)` in `.css` / Emotion literals.
 - Do **not** use `--nb-*` legacy tokens in new DS components — reference only `--ds-*`.
+
+These rules are enforced. `npm run lint2` runs `check-ds`, which fails when a change **adds** a
+value that lands exactly on one of the scales above — `padding: '16px'`, `mt: 2` (MUI's 8px unit,
+so 16px), `borderRadius: '8px'`, `color: '#6f6f6f'`, `gap='12px'` as a prop. Only the increase is
+counted, against the file's own version at the merge base, so existing values never block anyone
+and a value someone chose off-scale on purpose (`13px`) is never touched. Box dimensions
+(`width`/`minWidth`/`maxHeight`), icon `fontSize`, and chart files are out of scope — they have no
+token scale. Where the system genuinely cannot express what the code needs, `// ds-allow: <reason>`
+on the line silences it and the reason belongs in the PR.
 
 ---
 
@@ -366,7 +379,7 @@ import Stack from '@mui/material/Stack';
   width='md'
   loader={isSubmitting}
   actionButtons={
-    <Stack direction='row' gap='12px' sx={{ button: { minWidth: '140px' } }}>
+    <Stack direction='row' gap={ds.space[3]} sx={{ button: { minWidth: '140px' } }}>
       <Button tone='secondary' onClick={handleCancel} disabled={isSubmitting}>Cancel</Button>
       <Button onClick={handleSubmit} disabled={isSubmitting}>Create Ticket</Button>
     </Stack>
@@ -477,52 +490,63 @@ Add each as the pattern is first built in a real redesign:
 
 When two components could fit, this is which to pick.
 
-| Situation                                                                                          | Use                                                                | Not                                                                        |
-| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------- |
-| Read-only status pill in a table cell (`Active` / `Failed` / `Pending`) — 5 status tones, no click | `ds/Label`                                                         | `ds/Chip` (Chip is for interactive / categorical use)                      |
-| Interactive or categorical pill — filter, dismissible tag, count, categorical hue, avatar          | `ds/Chip`                                                          | `ds/Label` (Label is read-only Status-axis only)                           |
-| Resource-state read-out in a header / drawer / chat preamble (dot + text + subtext)                | `ds/StatusIndicator`                                               | `ds/Label` (Label is the inline cell tag)                                  |
-| Any tabular data (this app)                                                                        | `@shared/tables/CustomTable`                                       | a hand-rolled `<table>` — there is no `ds/Table` primitive                 |
-| One collapsible unit                                                                               | `ds/CollapsableCard`                                               | `ds/Accordion` ("Don't use Accordion for < 3 rows")                        |
-| 3+ sibling collapsibles                                                                            | `ds/Accordion`                                                     | stacking `CollapsableCard`s                                                |
-| In-page tab switch (state only) — modals, panels, in-component toggles                             | `ds/Tabs` with `navigation='state'` (or `@shared/navigation/Tabs`) | a hand-rolled toggle row                                                   |
-| Tabs that drive the URL / route                                                                    | `ds/Tabs` with `navigation='router'`                               | `CustomTabs` / `ds/PageTabs` (both removed)                                |
-| Top-of-page **2-level** nav — parent tabs with hover-dropdown subtabs, URL-hash driven             | `@shared/navigation/AnchorComponent`                               | `ds/Tabs` (single-level only)                                              |
-| Transient confirmation message                                                                     | `ds/Toast`                                                         | `ds/Banner`                                                                |
-| Persistent inline page-level message                                                               | `ds/Banner`                                                        | `ds/Toast`                                                                 |
-| Small overlay anchored to an element                                                               | `ds/Tooltip` (text/explainer) · `DropdownMenu` (menu)              | `ds/Modal` (there is no `ds/Popover`)                                      |
-| Centered blocking task / decision                                                                  | `ds/Modal`                                                         | a side-drawer (there is no `ds/Inspector`)                                 |
-| Pick one value in a **form**                                                                       | `ds/Select`                                                        | `DropdownMenu` (action menu) · `FilterDropdown` (toolbar pill)             |
-| Pick **multiple** values in a form                                                                 | `<Select multiple>`                                                | a hand-rolled multi-select (no `ds/MultiSelect`)                           |
-| Pick value(s) for a **toolbar filter**                                                             | `ds/FilterDropdown`                                                | `ds/Select` (wrong context — full-width field chrome, no clear-X)          |
-| Many options needing search / free-typing                                                          | `ds/Select` (auto-search > 8 options)                              | a hand-rolled autocomplete (no `ds/Autocomplete`)                          |
-| Trigger an action from a menu                                                                      | `DropdownMenu` / `ThreeDotsMenu`                                   | `ds/Select`                                                                |
-| Single-line text input (text/email/password/url/textarea/number)                                   | `ds/Input`                                                         | MUI `<TextField>` · `@shared/forms/CustomTextField` (legacy)               |
-| Search-style toolbar input                                                                         | `ds/SearchInput` or `<Input leadingIcon={<SearchIcon/>} />`        | a raw input + manual clear/Enter wiring                                    |
-| Generic value picker with cluster / cloud-account chrome                                           | `@shared/CustomDropdown`                                           | `ds/Select` (doesn't model `groupByCloudProvider` / status indicators)     |
-| Content-shaped loading placeholder                                                                 | `ds/Skeleton`                                                      | `ds/ProgressLinear`                                                        |
-| Determinate progress against a known max (utilisation)                                             | `ds/ProgressBar`                                                   | `ds/ProgressLinear` (unknown max)                                          |
-| Indeterminate "something is happening"                                                             | `ds/ProgressLinear`                                                | `ds/Skeleton`                                                              |
-| Plain content card on any new screen                                                               | `ds/Card`                                                          | `ds/WidgetCard` / `ds/CustomBorderCard` (legacy; consolidated into `Card`) |
-| Card needs a coloured left-edge for tone                                                           | `ds/Card variant="accent" + tone`                                  | a hand-rolled `borderLeft` on a `WidgetCard`                               |
-| Subtle bg grouping inside a modal/Card                                                             | `ds/Card variant="tinted" + tone`                                  | a hand-rolled `<Box sx={{ backgroundColor }}>`                             |
-| Card needs disclosure (open / closed body)                                                         | `ds/CollapsableCard`                                               | `ds/Card` with manual state                                                |
-| Clickable card row (picker, drillable surface)                                                     | `ds/Card interactive + onClick`                                    | a raw `<Box onClick>` (loses focus ring + a11y role)                       |
-| 2-4 narrow choices, all visible, switching a view (not a form value)                               | `ds/Toggle`                                                        | `ds/Tabs` (heavier) · `ds/Select` (hides choices)                          |
-| Segmented multi/single-select form input                                                           | `ds/ToggleGroup`                                                   | `ds/Toggle` (state-only view switcher, not a form input)                   |
-| Picking a value to submit in a form                                                                | `ds/Select`                                                        | `ds/Toggle`                                                                |
-| Single date + time field in a form                                                                 | `@shared/widgets/CustomDateTimePicker`                             | (no `ds/DateRangePicker` exists)                                           |
-| Inline navigation link                                                                             | `ds/Link`                                                          | a raw `<a>` (loses DS color/font token + external-icon)                    |
-| "Ticket - {id}" inline link pattern                                                                | inline `<Link href={url} openInNew>{id}</Link>`                    | `common/CustomTicketLink` (removed)                                        |
-| Download action button                                                                             | `@shared/buttons/DownloadButton`                                   | a raw `ds/Button` + manual `saveAs`                                        |
-| Copy-to-clipboard icon button                                                                      | `@shared/buttons/CopyButton`                                       | a raw `ds/Button` + manual clipboard wiring                                |
-| Show a static code snippet / shell command with copy (read-only)                                   | `ds/CodeBlock`                                                     | a hand-rolled `<pre>` + copy button                                        |
-| Inline `code` chip inside a sentence                                                               | `<CodeBlock inline code='…' />`                                    | a raw `<code>` tag                                                         |
-| Prose / markdown that _contains_ fenced code blocks                                                | `Markdown` (`@shared/viewers/MarkDowns`)                           | `ds/CodeBlock` (shows one snippet; doesn't parse markdown)                 |
-| Editable / language-aware code (YAML/JSON/SQL/JS/Shell/MD)                                         | `ds/CodeEditor`                                                    | a raw `<CodeMirror>` · `ds/CodeBlock` (display-only)                       |
-| Read-only code needing syntax highlighting / line numbers / folding                                | `ds/CodeEditor` with `readOnly`                                    | `ds/CodeBlock` (structural mono only, no highlighting)                     |
-| Show **what changed** between two versions                                                         | `ds/DiffViewer`                                                    | `ds/CodeBlock` (single version)                                            |
-| New DS-clean button                                                                                | `ds/Button`                                                        | `common/NewCustomButton` (removed)                                         |
+| Situation                                                                                          | Use                                                                | Not                                                                    |
+| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| Read-only status pill in a table cell (`Active` / `Failed` / `Pending`) — 5 status tones, no click | `ds/Label`                                                         | `ds/Chip` (Chip is for interactive / categorical use)                  |
+| Interactive or categorical pill — filter, dismissible tag, count, categorical hue, avatar          | `ds/Chip`                                                          | `ds/Label` (Label is read-only Status-axis only)                       |
+| Resource-state read-out in a header / drawer / chat preamble (dot + text + subtext)                | `ds/StatusIndicator`                                               | `ds/Label` (Label is the inline cell tag)                              |
+| Any tabular data (this app)                                                                        | `@shared/tables/CustomTable`                                       | a hand-rolled `<table>` — there is no `ds/Table` primitive             |
+| One collapsible unit                                                                               | `ds/CollapsableCard`                                               | `ds/Accordion` ("Don't use Accordion for < 3 rows")                    |
+| 3+ sibling collapsibles                                                                            | `ds/Accordion`                                                     | stacking `CollapsableCard`s                                            |
+| In-page tab switch (state only) — modals, panels, in-component toggles                             | `ds/Tabs` with `navigation='state'` (or `@shared/navigation/Tabs`) | a hand-rolled toggle row                                               |
+| Tabs that drive the URL / route                                                                    | `ds/Tabs` with `navigation='router'`                               | `CustomTabs` / `ds/PageTabs` (both removed)                            |
+| Top-of-page **2-level** nav — parent tabs with hover-dropdown subtabs, URL-hash driven             | `@shared/navigation/AnchorComponent`                               | `ds/Tabs` (single-level only)                                          |
+| Transient confirmation message                                                                     | `ds/Toast`                                                         | `ds/Banner`                                                            |
+| Persistent inline page-level message                                                               | `ds/Banner`                                                        | `ds/Toast`                                                             |
+| Short hint under a form field                                                                      | `ds/Callout`                                                       | `ds/Banner` (page/section notice, taller)                              |
+| Small overlay anchored to an element                                                               | `ds/Tooltip` (text/explainer) · `DropdownMenu` (menu)              | `ds/Modal` (there is no `ds/Popover`)                                  |
+| Centered blocking task / decision                                                                  | `ds/Modal`                                                         | a side-drawer (there is no `ds/Inspector`)                             |
+| Pick one value in a **form**                                                                       | `ds/Select`                                                        | `DropdownMenu` (action menu) · `FilterDropdown` (toolbar pill)         |
+| Pick **multiple** values in a form                                                                 | `<Select multiple>`                                                | a hand-rolled multi-select (no `ds/MultiSelect`)                       |
+| Pick value(s) for a **toolbar filter**                                                             | `ds/FilterDropdown`                                                | `ds/Select` (wrong context — full-width field chrome, no clear-X)      |
+| Many options needing search / free-typing                                                          | `ds/Select` (auto-search > 8 options)                              | a hand-rolled autocomplete (no `ds/Autocomplete`)                      |
+| Trigger an action from a menu                                                                      | `DropdownMenu` / `ThreeDotsMenu`                                   | `ds/Select`                                                            |
+| Single-line text input (text/email/password/url/textarea/number)                                   | `ds/Input`                                                         | MUI `<TextField>` · `@shared/forms/CustomTextField` (legacy)           |
+| Search-style toolbar input                                                                         | `ds/SearchInput` or `<Input leadingIcon={<SearchIcon/>} />`        | a raw input + manual clear/Enter wiring                                |
+| Generic value picker with cluster / cloud-account chrome                                           | `@shared/CustomDropdown`                                           | `ds/Select` (doesn't model `groupByCloudProvider` / status indicators) |
+| Content-shaped loading placeholder                                                                 | `ds/Skeleton`                                                      | `ds/ProgressLinear`                                                    |
+| Determinate progress against a known max (utilisation)                                             | `ds/ProgressBar`                                                   | `ds/ProgressLinear` (unknown max)                                      |
+| Indeterminate "something is happening"                                                             | `ds/ProgressLinear`                                                | `ds/Skeleton`                                                          |
+| Plain content card on any new screen                                                               | `ds/Card`                                                          | `ds/WidgetCard` · `ds/CustomBorderCard` (both removed)                 |
+| Card needs a coloured left-edge for tone                                                           | `ds/Card variant="accent" + tone`                                  | a hand-rolled `borderLeft` on a `Box`                                  |
+| Subtle bg grouping inside a modal/Card                                                             | `ds/Card variant="tinted" + tone`                                  | a hand-rolled `<Box sx={{ backgroundColor }}>`                         |
+| Card needs disclosure (open / closed body)                                                         | `ds/CollapsableCard`                                               | `ds/Card` with manual state                                            |
+| Clickable card row (picker, drillable surface)                                                     | `ds/Card interactive + onClick`                                    | a raw `<Box onClick>` (loses focus ring + a11y role)                   |
+| 2-4 narrow choices, all visible, switching a view (not a form value)                               | `ds/Toggle`                                                        | `ds/Tabs` (heavier) · `ds/Select` (hides choices)                      |
+| Segmented multi/single-select form input                                                           | `ds/ToggleGroup`                                                   | `ds/Toggle` (state-only view switcher, not a form input)               |
+| Picking a value to submit in a form                                                                | `ds/Select`                                                        | `ds/Toggle`                                                            |
+| Single date + time field in a form                                                                 | `@shared/widgets/CustomDateTimePicker`                             | (no `ds/DateRangePicker` exists)                                       |
+| Inline navigation link                                                                             | `ds/Link`                                                          | a raw `<a>` (loses DS color/font token + external-icon)                |
+| "Ticket - {id}" inline link pattern                                                                | inline `<Link href={url} openInNew>{id}</Link>`                    | `common/CustomTicketLink` (removed)                                    |
+| An Edit action's icon                                                                              | `@assets` `EditIcon` in a `SafeIcon`                               | a MUI `Edit`/`EditOutlined`, a react-icons pencil, `writeIcon`         |
+| A Delete action's icon                                                                             | `@assets` `DeleteIconRed` in a `SafeIcon`                          | a MUI `Delete`/`DeleteOutline` (see the note below the table)          |
+| Download action button                                                                             | `@shared/buttons/DownloadButton`                                   | a raw `ds/Button` + manual `saveAs`                                    |
+| Copy-to-clipboard icon button                                                                      | `@shared/buttons/CopyButton`                                       | a raw `ds/Button` + manual clipboard wiring                            |
+| Show a static code snippet / shell command with copy (read-only)                                   | `ds/CodeBlock`                                                     | a hand-rolled `<pre>` + copy button                                    |
+| Inline `code` chip inside a sentence                                                               | `<CodeBlock inline code='…' />`                                    | a raw `<code>` tag                                                     |
+| Prose / markdown that _contains_ fenced code blocks                                                | `Markdown` (`@shared/viewers/MarkDowns`)                           | `ds/CodeBlock` (shows one snippet; doesn't parse markdown)             |
+| Editable / language-aware code (YAML/JSON/SQL/JS/Shell/MD)                                         | `ds/CodeEditor`                                                    | a raw `<CodeMirror>` · `ds/CodeBlock` (display-only)                   |
+| Read-only code needing syntax highlighting / line numbers / folding                                | `ds/CodeEditor` with `readOnly`                                    | `ds/CodeBlock` (structural mono only, no highlighting)                 |
+| Show **what changed** between two versions                                                         | `ds/DiffViewer`                                                    | `ds/CodeBlock` (single version)                                        |
+| New DS-clean button                                                                                | `ds/Button`                                                        | `common/NewCustomButton` (removed)                                     |
+
+**Edit / Delete icons.** One of each, app-wide: `EditIcon` (pencil over a box) and `DeleteIconRed` (red outline
+trash), both exported from `@assets` and rendered through `SafeIcon`. Size them to the button's icon slot —
+`ds/Button` resizes an `svg` but not an `<img>`, so pass `width`/`height` matching `size` (xs 13 · sm 14 ·
+md 16 · lg 18). Both assets carry a fixed colour, so they disappear on a matching fill: on a `tone='danger'`
+(red) or `tone='primary'` (navy) button, either drop the fill — `tone='ghost'` is what row deletes use — or keep
+a contrasting icon behind a `// ds-imports-allow:` marker. `npm run lint2` blocks new MUI / react-icons edit and
+delete icons; see [`app/CLAUDE.md`](CLAUDE.md) → Design System.
 
 ---
 
@@ -541,7 +565,7 @@ file's JSDoc + `Props` interface. **Conventions for the tables below:**
 
 #### `Card` — `import { Card } from '@ui/Card'`
 
-Canonical content-card surface (consolidates `WidgetCard` + `CustomBorderCard`). Slots: `header`,
+Canonical content-card surface (consolidates the removed `WidgetCard` and `CustomBorderCard`). Slots: `header`,
 `footer`, `children`. **Use** for all new card surfaces; **not** for tinting message panels (use `Banner`).
 
 ```tsx
@@ -560,39 +584,14 @@ Canonical content-card surface (consolidates `WidgetCard` + `CustomBorderCard`).
 | `tone`                           | `'neutral' \| 'info' \| 'success' \| 'warning' \| 'danger'` | `'neutral'`  | — (meaningful only with `variant='accent'\|'tinted'`) |
 | `interactive`                    | `boolean`                                                   | `false`      | — (required when `onClick` is set)                    |
 | `selected`                       | `boolean`                                                   | `false`      | —                                                     |
+| `disabled`                       | `boolean`                                                   | `false`      | — (with `interactive`: a dimmed, inert button)        |
+| `pressed`                        | `boolean`                                                   | —            | — (with `interactive`: emits `aria-pressed`)          |
 | `header` / `footer` / `children` | `ReactNode`                                                 | —            | —                                                     |
 | `onClick`                        | `(e) => void`                                               | —            | —                                                     |
 
-**Don't:** tint bg by hand (use `variant='tinted'`); nest Cards >1 deep; use `sx` for padding/shadow (use `size`/`elevation`); pass `tone` without `accent`/`tinted`; pass `onClick` without `interactive`.
+A clickable card that is unavailable right now stays a button: `interactive disabled` (role, `aria-disabled`, out of the tab order, no input). A card that is simply not clickable drops `interactive`. Toggle-style filter cards pass `pressed`. An `sx['&:hover']` replaces Card's hover (and its lift) entirely.
 
-#### `WidgetCard` — `import WidgetCard from '@ui/WidgetCard'` (legacy)
-
-Plain white elevated container (`Box` passthrough). **Consolidated into `Card`** — don't introduce
-new uses. Props: `children`, `sx`, plus any MUI `BoxProps`.
-
-```tsx
-<WidgetCard>Body content</WidgetCard>
-```
-
-#### `CustomBorderCard` — `import { CustomBorderCard } from '@ui/CustomBorderCard'` (legacy)
-
-Lightweight surface with a bottom hairline + optional coloured left accent. Prefer `Card`; reach
-here only for that specific look.
-
-```tsx
-<CustomBorderCard showLeftBorder borderLeftColor={ds.red[500]}>
-  Row
-</CustomBorderCard>
-```
-
-| Prop              | Type               | Default          | Req                      |
-| ----------------- | ------------------ | ---------------- | ------------------------ |
-| `borderColor`     | `string`           | hairline default | —                        |
-| `borderLeftColor` | `string`           | —                | —                        |
-| `borderLeftWidth` | `string \| number` | —                | —                        |
-| `showLeftBorder`  | `boolean`          | `true`           | —                        |
-| `padding`         | `string \| number` | default          | —                        |
-| `onClick`         | `(e) => void`      | —                | — (makes it interactive) |
+**Don't:** tint bg by hand (use `variant='tinted'`); nest Cards >1 deep; use `sx` for padding/shadow (use `size`/`elevation`); pass `tone` without `accent`/`tinted`; pass `onClick`, `disabled` or `pressed` without `interactive`.
 
 #### `CollapsableCard` — `import { CollapsableCard } from '@ui/CollapsableCard'`
 
@@ -1038,26 +1037,29 @@ Unified text-entry primitive. **Variants:** `size` `sm`·`md`·`lg` · `type` `t
 <Input label='Name' value={name} onChange={setName} required />
 ```
 
-| Prop                                 | Type                                          | Default        | Req |
-| ------------------------------------ | --------------------------------------------- | -------------- | --- |
-| `value`                              | `string`                                      | —              | ✓   |
-| `onChange`                           | `(next: string) => void`                      | —              | ✓   |
-| `label`                              | `ReactNode`                                   | —              | —   |
-| `instructionText`                    | `ReactNode` (between label and input)         | —              | —   |
-| `help`                               | `ReactNode` (hidden when `error` set)         | —              | —   |
-| `error`                              | `string` (presence ⇒ error; message required) | —              | —   |
-| `prefix` / `suffix`                  | `ReactNode` (outside the input bounds)        | —              | —   |
-| `leadingIcon` / `trailingIcon`       | `ReactNode` (inside bounds)                   | —              | —   |
-| `size`                               | `'sm' \| 'md' \| 'lg'`                        | `'md'`         | —   |
-| `type`                               | `InputType`                                   | `'text'`       | —   |
-| `placeholder`                        | `string`                                      | —              | —   |
-| `animatePlaceholder`                 | `boolean` / `typingSpeed` (ms/char)           | `false` / `60` | —   |
-| `required` / `disabled` / `readOnly` | `boolean`                                     | —              | —   |
-| `rows` / `minRows` / `maxRows`       | `number` (textarea)                           | — / `3` / `20` | —   |
-| `onBlur` / `onFocus` / `onKeyDown`   | handlers                                      | —              | —   |
-| `data-testid`                        | `string` (forwarded to the native input)      | —              | —   |
+| Prop                                 | Type                                               | Default        | Req |
+| ------------------------------------ | -------------------------------------------------- | -------------- | --- |
+| `value`                              | `string`                                           | —              | ✓   |
+| `onChange`                           | `(next: string) => void`                           | —              | ✓   |
+| `label`                              | `ReactNode`                                        | —              | —   |
+| `instructionText`                    | `ReactNode` (between label and input)              | —              | —   |
+| `help`                               | `ReactNode` (hidden when `error` set)              | —              | —   |
+| `error`                              | `string` (presence ⇒ error; message required)      | —              | —   |
+| `prefix` / `suffix`                  | `ReactNode` (outside the input bounds)             | —              | —   |
+| `leadingIcon` / `trailingIcon`       | `ReactNode` (inside bounds)                        | —              | —   |
+| `size`                               | `'sm' \| 'md' \| 'lg'`                             | `'md'`         | —   |
+| `type`                               | `InputType`                                        | `'text'`       | —   |
+| `placeholder`                        | `string`                                           | —              | —   |
+| `animatePlaceholder`                 | `boolean` / `typingSpeed` (ms/char)                | `false` / `60` | —   |
+| `required` / `disabled` / `readOnly` | `boolean`                                          | —              | —   |
+| `rows` / `minRows` / `maxRows`       | `number` (textarea)                                | — / `3` / `20` | —   |
+| `onBlur` / `onFocus` / `onKeyDown`   | handlers                                           | —              | —   |
+| `autoComplete`                       | `string` (`'new-password'` when `type='password'`) | auto           | —   |
+| `data-testid`                        | `string` (forwarded to the native input)           | —              | —   |
 
 **Don't:** pass a boolean to `error`; combine `leadingIcon`+`prefix` (or `trailingIcon`+`suffix`) on the same side; combine `readOnly`+`disabled`.
+
+A `type='password'` input defaults to `autoComplete='new-password'` so the browser's password manager leaves it alone — without it, clearing a secret field invites an instant re-fill from a saved credential. A genuine sign-in field must pass `autoComplete='current-password'` to opt back in.
 
 #### `SearchInput` — `import SearchInput from '@ui/SearchInput'` (default export, `.jsx`)
 
@@ -1150,8 +1152,13 @@ Immediate on/off toggle (no submit step). Label always on the LEFT. **Variants:*
 | `description`          | `ReactNode`                         | —       | —   |
 | `size`                 | `'sm' \| 'md'` (sm 28×16, md 36×20) | `'md'`  | —   |
 | `disabled` / `loading` | `boolean`                           | `false` | —   |
+| `id` / `name`          | `string` (`id` lands on the input)  | —       | —   |
+| `aria-label`           | `string`                            | —       | —   |
+| `data-*`               | forwarded to the switch base span   | —       | —   |
 
-**Don't:** use in a form with a submit button (use `Checkbox`); put the label on the right; pair with a confirmation Dialog for non-destructive changes.
+With a `label`, the whole row is a `<label>` wrapping the switch: clicking the label or description flips it, and it doesn't depend on `id` (so a repeated static `id` can't toggle the wrong switch). A string `label` names the input; a ReactNode label names it via `aria-labelledby`, so pass a phrasing element (`<Typography component='span'>`, not a `<p>`). With no visible label, pass `aria-label`. `data-testid` sits inside the label, so Playwright's `check()`/`isChecked()` on it reach the input. Only `data-*` extra props are forwarded.
+
+**Don't:** use in a form with a submit button (use `Checkbox`); put the label on the right; pair with a confirmation Dialog for non-destructive changes; leave a label-less switch without `aria-label`.
 
 #### `Toggle` — `import { Toggle } from '@ui/Toggle'`
 
@@ -1396,7 +1403,7 @@ Submenus (legacy `subMenu`) are intentionally not carried over (DS caps nesting 
 
 #### `Banner` — `import { Banner } from '@ui/Banner'`
 
-Page/section-level persistent message (one per surface, max). **Variants:** `tone` `info`·`success`·`warning`·`critical` · `surface` `page`·`section` · `actionsPlacement` `inline`·`below`.
+Page/section-level persistent message (one per surface, max). **Variants:** `tone` `info`·`success`·`warning`·`critical` · `surface` `page`·`section` · `actionsPlacement` `inline`·`below`. `warning`/`critical` render `role='alert'` (interrupts), `info`/`success` render `role='status'` (polite) — same rule and palette as `Callout` (`ds/internal/feedbackTones`).
 
 ```tsx
 <Banner tone='warning' title='Quota almost full' message="You're at 90% of your node quota." />
@@ -1415,6 +1422,25 @@ Page/section-level persistent message (one per surface, max). **Variants:** `ton
 
 `BannerAction`: `{ label, onClick, tone?: 'secondary'\|'link' }`.
 **Don't:** stack two banners on one surface; make a critical banner dismissible; > 2 actions; use for transient confirmations (that's `Toast`).
+
+#### `Callout` — `import { Callout } from '@ui/Callout'`
+
+Compact inline hint, in the flow of a form. **Variants:** `tone` `info`·`success`·`warning`·`critical` · composition `icon+message`·`icon+message+action` (auto from `action`).
+
+```tsx
+<Callout tone='info' message='To add an MCP integration, go to Admin > Integrations > MCP.' />
+```
+
+| Prop      | Type                                       | Default  | Req |
+| --------- | ------------------------------------------ | -------- | --- |
+| `tone`    | `'info'\|'success'\|'warning'\|'critical'` | `'info'` | —   |
+| `message` | `ReactNode` (or `children`)                | —        | —   |
+| `action`  | `{ label, onClick, id? }`                  | —        | —   |
+| `id`      | `string`                                   | —        | —   |
+
+Pass the text as `message` or as children — one of the two, though neither is type-enforced. Other props (`data-testid`, `className`, `id`, …) pass through to the root. `role` and `aria-live` aren't accepted: the tone sets the role — `warning`/`critical` render `role='alert'` (interrupts), `info`/`success` render `role='status'` (polite) — and the role alone carries the urgency. An unknown tone falls back to `info`, with a console warning in development.
+
+**Don't:** use it as a page- or section-level notice (`Banner`); give it more than one action; use it for a field's own validation error (`Input` has `error`/`helperText`).
 
 #### `Toast` — `import { toast } from '@ui/Toast'` (singleton) · `import Toast from '@ui/Toast'` (mount once)
 
@@ -1583,7 +1609,7 @@ These live under `@shared/*` and are kept here because §1–§3 reference them.
 | `CustomDateTimePicker`   | `@shared/widgets/CustomDateTimePicker` | Single date+time field.                                                  |
 | `CopyButton`             | `@shared/buttons/CopyButton`           | Copy-to-clipboard icon button.                                           |
 | `DownloadButton`         | `@shared/buttons/DownloadButton`       | Download trigger (wraps `ds/Button` + `file-saver`).                     |
-| `NBStatusBadge`          | `@shared/widgets/NBStatusBadge`        | K8s status badge; prefer `ds/StatusIndicator`/`ds/Label`.                |
+| `NBStatusBadge`          | `@shared/widgets/NBStatusBadge`        | Triage status badge, on `ds/Label` + `ds/DropdownMenu`.                  |
 | `CustomTextField`        | `@shared/forms/CustomTextField`        | **Legacy** → `ds/Input`.                                                 |
 | `ErrorBoundary`          | `@shared/ErrorBoundary`                | Error boundary (no `ds/ErrorBoundary`).                                  |
 

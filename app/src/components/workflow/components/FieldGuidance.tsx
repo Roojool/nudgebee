@@ -5,6 +5,7 @@ import { Chip } from '@ui/Chip';
 import CustomTooltip from '@ui/Tooltip';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import type { PropertyExample } from '../utils/fieldTypeUtils';
+import { ds } from '@utils/colors';
 
 /**
  * FieldGuidance — the "how do I fill this in?" row rendered directly under a
@@ -77,7 +78,7 @@ const FieldGuidance: React.FC<FieldGuidanceProps> = ({ help, examples, onApply, 
           <Box
             component='span'
             data-testid={`field-help-${fieldName}`}
-            sx={{ display: 'inline-flex', alignItems: 'center', gap: '2px', cursor: 'help', color: 'var(--ds-gray-600)' }}
+            sx={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[0], cursor: 'help', color: 'var(--ds-gray-600)' }}
           >
             <InfoOutlined sx={{ fontSize: 'var(--ds-text-body)' }} />
             <Typography component='span' sx={{ fontSize: 'var(--ds-text-caption)' }}>
@@ -103,7 +104,7 @@ const FieldGuidance: React.FC<FieldGuidanceProps> = ({ help, examples, onApply, 
                   data-testid={`field-example-${fieldName}-${index}`}
                   onClick={() => onApply(example.value)}
                   sx={{
-                    fontFamily: 'monospace',
+                    fontFamily: ds.font.mono,
                     maxWidth: '320px',
                     '& > span': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
                   }}

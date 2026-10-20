@@ -6,7 +6,78 @@ import PodAllocationSummary from './PodAllocationSummary';
 import MemoryAllocationIcon from '@assets/investigation/resource-allocation.svg';
 import RenderMemoryLeakData from './RenderMemoryLeakData';
 import { safeJSONParse } from 'src/utils/common';
-import { Box } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { useMemo, useState } from 'react';
+import { ds } from '@utils/colors';
+
+// Owner kinds as events store them (the Go agent writes them lowercase) → the
+// k8s_workloads.kind spelling the workload lookup and the apply path match on.
+const WORKLOAD_KINDS = {
+  deployment: 'Deployment',
+  statefulset: 'StatefulSet',
+  daemonset: 'DaemonSet',
+  job: 'Job',
+  cronjob: 'CronJob',
+  rollout: 'Rollout',
+};
+
+const OOM_TABLE_NAMES = ['*Pod and Node OOMKilled data*', 'Pod and Node OOMKilled data'];
+
+// Share of the limit at which usage counts as resource pressure. Measured on
+// dev over 7 days: 0.85 keeps 133 of 140 memory-reaching-limit alerts (their
+// rule fires at ~85%) while dropping resize from every replica-mismatch,
+// pod-not-ready and crash-loop event; 0.9 lost two thirds of the limit alerts.
+const PRESSURE_RATIO = 0.85;
+
+const peakOf = (values) => {
+  const numbers = (values || []).map((v) => parseFloat(v)).filter((v) => Number.isFinite(v));
+  return numbers.length ? Math.max(...numbers) : 0;
+};
+
+const nearLimit = (peak, limit) => Number(limit) > 0 && peak >= PRESSURE_RATIO * Number(limit);
+
+const MEMORY_UNITS = { k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
+
+// "<n><unit> request" / "<n><unit> limit" → bytes, or undefined when absent.
+const parseMemoryQuantity = (text, which) => {
+  const match = String(text).match(new RegExp(`([0-9.]+)\\s*([KMGT])(?:i|B)?\\s+${which}`, 'i'));
+  if (!match) return undefined;
+  const bytes = parseFloat(match[1]) * MEMORY_UNITS[match[2].toLowerCase()];
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : undefined;
+};
+
+// A real component, so the chosen container survives the parent's re-renders
+// and the form's data only changes when the container (or the card's evidence)
+// does — the form re-seeds its inputs whenever `data` changes.
+const TuneResourceForm = ({ card, open, onClose }) => {
+  const { workload, workloadType } = card.resolveWorkload();
+  const containers = card.resolveContainers();
+  const [selected, setSelected] = useState('');
+  // CollapsableCard mounts this before the evidence is parsed, so the default is
+  // re-derived rather than frozen into the initial state. A pick is kept even if
+  // the evidence never named it: the form also offers the workload spec's
+  // containers.
+  const container = selected || containers[0] || '';
+  const data = useMemo(
+    () => card.buildResolveData(container, workload, workloadType),
+    [card, container, workload, workloadType, card.memoryAllocationItem, card.podMemoryAllocationItem]
+  );
+  return (
+    <KubernetesRightSizingUpdateForm
+      open={open}
+      onClose={onClose}
+      onSuccess={onClose}
+      onFailure={onClose}
+      data={data}
+      updateResourceType={'resourceChange'}
+      recommendationSource='event'
+      title={`Tune Resource Configuration - ${workload}`}
+      containerOptions={containers}
+      onContainerChange={setSelected}
+      alertContainer={card.oomKilledContainer()}
+    />
+  );
+};
 
 class MemoryAllocationCard {
   constructor() {
@@ -25,7 +96,6 @@ class MemoryAllocationCard {
     this.podMemoryAllocationItem = [];
     this.memLimit = [];
     this.resourceType = '';
-    this.containerName = '';
     this.onDataUpdate = null;
     this.refreshRenderId = 0;
   }
@@ -41,6 +111,7 @@ class MemoryAllocationCard {
     let newobject5 = []; // For pod_metric info data (limit, request, name)
     let newobject1 = []; // For container_metric chart data (labels, data)
     let newobject2 = {}; // For node_metric chart data (labels, data)
+    let legacyPressure = false; // container_metric: usage reached the limit
     this.event = troubleShootingEvent;
     const parsedData = evidenceData;
     const row = troubleShootingEvent;
@@ -52,7 +123,8 @@ class MemoryAllocationCard {
             parsedData.name === 'container_metric' ||
             parsedData.name === 'node_metric' ||
             parsedData.name === 'pod_metric' ||
-            parsedData.name === 'node_request_memory_metric'
+            parsedData.name === 'node_request_memory_metric' ||
+            parsedData.name === 'pod_node_metrics'
           ) {
             return true;
           }
@@ -97,7 +169,7 @@ class MemoryAllocationCard {
           });
           newobject1.push(containerMetricObject);
           this.memLimit.push(element.metric.limits.memory / (1024 * 1024));
-          this.containerName = element.metric.container;
+          legacyPressure = legacyPressure || nearLimit(peakOf(element.values), element.metric.limits?.memory);
         }
         this.memoryAllocationItem = newobject3;
         if (item?.insight && item.insight.length > 0) {
@@ -151,7 +223,7 @@ class MemoryAllocationCard {
             // Used as recommendation base when the pod has no requests/limits set,
             // so the Tune Resource popup can prefill values from actual usage.
             const numericValues = (element.values || []).map((v) => parseFloat(v)).filter((v) => Number.isFinite(v));
-            const peakUsage = numericValues.length ? Math.max(...numericValues) : 0;
+            const peakUsage = peakOf(numericValues);
             newobject5.push({
               pod: element.metric.pod,
               container: element.metric.container,
@@ -161,13 +233,27 @@ class MemoryAllocationCard {
               cpu_request: element.metric?.requests?.cpu,
               resource_type: this.resourceType,
               peakUsage,
+              // The raw series, for the tune form's "what it actually used" view.
+              samples: numericValues,
+              sampleTimes: element.timestamps,
             });
-            this.containerName = element.metric.container;
           }
         }
         this.podMemoryAllocationItem = newobject5;
         if (item?.insight && item.insight.length > 0) {
           this.insightData = this.insightData.concat(...item.insight);
+        }
+      } else if (jsonData.name === 'pod_node_metrics') {
+        // The exact pod, all containers summed. Only used where a container has
+        // no series of its own.
+        const usage = jsonData.data?.memory_usage?.series_list_result?.[0];
+        const limit = jsonData.data?.memory_limit?.series_list_result?.[0];
+        if (usage?.values?.length) {
+          this.podMemoryUsage = {
+            samples: usage.values.map((v) => parseFloat(v)).filter((v) => Number.isFinite(v)),
+            times: usage.timestamps || [],
+            limit: parseFloat((limit?.values || []).at(-1)),
+          };
         }
       } else if (jsonData.name === 'node_metric') {
         this.resourceType = jsonData?.resource_type ?? 'memory';
@@ -187,11 +273,42 @@ class MemoryAllocationCard {
         }
       }
     });
+    // The killed container can be missing from the usage evidence entirely: on
+    // #38638 it was the metrics backend itself, so nothing about it could be
+    // queried. The OOMKilled table still names it and its allocation — list it
+    // rather than show only the containers that survived.
+    const killed = this.oomKilledContainer();
+    if (killed && newobject4.length > 0 && !newobject5.some((item) => item.container === killed)) {
+      const allocation = this.oomKilledAllocation();
+      const pod = newobject5[0]?.pod;
+      newobject4.push({ container: killed, pod, data: [], labels: [], noSamples: true });
+      newobject5.push({
+        pod,
+        container: killed,
+        request: allocation.request,
+        limits: allocation.limit,
+        resource_type: 'memory',
+        peakUsage: 0,
+        noSamples: true,
+      });
+    }
     if (newobject1?.data?.length > 0 || newobject2?.data?.length > 0 || newobject4?.length > 0) {
       this.renderContent = true;
     }
     if (this.memoryAllocationItem?.length == 0 && this.podMemoryAllocationItem?.length == 0) {
       this.resolveButton = false;
+    } else {
+      // Resizing is offered as a fix only when the evidence says resources were
+      // the problem. The card renders on every pod event with metrics (API
+      // failures, replica mismatches, crash loops…), and on those a resize is a
+      // distraction from the real fix. Decided on the signal, not the alert name:
+      // alert names are whatever each customer's rules call them.
+      this.resolveButton = Boolean(
+        killed ||
+          legacyPressure ||
+          newobject5.some((i) => (i.resource_type === 'cpu' ? nearLimit(i.peakUsage, i.cpu_limit) : nearLimit(i.peakUsage, i.limits))) ||
+          nearLimit(peakOf(this.podMemoryUsage?.samples), this.podMemoryUsage?.limit)
+      );
     }
     this.metricGraphData = newobject1;
     this.nodeGraphData = newobject2;
@@ -207,17 +324,20 @@ class MemoryAllocationCard {
     return this.insightData;
   };
 
-  ResolveMemoryComponent = (props) => {
-    let data = {};
-    let namespace = this.event?.subject_namespace,
-      workload,
-      workloadType,
-      container = '';
+  // The workload behind the event's pod. The event's own owner fields are the
+  // resolved answer; the service_key / pod-name heuristics below only run for
+  // events that carry none (older collectors, webhook alerts).
+  resolveWorkload = () => {
+    const ownerKind = WORKLOAD_KINDS[this.event?.subject_owner_kind?.toLowerCase()];
+    if (this.event?.subject_owner && ownerKind) {
+      return { workload: this.event.subject_owner, workloadType: ownerKind };
+    }
 
+    let workload, workloadType;
     if (this.event.subject_type === 'pod') {
       let serviceKeys = this.event.service_key?.split('/');
-      workload = serviceKeys[2];
-      workloadType = serviceKeys[1];
+      workload = serviceKeys?.[2];
+      workloadType = serviceKeys?.[1];
     }
 
     if (!workload) {
@@ -248,124 +368,171 @@ class MemoryAllocationCard {
       workloadType = 'Deployment';
     }
 
-    for (let e of this.event.evidences) {
-      if (e.type === 'table' && e.data.table_name === '*Pod and Node OOMKilled data*') {
-        for (let r of e.data.rows) {
-          if (r[0] === 'Container name') {
-            container = r[1];
+    return { workload: workload || this.event.subject_name, workloadType };
+  };
+
+  // The container the OOMKilled table names — the one the alert is about.
+  // Both spellings of the table name are in stored evidence.
+  oomKilledContainer = () => {
+    for (let e of this.event?.evidences || []) {
+      if (e.type === 'table' && OOM_TABLE_NAMES.includes(e.data?.table_name)) {
+        for (let r of e.data.rows || []) {
+          if (r[0] === 'Container name' && r[1]) {
+            return r[1];
           }
         }
       }
     }
+    return '';
+  };
 
-    workload = workload || this.event.subject_name;
-    if (this.memoryAllocationItem.length > 0) {
-      data = {
-        id: this.event.id,
-        accountId: this.event?.cloud_account_id,
-        card_id: this.id,
-        container_name: container || this.containerName,
+  // The killed container's request/limit from the OOMKilled table, in bytes:
+  // "2048MB request, 8192MB limit" (MB here is MiB) or "2Gi request, 8Gi limit".
+  oomKilledAllocation = () => {
+    for (let e of this.event?.evidences || []) {
+      if (e.type === 'table' && OOM_TABLE_NAMES.includes(e.data?.table_name)) {
+        const row = (e.data.rows || []).find((r) => r[0] === 'Container memory');
+        if (row?.[1]) {
+          return { request: parseMemoryQuantity(row[1], 'request'), limit: parseMemoryQuantity(row[1], 'limit') };
+        }
+      }
+    }
+    return {};
+  };
+
+  // Every container the evidence knows about, the alerting one first.
+  resolveContainers = () => {
+    const names = [];
+    const add = (name) => {
+      if (name && !names.includes(name)) names.push(name);
+    };
+    add(this.oomKilledContainer());
+    add(this.event?.labels?.container);
+    this.memoryAllocationItem.forEach((item) => add(item.container));
+    this.podMemoryAllocationItem.forEach((item) => add(item.container));
+    return names;
+  };
+
+  // The tune form's data for one container. Values from a different container
+  // must never stand in: a sidecar's 20 MiB proposed for the container that was
+  // OOMKilled at 8 GiB is the failure this guards. With nothing for the
+  // container, the form reads current values off the workload spec instead.
+  buildResolveData = (container, workload, workloadType) => {
+    const namespace = this.event?.subject_namespace;
+    // Entries without a container label are the pod as a whole.
+    const forContainer = (item) => !item.container || !container || item.container === container;
+    const base = {
+      id: this.event.id,
+      accountId: this.event?.cloud_account_id,
+      card_id: this.id,
+      container_name: container,
+    };
+
+    const containerItem = this.memoryAllocationItem.find(forContainer);
+    if (containerItem) {
+      return {
+        ...base,
         cloud_resourse: {
           meta: {
             namespace: namespace,
             controller: workload,
             controllerKind: workloadType,
-            container: container || this.containerName,
+            container: container,
             name: this.event.subject_name,
           },
         },
         memory: {
-          request: formatMemory(this.memoryAllocationItem[0]?.request?.memory * 1.1, 'bytes', 'mb')?.replace(',', ''),
-          limit: formatMemory(this.memoryAllocationItem[0]?.limits?.memory * 1.1, 'bytes', 'mb')?.replace(',', ''),
-          oldRequest: formatMemory(this.memoryAllocationItem[0]?.request?.memory, 'bytes', 'mb')?.replace(',', ''),
-          oldLimit: formatMemory(this.memoryAllocationItem[0]?.limits?.memory, 'bytes', 'mb')?.replace(',', ''),
+          request: formatMemory(containerItem?.request?.memory * 1.1, 'bytes', 'mb')?.replace(',', ''),
+          limit: formatMemory(containerItem?.limits?.memory * 1.1, 'bytes', 'mb')?.replace(',', ''),
+          oldRequest: formatMemory(containerItem?.request?.memory, 'bytes', 'mb')?.replace(',', ''),
+          oldLimit: formatMemory(containerItem?.limits?.memory, 'bytes', 'mb')?.replace(',', ''),
         },
       };
-    } else if (this.podMemoryAllocationItem.length > 0) {
-      data = {
-        id: this.event.id,
-        accountId: this.event?.cloud_account_id,
-        card_id: this.id,
-        container_name: container || this.containerName,
-        cloud_resourse: {
-          meta: {
-            namespace: namespace,
-            controller: workload,
-            container: container || this.containerName,
-            controllerKind: workloadType,
-            name: '',
-          },
+    }
+
+    const data = {
+      ...base,
+      cloud_resourse: {
+        meta: {
+          namespace: namespace,
+          controller: workload,
+          container: container,
+          controllerKind: workloadType,
+          name: '',
         },
-      };
-      // Ignoring CPU resource_type Because KubernetesRightSizingPopupForm require CPU info like 99%, 97%
-      const memoryItems = this.podMemoryAllocationItem.filter((g) => g.resource_type === 'memory');
-      const cpuItems = this.podMemoryAllocationItem.filter((g) => g.resource_type === 'cpu');
-      // A pod_metric blob tagged resource_type 'cpu' still carries the container's
-      // memory requests/limits in element.metric, so fall back to any entry that
-      // has memory request/limit set. Without this, a CPU-typed event hides the
-      // Memory card even when the pod has memory requests/limits configured.
-      const memoryObject = memoryItems[0] || this.podMemoryAllocationItem.find((g) => g.request != null || g.limits != null);
-      const cpuObject = cpuItems[0];
-      // When the pod has no requests/limits set, fall back to the highest observed
-      // usage across pods of the same resource_type so the recommendation reflects
-      // real consumption rather than zero × buffer.
-      const memPeak = memoryItems.reduce((m, g) => Math.max(m, g.peakUsage || 0), 0);
-      const cpuPeak = cpuItems.reduce((m, g) => Math.max(m, g.peakUsage || 0), 0);
-      // formatMemory(0) returns '-' (formatNumber treats 0 as no-value), which the
-      // form then parseFloat()s into NaN and renders blank. Format the raw MB number
-      // for zero current values so the Current column shows "0" instead of empty.
-      const formatMem = (bytes) => {
-        if (!bytes) return 0;
-        return formatMemory(bytes, 'bytes', 'mb')?.replace(',', '');
-      };
-      if (memoryObject) {
-        const reqBase = memoryObject.request > 0 ? memoryObject.request : memPeak;
-        const limitBase = memoryObject.limits > 0 ? memoryObject.limits : memPeak;
-        // nbalgoBase is the unbuffered MB base the popup's algo/buffer toggles
-        // multiply against. When current request/limit are zero, the form's old
-        // `parsedOldRequest || ''` path collapses to '' and toggles clear the
-        // input; nbalgoBase lets the form prefer the usage-derived value.
-        const nbalgoBaseMB = memPeak > 0 ? memPeak / (1024 * 1024) : undefined;
-        // Leave Recommended blank when there's no signal (current = 0 AND no
-        // observed peak). Pushing a 0 recommendation through would land an
-        // invalid spec on the workload.
-        data['memory'] = {
-          request: reqBase > 0 ? formatMem(reqBase * 1.1) : undefined,
-          limit: limitBase > 0 ? formatMem(limitBase * 1.1) : undefined,
-          oldRequest: formatMem(memoryObject.request),
-          oldLimit: formatMem(memoryObject.limits),
-          nbalgoBase: nbalgoBaseMB,
-        };
-      }
-      if (cpuObject) {
-        const reqBase = cpuObject.cpu_request > 0 ? cpuObject.cpu_request : cpuPeak;
-        data['cpu'] = {
-          request: reqBase > 0 ? Number(reqBase).toFixed(4) : undefined,
-          limit: undefined,
-          oldRequest: cpuObject.cpu_request || 0,
-          // The evidence carries the container's CPU limit; dropping it made the
-          // Current column claim the workload has none. (Recommended `limit`
-          // stays undefined on purpose — the form advises no CPU limit.)
-          oldLimit: cpuObject.cpu_limit,
-          nbalgoBase: cpuPeak > 0 ? cpuPeak : undefined,
-        };
-      }
+      },
+    };
+    const podItems = this.podMemoryAllocationItem.filter(forContainer);
+    // Ignoring CPU resource_type Because KubernetesRightSizingPopupForm require CPU info like 99%, 97%
+    const memoryItems = podItems.filter((g) => g.resource_type === 'memory');
+    const cpuItems = podItems.filter((g) => g.resource_type === 'cpu');
+    // A pod_metric blob tagged resource_type 'cpu' still carries the container's
+    // memory requests/limits in element.metric, so fall back to any entry that
+    // has memory request/limit set. Without this, a CPU-typed event hides the
+    // Memory card even when the pod has memory requests/limits configured.
+    const memoryObject = memoryItems[0] || podItems.find((g) => g.request != null || g.limits != null);
+    const cpuObject = cpuItems[0];
+    // When the pod has no requests/limits set, fall back to the highest observed
+    // usage of this container so the recommendation reflects real consumption
+    // rather than zero × buffer.
+    const memPeak = memoryItems.reduce((m, g) => Math.max(m, g.peakUsage || 0), 0);
+    const cpuPeak = cpuItems.reduce((m, g) => Math.max(m, g.peakUsage || 0), 0);
+    // formatMemory(0) returns '-' (formatNumber treats 0 as no-value), which the
+    // form then parseFloat()s into NaN and renders blank. Format the raw MB number
+    // for zero current values so the Current column shows "0" instead of empty.
+    const formatMem = (bytes) => {
+      if (!bytes) return 0;
+      return formatMemory(bytes, 'bytes', 'mb')?.replace(',', '');
+    };
+    const reqBase = memoryObject?.request > 0 ? memoryObject.request : memPeak;
+    const limitBase = memoryObject?.limits > 0 ? memoryObject.limits : memPeak;
+    // Always present, so the memory section renders for a container the metrics
+    // missed; the form then takes current values from the workload spec.
+    // nbalgoBase is the unbuffered MB base the popup's algo/buffer toggles
+    // multiply against. When current request/limit are zero, the form's old
+    // `parsedOldRequest || ''` path collapses to '' and toggles clear the
+    // input; nbalgoBase lets the form prefer the usage-derived value.
+    // Leave Recommended blank when there's no signal (current = 0 AND no
+    // observed peak). Pushing a 0 recommendation through would land an
+    // invalid spec on the workload.
+    // What the container used, for the form to show next to its numbers. A
+    // container with no series of its own falls back to the pod total, and says so.
+    const sampled = memoryItems.find((g) => g.samples?.length);
+    let usage;
+    if (sampled) {
+      usage = { samples: sampled.samples, times: sampled.sampleTimes || [], scope: 'container' };
+    } else if (this.podMemoryUsage?.samples?.length) {
+      usage = { samples: this.podMemoryUsage.samples, times: this.podMemoryUsage.times, scope: 'pod' };
     }
-    if (data && Object.keys(data).length) {
-      return (
-        <KubernetesRightSizingUpdateForm
-          open={props.open}
-          onClose={props.onCloseComponent}
-          onSuccess={props.onCloseComponent}
-          onFailure={props.onCloseComponent}
-          data={data}
-          updateResourceType={'resourceChange'}
-          recommendationSource='event'
-          title={`Tune Resource Configuration - ${workload}`}
-        />
-      );
+    data['memory'] = {
+      usage,
+      request: reqBase > 0 ? formatMem(reqBase * 1.1) : undefined,
+      limit: limitBase > 0 ? formatMem(limitBase * 1.1) : undefined,
+      oldRequest: formatMem(memoryObject?.request),
+      oldLimit: formatMem(memoryObject?.limits),
+      nbalgoBase: memPeak > 0 ? memPeak / (1024 * 1024) : undefined,
+    };
+    if (cpuObject) {
+      const cpuReqBase = cpuObject.cpu_request > 0 ? cpuObject.cpu_request : cpuPeak;
+      data['cpu'] = {
+        request: cpuReqBase > 0 ? Number(cpuReqBase).toFixed(4) : undefined,
+        limit: undefined,
+        oldRequest: cpuObject.cpu_request || 0,
+        // The evidence carries the container's CPU limit; dropping it made the
+        // Current column claim the workload has none. (Recommended `limit`
+        // stays undefined on purpose — the form advises no CPU limit.)
+        oldLimit: cpuObject.cpu_limit,
+        nbalgoBase: cpuPeak > 0 ? cpuPeak : undefined,
+      };
     }
-    return undefined;
+    return data;
+  };
+
+  ResolveMemoryComponent = (props) => {
+    if (this.memoryAllocationItem.length === 0 && this.podMemoryAllocationItem.length === 0) {
+      return undefined;
+    }
+    return <TuneResourceForm card={this} open={props.open} onClose={props.onCloseComponent} />;
   };
 
   getResolveComponent = () => {
@@ -420,28 +587,36 @@ class MemoryAllocationCard {
                     }}
                   >
                     <PodAllocationSummary podMemoryAllocationItem={pod} />
-                    {/*
-                     * Pod cards render only the pod chart (data=[] disables the container chart),
-                     * so container-only props (memLimit, dataRequest) are intentionally omitted.
-                     *
-                     * `occurredAt` must come from podGraphData[originalIndex].oomPointIndex, NOT
-                     * metricGraphData.oomPointIndex: metricGraphData is an ARRAY of container
-                     * metric objects, so reading `.oomPointIndex` off the array itself yields
-                     * undefined. The OOM marker index lives on each per-pod entry.
-                     */}
-                    <InvestigationCharts
-                      data={[]}
-                      labels={[]}
-                      dataN={nodeGraphData?.data}
-                      labelsN={nodeGraphData?.labels}
-                      dataRequestN={nodeGraphData?.requestData}
-                      dataRequestL={nodeGraphData?.requestDataLabels}
-                      occurredAt={podGraphData[originalIndex]?.oomPointIndex}
-                      dataP={podGraphData[originalIndex].data}
-                      labelsP={podGraphData[originalIndex].labels}
-                      podLimitRequest={pod}
-                      resourceType={pod.resource_type}
-                    />
+                    {pod.noSamples ? (
+                      <Typography sx={{ mt: ds.space[4], fontSize: ds.text.body, color: ds.gray[600] }}>
+                        No usage samples were recorded for this container around the event.
+                      </Typography>
+                    ) : (
+                      <>
+                        {/*
+                         * Pod cards render only the pod chart (data=[] disables the container chart),
+                         * so container-only props (memLimit, dataRequest) are intentionally omitted.
+                         *
+                         * `occurredAt` must come from podGraphData[originalIndex].oomPointIndex, NOT
+                         * metricGraphData.oomPointIndex: metricGraphData is an ARRAY of container
+                         * metric objects, so reading `.oomPointIndex` off the array itself yields
+                         * undefined. The OOM marker index lives on each per-pod entry.
+                         */}
+                        <InvestigationCharts
+                          data={[]}
+                          labels={[]}
+                          dataN={nodeGraphData?.data}
+                          labelsN={nodeGraphData?.labels}
+                          dataRequestN={nodeGraphData?.requestData}
+                          dataRequestL={nodeGraphData?.requestDataLabels}
+                          occurredAt={podGraphData[originalIndex]?.oomPointIndex}
+                          dataP={podGraphData[originalIndex].data}
+                          labelsP={podGraphData[originalIndex].labels}
+                          podLimitRequest={pod}
+                          resourceType={pod.resource_type}
+                        />
+                      </>
+                    )}
                   </Box>
                 ))}
               </Box>

@@ -1,10 +1,7 @@
 from typing import Dict, Any, List
 
 from notifications_server.configs.settings import public_ip, settings
-from notifications_server.message_templates.slack.recommendation_proactive_nudge import (
-    ProactiveNudgeParams,
-    build_ask_nubi_url,
-)
+from notifications_server.message_templates.slack.recommendation_proactive_nudge import ProactiveNudgeParams
 from notifications_server.message_templates.slack.recommendation_nudge_digest import (
     format_rule_name,
     format_savings,
@@ -41,6 +38,5 @@ def get_gchat_recommendation_proactive_nudge_template(
         lines.append("")
 
     lines.append(f"View all recommendations: {base_url}/optimise?utm=gchat#cost")
-    lines.append(f"Ask Nubi: {build_ask_nubi_url(params, base_url, 'gchat')}")
 
     return {"text": "\n".join(lines)}

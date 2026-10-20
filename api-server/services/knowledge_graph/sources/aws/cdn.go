@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"nudgebee/services/knowledge_graph/core"
+	"nudgebee/services/knowledge_graph/sources"
 )
 
 // cloudFrontDistributionSchema — concrete schema for CloudFront distributions.
@@ -110,4 +111,33 @@ func (s *AWSSource) extractCDNMetadata(properties map[string]interface{}, metaMa
 			}
 		}
 	}
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	cloudFrontRows := resourceKind{
+		Service:      "AmazonCloudFront",
+		NodeType:     core.NodeTypeCDN,
+		SpecificType: "CloudFrontDistribution",
+		Extract:      (*AWSSource).extractCDNMetadata,
+	}
+	registerKind(cloudFrontRows)
+	registerKind(cloudFrontRows.withTypes("distribution"))
+	registerKind(resourceKind{
+		Service:      "AmazonCloudFront",
+		Types:        []string{"function"},
+		NodeType:     core.NodeTypeCDN,
+		SpecificType: "CloudFrontFunction",
+		Extract:      (*AWSSource).extractCDNMetadata,
+	})
+}
+
+// Per-resource updates (see patch.go). Distributions and functions only own a
+// HOSTED_ON VPC edge.
+func init() {
+	registerPatchSpec(defaultVPCEdgeSpec(sources.PatchSpec{
+		SpecificTypes: []string{"CloudFrontDistribution", "CloudFrontFunction"},
+		Creatable:     true,
+	}))
 }

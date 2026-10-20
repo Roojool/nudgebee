@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -150,7 +151,7 @@ type AgenticAnalyzeRequest struct {
 	EventId          string `json:"event_id,omitempty"`
 	RecommendationId string `json:"recommendation_id,omitempty"`
 	// WorkflowId is the originating workflow definition id. When set, the PR
-	// description links back to the workflow (/workflow/<id>).
+	// description links back to the workflow (/automation/<id>).
 	WorkflowId     string               `json:"workflow_id,omitempty"`
 	AccountId      string               `json:"account_id,omitempty"`
 	ConversationId string               `json:"conversation_id,omitempty"`
@@ -693,6 +694,37 @@ func (ah *AgenticAnalyzeHandler) resolveClients(req AgenticAnalyzeRequest, logge
 	return cfg, client, agents.NewOrchestratorAgent(cfg, client, ah.gitClient, logger), nil
 }
 
+// secureSessionWorkspace creates (or re-opens) a session workspace at path and
+// leaves it mode 0700, refusing to act on anything that is not a real directory.
+//
+// The path lives in the shared os.TempDir() and its name is derived from the
+// conversation id, so it is guessable by anything else running in the container.
+// os.MkdirAll succeeds on a pre-existing symlink to a directory and os.Chmod
+// re-resolves the name and follows it, so tightening the workspace by path would
+// chmod the symlink's target instead — an attacker-planted link is enough to
+// retarget it at any directory this process can reach (CWE-59).
+//
+// Opening with O_NOFOLLOW|O_DIRECTORY resolves the final component exactly once
+// and fails outright if it is a link or not a directory. Chmod through that
+// descriptor is fchmod(2) on the object already opened, so there is no second
+// path lookup to race: swapping the name afterwards cannot redirect it.
+func secureSessionWorkspace(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return fmt.Errorf("failed to create session workspace directory: %w", err)
+	}
+	dir, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return fmt.Errorf("session workspace directory is not a usable directory: %w", err)
+	}
+	defer func() { _ = dir.Close() }()
+	// MkdirAll leaves an existing workspace's permissions unchanged. Tighten it
+	// as well, since this directory can contain a private repository clone.
+	if err := dir.Chmod(0700); err != nil {
+		return fmt.Errorf("failed to secure session workspace directory: %w", err)
+	}
+	return nil
+}
+
 func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req AgenticAnalyzeRequest) (*AgenticAnalyzeResponse, error) {
 	if len(req.KnowledgeFiles) > 0 {
 		req.Skills += NewFileHandler(ah.config).renderKnowledgeFiles(ctx, req.KnowledgeFiles)
@@ -793,13 +825,8 @@ func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req
 			return '_'
 		}, sessionKey)
 		tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("code-analysis-%s", sanitizedID))
-		if err := os.MkdirAll(tempDir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to create session workspace directory: %w", err)
-		}
-		// MkdirAll leaves an existing workspace's permissions unchanged. Tighten
-		// it as well, since this directory can contain a private repository clone.
-		if err := os.Chmod(tempDir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to secure session workspace directory: %w", err)
+		if err := secureSessionWorkspace(tempDir); err != nil {
+			return nil, err
 		}
 		repositoryPath = tempDir
 

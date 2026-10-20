@@ -31,6 +31,21 @@ query GetCloudAccounts {
 }
 `;
 
+// Account queries still in flight, keyed by query text. The cache only fills once a fetch lands, so
+// callers mounting together (a page effect + the header dropdown) each hit the network without this.
+// Keyed on the query, not the caller's args: includeDemoAccount only changes what happens after the
+// fetch, so callers that differ on it still share the one request.
+const cloudAccountsInFlight = new Map<string, Promise<any>>();
+
+function queryCloudAccountsOnce(query: string): Promise<any> {
+  let pending = cloudAccountsInFlight.get(query);
+  if (!pending) {
+    pending = Promise.resolve(queryGraphQL(query, 'GetCloudAccounts', {})).finally(() => cloudAccountsInFlight.delete(query));
+    cloudAccountsInFlight.set(query, pending);
+  }
+  return pending;
+}
+
 const apiDashboard = {
   getCloudAccounts: async function (cloud_provider = '', refresh = false, includeDemoAccount = false) {
     const cacheKeyWithDemo = (cloud_provider ? 'accounts-' + cloud_provider : 'all-accounts') + '-demo';
@@ -48,7 +63,9 @@ const apiDashboard = {
       if (cloud_provider) {
         where.cloud_provider = { _eq: cloud_provider };
       }
-      const response = await queryGraphQL(GET_CLOUD_ACCOUNTS.replace('__WHERE__', gqlStringify(where, [])), 'GetCloudAccounts', {});
+      const query = GET_CLOUD_ACCOUNTS.replace('__WHERE__', gqlStringify(where, []));
+      // An explicit refresh must reach the network, not join a request started before it.
+      const response = await (refresh ? queryGraphQL(query, 'GetCloudAccounts', {}) : queryCloudAccountsOnce(query));
       // Fail closed: if the query errored or returned no data, throw instead of caching an
       // empty list. Caching [] here would hide all accounts for the full 1h TTL on a transient
       // backend hiccup; throwing routes to the catch below so the next call retries fresh.

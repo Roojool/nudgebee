@@ -53,7 +53,10 @@ type ProxyDatasource struct {
 
 // AgentStore defines what handlers need from the DB layer.
 type AgentStore interface {
-	ValidateAgent(ctx context.Context, accessKey, secret string) (bool, string, string, error)
+	// ValidateAgent authenticates an agent and returns its account, type and
+	// agent.id. The agent id identifies one agent among several of the same
+	// type on an account (e.g. two proxy agents).
+	ValidateAgent(ctx context.Context, accessKey, secret string) (ok bool, accountID, agentType, agentID string, err error)
 	IsWSEnabled(ctx context.Context, accountID, agentType string) (bool, string, error)
 	IsAgentConnected(ctx context.Context, accountID, agentType string) (bool, error)
 	GetAgentStatus(ctx context.Context, accountID, agentType string) (connected bool, wsEnabled bool, fallbackURL string, prometheusAdditionalLabel string, err error)
@@ -61,8 +64,18 @@ type AgentStore interface {
 	TouchRelaySession(ctx context.Context, accountID, agentType string) error
 	UpdateAgentVersion(ctx context.Context, accountID, agentType, version, commit, buildTime, protocolVersion string) error
 	UpdateDatasourceHealth(ctx context.Context, accountID, agentType string, datasources map[string]any) error
-	UpsertAgentDatasources(ctx context.Context, accountID, agentType string, datasources []AgentDatasource) error
-	UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) error
+	// UpsertAgentDatasources registers the reporting agent's inventory and
+	// removes integrations that agent (agentID) owned but no longer reports.
+	UpsertAgentDatasources(ctx context.Context, accountID, agentType, agentID string, datasources []AgentDatasource) error
+	// UpdateDatasourceMetadata returns the metadata keys whose UPDATE
+	// matched zero rows, so the caller can retry a metadata message that
+	// raced the matching datasource_inventory INSERT (see #38718), and
+	// whether any integration's labels actually changed.
+	UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) (notFound []string, labelsChanged bool, err error)
+	// GetDatasourceAgentID resolves which agent owns datasourceKey on the
+	// account, via the per-agent claims UpsertAgentDatasources writes.
+	// It returns "" when the owner is unknown or ambiguous.
+	GetDatasourceAgentID(ctx context.Context, accountID, datasourceKey string) (string, error)
 	QueryProxyDatasources(ctx context.Context, accountID string) ([]ProxyDatasource, error)
 	// GetWorkspaceToolConfig returns integration config values for the given account + integration type.
 	// If configName is non-empty, only configs whose name matches (case-insensitive) are returned.
@@ -76,13 +89,23 @@ type pgStore struct {
 
 	agentCache sync.Map    // map[accessKey]agentCacheEntry
 	wsCache    cache.Cache // shared cache (Redis or in-memory) for agent connection status
+
+	// ownerCache maps accountID+"\x00"+datasourceKey → ownerCacheEntry, so
+	// routing a proxy request does not cost a DB round-trip per call.
+	ownerCache sync.Map
 }
 
 type agentCacheEntry struct {
 	Valid     bool
 	AccountID string
 	AgentType string
+	AgentID   string
 	Expires   time.Time
+}
+
+type ownerCacheEntry struct {
+	AgentID string
+	Expires time.Time
 }
 
 type wsCacheEntry struct {
@@ -96,6 +119,10 @@ const (
 	agentCacheTTL          = 30 * time.Minute
 	wsCacheTTL             = 30 * time.Minute
 	wsNotConnectedCacheTTL = 2 * time.Minute
+	// ownerCacheTTL bounds how long a datasource → agent routing answer is
+	// reused. Ownership only moves when another agent reports a datasource of
+	// the same name, so staleness costs at most this long of misrouting.
+	ownerCacheTTL = 30 * time.Second
 )
 
 // NewPostgresStore opens the DB and returns a pgStore.
@@ -118,34 +145,35 @@ func NewPostgresStore(
 	return &pgStore{db: db, encryptionKey: encryptionKey, wsCache: wsCache}, nil
 }
 
-func (p *pgStore) ValidateAgent(ctx context.Context, accessKey, secret string) (bool, string, string, error) {
+func (p *pgStore) ValidateAgent(ctx context.Context, accessKey, secret string) (bool, string, string, string, error) {
 	// 1) cache hit?
 	if v, ok := p.agentCache.Load(accessKey); ok {
 		ace := v.(agentCacheEntry)
 		if time.Now().Before(ace.Expires) {
-			return ace.Valid, ace.AccountID, ace.AgentType, nil
+			return ace.Valid, ace.AccountID, ace.AgentType, ace.AgentID, nil
 		}
 		p.agentCache.Delete(accessKey)
 	}
 
 	// 2) query DB
 	var row struct {
+		AgentID      string         `db:"id"`
 		AccountID    string         `db:"cloud_account_id"`
 		AgentType    string         `db:"type"`
 		SecretHashed sql.NullString `db:"access_secret_v2"`
 	}
 	err := p.db.GetContext(ctx, &row, `
-        SELECT cloud_account_id, "type", access_secret_v2
+        SELECT id::text AS id, cloud_account_id, "type", access_secret_v2
           FROM agent
          WHERE access_key = $1
     `, accessKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// cache failure short‐term
-			p.agentCache.Store(accessKey, agentCacheEntry{false, "", "", time.Now().Add(1 * time.Minute)})
-			return false, "", "", nil
+			p.agentCache.Store(accessKey, agentCacheEntry{Expires: time.Now().Add(1 * time.Minute)})
+			return false, "", "", "", nil
 		}
-		return false, "", "", err
+		return false, "", "", "", err
 	}
 
 	// 3) verify secret (v2 bcrypt only — legacy v1 AES path was deleted in B3
@@ -158,13 +186,19 @@ func (p *pgStore) ValidateAgent(ctx context.Context, accessKey, secret string) (
 	}
 	if !ok {
 		// cache failure short‐term
-		p.agentCache.Store(accessKey, agentCacheEntry{false, "", "", time.Now().Add(1 * time.Minute)})
-		return false, "", "", nil
+		p.agentCache.Store(accessKey, agentCacheEntry{Expires: time.Now().Add(1 * time.Minute)})
+		return false, "", "", "", nil
 	}
 
 	// 4) cache success
-	p.agentCache.Store(accessKey, agentCacheEntry{true, row.AccountID, row.AgentType, time.Now().Add(agentCacheTTL)})
-	return true, row.AccountID, row.AgentType, nil
+	p.agentCache.Store(accessKey, agentCacheEntry{
+		Valid:     true,
+		AccountID: row.AccountID,
+		AgentType: row.AgentType,
+		AgentID:   row.AgentID,
+		Expires:   time.Now().Add(agentCacheTTL),
+	})
+	return true, row.AccountID, row.AgentType, row.AgentID, nil
 }
 
 // wsCacheKey builds a composite cache key for account + agent type.
@@ -513,20 +547,147 @@ const defaultDiscoveryTargetSQL = `
 	)
 	ON CONFLICT (integration_id, cloud_account_id, tenant_id, link_role) DO NOTHING`
 
+// Ownership claims. Each agent that reports an agent-sourced integration
+// holds one integration_config_values row on it, named
+// agentOwnerConfigPrefix+<agent.id> with the agent id as its value.
+//
+// Several claims may coexist, because integrations are unique on
+// (source, type, name, tenant_id): two agents reporting a datasource with the
+// same type and name share one integration row. A single owner field would
+// make the last reporter the owner, and that agent dropping the datasource
+// would delete it out from under the other one. With per-agent claims, an
+// agent's stale cleanup only releases its own claim, and the integration is
+// deleted only once no claims remain.
+//
+// Claims live in integration_config_values rather than a new table so this
+// needs no migration.
+const agentOwnerConfigPrefix = "agent_owner:"
+
+func agentOwnerConfigName(agentID string) string { return agentOwnerConfigPrefix + agentID }
+
+// claimAgentDatasourceSQL records the reporting agent's claim on an
+// integration. It returns a row only when the claim is new, carrying the other
+// agents that already claim it (comma-separated, empty when none), so a shared
+// datasource can be logged. Args: $1 integration_id, $2 claim name,
+// $3 agent id.
+const claimAgentDatasourceSQL = `
+	INSERT INTO integration_config_values (id, integration_id, name, value, is_encrypted, created_at, updated_at)
+	VALUES (gen_random_uuid(), $1, $2, $3, false, NOW(), NOW())
+	ON CONFLICT (integration_id, name) DO NOTHING
+	RETURNING COALESCE((
+		SELECT string_agg(value, ',') FROM integration_config_values
+		WHERE integration_id = $1 AND starts_with(name::text, 'agent_owner:') AND value <> $3
+	), '')`
+
+// staleAgentDatasourcesSQL lists the agent-sourced integrations on an account
+// that the reporting agent may release:
+//   - those it has a claim on ($3 = its claim name), and
+//   - when it is the only proxy agent on the account ($4), unclaimed legacy
+//     rows written before claims existed. Only rows the relay itself
+//     created qualify (a datasource_key config value, or a proxy-only type
+//     without one), so k8s-collector's own source='agent' integrations
+//     (prometheus, loki, ...) on the same account are never touched.
+//
+// Integrations claimed only by other agents are never candidates.
+// Args: $1 account, $2 tenant, $3 claim name, $4 sole proxy agent.
+const staleAgentDatasourcesSQL = `
+	SELECT DISTINCT i.id::text, i.name::text, i.type::text
+	FROM integrations i
+	JOIN integrations_cloud_accounts ica ON i.id = ica.integration_id
+	WHERE ica.cloud_account_id = $1
+	AND i.tenant_id = $2
+	AND i.source = 'agent'
+	AND (
+		EXISTS (
+			SELECT 1 FROM integration_config_values c
+			WHERE c.integration_id = i.id AND c.name = $3
+		)
+		OR (
+			$4::boolean
+			AND NOT EXISTS (
+				SELECT 1 FROM integration_config_values c
+				WHERE c.integration_id = i.id AND starts_with(c.name::text, 'agent_owner:')
+			)
+			AND (
+				i.type IN ('mongodb_proxy', 'kafka_proxy')
+				OR EXISTS (
+					SELECT 1 FROM integration_config_values d
+					WHERE d.integration_id = i.id AND d.name = 'datasource_key'
+				)
+			)
+		)
+	)`
+
+// soleProxyAgentSQL reports whether agentID is the only proxy agent on the
+// account. Args: $1 account, $2 agent id.
+const soleProxyAgentSQL = `
+	SELECT COALESCE(COUNT(*) = 1 AND BOOL_AND(id::text = $2), false)
+	FROM agent
+	WHERE cloud_account_id = $1 AND "type" = 'proxy'`
+
+// remainingClaimsSQL counts the claims left on an integration after one was
+// released, and how many of them belong to agents on the given account.
+// Claims of agents that no longer exist do not count, so a deleted agent
+// cannot pin an integration forever. Args: $1 integration_id, $2 account.
+const remainingClaimsSQL = `
+	SELECT COUNT(*) AS remaining,
+	       COUNT(*) FILTER (WHERE a.cloud_account_id::text = $2) AS on_account
+	FROM integration_config_values c
+	JOIN agent a ON a.id::text = c.value
+	WHERE c.integration_id = $1
+	AND c.name::text = 'agent_owner:' || c.value`
+
+// datasourceOwnerSQL resolves a datasource_key on an account to the proxy
+// agents on that account that claim it. Claims by agents on other accounts
+// are ignored, so a config value can never route a request to another
+// account's agent. LIMIT 2 is enough to tell "one owner" from "ambiguous".
+// Args: $1 account, $2 datasource key.
+const datasourceOwnerSQL = `
+	SELECT DISTINCT c.value
+	FROM integration_config_values dk
+	JOIN integration_config_values c ON c.integration_id = dk.integration_id AND c.name::text = 'agent_owner:' || c.value
+	JOIN integrations_cloud_accounts ica ON ica.integration_id = dk.integration_id AND ica.cloud_account_id = $1
+	JOIN agent a ON a.id::text = c.value AND a.cloud_account_id = $1 AND a."type" = 'proxy'
+	WHERE dk.name = 'datasource_key' AND dk.value = $2
+	LIMIT 2`
+
+// agentTenant looks up the reporting agent's tenant. By agent id when known:
+// an account can have several agents of the same type, and the (account, type)
+// lookup then picks an arbitrary one of them.
+func (p *pgStore) agentTenant(ctx context.Context, accountID, agentType, agentID string) (string, error) {
+	var tenantID string
+	var err error
+	if agentID != "" {
+		err = p.db.GetContext(ctx, &tenantID, `SELECT tenant FROM agent WHERE id = $1`, agentID)
+	} else {
+		err = p.db.GetContext(ctx, &tenantID, `
+			SELECT tenant FROM agent WHERE cloud_account_id = $1 AND "type" = $2
+		`, accountID, agentType)
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get tenant for account %s: %w", accountID, err)
+	}
+	return tenantID, nil
+}
+
 // UpsertAgentDatasources auto-registers locally configured datasources as integrations.
 // This follows the same pattern as k8s-collector's _upsert_integration in telemetry_handler.py.
-func (p *pgStore) UpsertAgentDatasources(ctx context.Context, accountID, agentType string, datasources []AgentDatasource) error {
+//
+// Ownership: the reporting agent (agentID) records a claim on every
+// integration it upserts (see agentOwnerConfigPrefix). When two agents report
+// a datasource with the same type and name they share one integration row and
+// both hold claims; that is logged as a warning, since requests for it can no
+// longer be routed to a single agent (GetDatasourceAgentID reports it as
+// ambiguous, and it goes to the shared queue). Rows without claims (written
+// before claims existed) are claimed by the first agent that reports them.
+func (p *pgStore) UpsertAgentDatasources(ctx context.Context, accountID, agentType, agentID string, datasources []AgentDatasource) error {
 	if len(datasources) == 0 {
 		return nil
 	}
 
-	// Look up tenant_id from agent table
-	var tenantID string
-	err := p.db.GetContext(ctx, &tenantID, `
-		SELECT tenant FROM agent WHERE cloud_account_id = $1 AND "type" = $2
-	`, accountID, agentType)
+	tenantID, err := p.agentTenant(ctx, accountID, agentType, agentID)
 	if err != nil {
-		return fmt.Errorf("failed to get tenant for account %s: %w", accountID, err)
+		return err
 	}
 
 	// Track upserted integration IDs so we can clean up stale ones afterwards.
@@ -574,6 +735,26 @@ func (p *pgStore) UpsertAgentDatasources(ctx context.Context, accountID, agentTy
 			continue
 		}
 
+		// Record the reporting agent's claim (see the doc comment).
+		if agentID != "" {
+			var others string
+			cerr := p.db.GetContext(ctx, &others, claimAgentDatasourceSQL, integrationID, agentOwnerConfigName(agentID), agentID)
+			switch {
+			case errors.Is(cerr, sql.ErrNoRows):
+				// Already claimed by this agent; nothing written.
+			case cerr != nil:
+				slog.Error("failed to record datasource owner agent", "datasource", ds.Name, "integration_id", integrationID, "err", cerr)
+				errs = append(errs, fmt.Errorf("datasource %s owner: %w", ds.Name, cerr))
+			default:
+				p.forgetAccountOwners(accountID)
+				if others != "" {
+					slog.Warn("agent datasource is also reported by other agents (same type+name); requests for it go to the shared queue",
+						"datasource", ds.Name, "type", integrationType, "integration_id", integrationID,
+						"other_agent_ids", others, "agent_id", agentID, "account_id", accountID)
+				}
+			}
+		}
+
 		// A discovery integration is only scannable once it is associated with
 		// the account whose network it covers (link_role='discovery_target' —
 		// see vmpackage.ListDiscoveryDatasourcesForAccount, the manual
@@ -614,61 +795,251 @@ func (p *pgStore) UpsertAgentDatasources(ctx context.Context, accountID, agentTy
 		}
 	}
 
-	// Remove stale agent-sourced integrations for this account that are no longer
-	// in the agent's inventory. This prevents orphaned entries from accumulating
-	// when customers rename or remove local datasources.
-	if err := p.removeStaleAgentDatasources(ctx, accountID, tenantID, upsertedIDs); err != nil {
-		slog.Error("failed to remove stale agent datasources", "account_id", accountID, "err", err)
+	// Remove stale integrations this agent owned that are no longer in its
+	// inventory. This prevents orphaned entries from accumulating when
+	// customers rename or remove local datasources. Without a reporting agent
+	// id there is no safe scope — another agent's integrations are
+	// indistinguishable from this one's — so nothing is removed.
+	if agentID == "" {
+		slog.Warn("skipping stale agent datasource cleanup: reporting agent id unknown", "account_id", accountID, "agent_type", agentType)
+	} else if err := p.removeStaleAgentDatasources(ctx, accountID, tenantID, agentID, upsertedIDs); err != nil {
+		slog.Error("failed to remove stale agent datasources", "account_id", accountID, "agent_id", agentID, "err", err)
 	}
 
 	return errors.Join(errs...)
 }
 
-// removeStaleAgentDatasources deletes agent-sourced integrations for this account
-// that are no longer reported in the agent's datasource inventory.
-func (p *pgStore) removeStaleAgentDatasources(ctx context.Context, accountID, tenantID string, currentIDs map[string]bool) error {
-	rows, err := p.db.QueryxContext(ctx, `
-		SELECT i.id::text, i.name::text, i.type::text
-		FROM integrations i
-		JOIN integrations_cloud_accounts ica ON i.id = ica.integration_id
-		WHERE ica.cloud_account_id = $1
-		AND i.tenant_id = $2
-		AND i.source = 'agent'
-	`, accountID, tenantID)
+// removeStaleAgentDatasources releases this agent's claim on every
+// integration on the account it no longer reports (see
+// staleAgentDatasourcesSQL for which rows qualify), deleting an integration
+// only once no claims remain. See releaseAgentDatasource.
+func (p *pgStore) removeStaleAgentDatasources(ctx context.Context, accountID, tenantID, agentID string, currentIDs map[string]bool) error {
+	var sole bool
+	if err := p.db.GetContext(ctx, &sole, soleProxyAgentSQL, accountID, agentID); err != nil {
+		// Not fatal: only legacy unclaimed rows depend on it.
+		slog.Warn("failed to check for other proxy agents, not adopting unclaimed rows", "account_id", accountID, "err", err)
+		sole = false
+	}
+
+	// Collect first, release after: releasing while the result set is open
+	// holds a second pool connection per stale row for no reason.
+	stale, err := p.listStaleAgentDatasources(ctx, accountID, tenantID, agentID, sole, currentIDs)
 	if err != nil {
-		return fmt.Errorf("query stale agent datasources: %w", err)
+		return err
+	}
+
+	var errs []error
+	for _, r := range stale {
+		deleted, err := p.releaseAgentDatasource(ctx, r.id, accountID, agentID)
+		if err != nil {
+			slog.Error("failed to release stale agent datasource", "integration_id", r.id, "name", r.name, "err", err)
+			errs = append(errs, err)
+			continue
+		}
+		if deleted {
+			slog.Info("removed stale agent datasource", "integration_id", r.id, "name", r.name, "type", r.intType, "account_id", accountID, "agent_id", agentID)
+		} else {
+			slog.Info("released agent claim on datasource still reported by other agents", "integration_id", r.id, "name", r.name, "type", r.intType, "account_id", accountID, "agent_id", agentID)
+		}
+	}
+	if len(stale) > 0 {
+		p.forgetAccountOwners(accountID)
+	}
+	return errors.Join(errs...)
+}
+
+// releaseAgentDatasource drops agentID's claim on one integration, in one
+// transaction holding the integration row lock (which a concurrent
+// UpsertAgentDatasources of the same row also takes), so a claim added
+// concurrently by another agent is never deleted along with the row.
+//
+//   - No claims left: the integration and its config values are deleted
+//     (integrations_cloud_accounts cascades).
+//   - Claims left, none by an agent on accountID: only the 'own' link to
+//     accountID is removed; the remaining claimants keep the row.
+//   - Claims left by another agent on accountID: the row and link stay.
+func (p *pgStore) releaseAgentDatasource(ctx context.Context, integrationID, accountID, agentID string) (deleted bool, err error) {
+	tx, err := p.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var locked string
+	if err = tx.GetContext(ctx, &locked, `SELECT id::text FROM integrations WHERE id = $1 FOR UPDATE`, integrationID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = nil
+			return false, tx.Commit()
+		}
+		return false, fmt.Errorf("lock integration: %w", err)
+	}
+
+	if _, err = tx.ExecContext(ctx, `DELETE FROM integration_config_values WHERE integration_id = $1 AND name = $2`,
+		integrationID, agentOwnerConfigName(agentID)); err != nil {
+		return false, fmt.Errorf("delete claim: %w", err)
+	}
+
+	var remaining struct {
+		Remaining int `db:"remaining"`
+		OnAccount int `db:"on_account"`
+	}
+	if err = tx.GetContext(ctx, &remaining, remainingClaimsSQL, integrationID, accountID); err != nil {
+		return false, fmt.Errorf("count remaining claims: %w", err)
+	}
+
+	switch {
+	case remaining.Remaining == 0:
+		// Delete config values first (no cascade FK)
+		if _, err = tx.ExecContext(ctx, `DELETE FROM integration_config_values WHERE integration_id = $1`, integrationID); err != nil {
+			return false, fmt.Errorf("delete config values: %w", err)
+		}
+		// Delete integration (cascades to integrations_cloud_accounts)
+		if _, err = tx.ExecContext(ctx, `DELETE FROM integrations WHERE id = $1`, integrationID); err != nil {
+			return false, fmt.Errorf("delete integration: %w", err)
+		}
+		deleted = true
+	case remaining.OnAccount == 0:
+		if _, err = tx.ExecContext(ctx, `
+			DELETE FROM integrations_cloud_accounts
+			WHERE integration_id = $1 AND cloud_account_id = $2 AND link_role = 'own'
+		`, integrationID, accountID); err != nil {
+			return false, fmt.Errorf("delete account link: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+	return deleted, nil
+}
+
+type staleAgentDatasource struct {
+	id, name, intType string
+}
+
+func (p *pgStore) listStaleAgentDatasources(ctx context.Context, accountID, tenantID, agentID string, soleProxyAgent bool, currentIDs map[string]bool) ([]staleAgentDatasource, error) {
+	rows, err := p.db.QueryxContext(ctx, staleAgentDatasourcesSQL, accountID, tenantID, agentOwnerConfigName(agentID), soleProxyAgent)
+	if err != nil {
+		return nil, fmt.Errorf("query stale agent datasources: %w", err)
 	}
 	defer rows.Close() // nolint:errcheck
 
+	var stale []staleAgentDatasource
 	for rows.Next() {
-		var id, name, intType string
-		if err := rows.Scan(&id, &name, &intType); err != nil {
+		var r staleAgentDatasource
+		if err := rows.Scan(&r.id, &r.name, &r.intType); err != nil {
 			continue
 		}
-		if currentIDs[id] {
+		if currentIDs[r.id] {
 			continue
 		}
-
-		// Delete config values first (no cascade FK)
-		if _, err := p.db.ExecContext(ctx, `DELETE FROM integration_config_values WHERE integration_id = $1`, id); err != nil {
-			slog.Error("failed to delete config values for stale agent datasource", "integration_id", id, "err", err)
-			continue
-		}
-		// Delete integration (cascades to integrations_cloud_accounts)
-		if _, err := p.db.ExecContext(ctx, `DELETE FROM integrations WHERE id = $1`, id); err != nil {
-			slog.Error("failed to delete stale agent datasource", "integration_id", id, "err", err)
-			continue
-		}
-		slog.Info("removed stale agent datasource", "integration_id", id, "name", name, "type", intType, "account_id", accountID)
+		stale = append(stale, r)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate stale agent datasources: %w", err)
+	}
+	return stale, nil
 }
+
+func ownerCacheKey(accountID, datasourceKey string) string {
+	return accountID + "\x00" + datasourceKey
+}
+
+// forgetAccountOwners drops this replica's cached routing answers for an
+// account after its claims changed. Other replicas catch up within
+// ownerCacheTTL.
+func (p *pgStore) forgetAccountOwners(accountID string) {
+	prefix := accountID + "\x00"
+	p.ownerCache.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), prefix) {
+			p.ownerCache.Delete(k)
+		}
+		return true
+	})
+}
+
+// GetDatasourceAgentID resolves the proxy agent on the account that claims
+// datasourceKey. "" means the owner is unknown (legacy rows without claims,
+// or a datasource that was never agent-reported) or ambiguous (more than one
+// agent on the account claims it), and the caller must fall back to the
+// shared per-account queue.
+func (p *pgStore) GetDatasourceAgentID(ctx context.Context, accountID, datasourceKey string) (string, error) {
+	if accountID == "" || datasourceKey == "" {
+		return "", nil
+	}
+	key := ownerCacheKey(accountID, datasourceKey)
+	if v, ok := p.ownerCache.Load(key); ok {
+		e := v.(ownerCacheEntry)
+		if time.Now().Before(e.Expires) {
+			return e.AgentID, nil
+		}
+		p.ownerCache.Delete(key)
+	}
+
+	var owners []string
+	if err := p.db.SelectContext(ctx, &owners, datasourceOwnerSQL, accountID, datasourceKey); err != nil {
+		return "", fmt.Errorf("resolve datasource owner for account %s: %w", accountID, err)
+	}
+	owner := ""
+	switch len(owners) {
+	case 1:
+		owner = owners[0]
+	case 0:
+	default:
+		slog.Warn("datasource is claimed by more than one agent on the account, routing to the shared queue",
+			"account_id", accountID, "datasource_key", datasourceKey, "agent_ids", owners)
+	}
+	p.ownerCache.Store(key, ownerCacheEntry{AgentID: owner, Expires: time.Now().Add(ownerCacheTTL)})
+	return owner, nil
+}
+
+// updateDatasourceLabelsSQL writes an integration's labels only when they
+// differ, and reports both how many rows matched and how many changed: the
+// caller retries on zero matches (the row does not exist yet) and invalidates
+// downstream caches only on a real change. Args: $1 labels JSON, $2 name,
+// $3 tenant.
+const updateDatasourceLabelsSQL = `
+	WITH target AS (
+		SELECT id, labels::jsonb AS old_labels FROM integrations i
+		WHERE i.source = 'agent' AND i.tenant_id = $3
+		AND (
+			EXISTS (
+				SELECT 1 FROM integration_config_values v
+				WHERE v.integration_id = i.id AND v.name = 'datasource_key' AND v.value = $4
+			)
+			OR i.name = $2
+		)
+	), upd AS (
+		UPDATE integrations i
+		SET labels = $1::jsonb, updated_at = NOW()
+		FROM target t
+		WHERE i.id = t.id AND t.old_labels IS DISTINCT FROM $1::jsonb
+		RETURNING i.id
+	)
+	SELECT (SELECT count(*) FROM target) AS matched, (SELECT count(*) FROM upd) AS changed`
 
 // UpdateDatasourceMetadata persists version and metadata from proxy agent datasources
 // into the integrations.labels JSONB column.
-func (p *pgStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) error {
+//
+// Returns the metadata keys (dsID, not the derived dsName) whose UPDATE
+// matched zero rows — the integrations row for that datasource doesn't
+// exist yet, most often because this metadata message raced the
+// corresponding datasource_inventory message on first connect (see
+// register.go's dispatch and #38718). The caller retries those keys; a
+// later datasource_inventory INSERT never overwrites labels on conflict
+// (see UpsertAgentDatasources), so once the row exists a retried UPDATE
+// here still lands correctly.
+//
+// labelsChanged reports whether any row's labels actually changed. Identical
+// labels are not rewritten, so a reconnect that re-sends unchanged metadata
+// no longer bumps updated_at.
+func (p *pgStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) ([]string, bool, error) {
 	if len(metadata) == 0 {
-		return nil
+		return nil, false, nil
 	}
 
 	// Look up tenant_id from agent table
@@ -677,11 +1048,18 @@ func (p *pgStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agent
 		SELECT tenant FROM agent WHERE cloud_account_id = $1 AND "type" = $2
 	`, accountID, agentType)
 	if err != nil {
-		return fmt.Errorf("failed to get tenant for account %s: %w", accountID, err)
+		return nil, false, fmt.Errorf("failed to get tenant for account %s: %w", accountID, err)
 	}
 
+	var notFound []string
+	changed := false
 	for dsID, meta := range metadata {
-		// Extract datasource name from ID (e.g., "local:my-postgres" → "my-postgres")
+		// Rows are matched by datasource_key (the dsID) where the relay wrote
+		// one, which is the only reliable key: forager names need not equal
+		// the ID minus its prefix (the discovery ssh sibling is ID
+		// "local:x:ssh", name "x-ssh"), and cloud-pushed IDs are UUIDs.
+		// The derived name remains the fallback for types without a key
+		// (e.g. "local:my-postgres" → "my-postgres").
 		dsName := dsID
 		if idx := strings.Index(dsID, ":"); idx >= 0 {
 			dsName = dsID[idx+1:]
@@ -692,17 +1070,19 @@ func (p *pgStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agent
 			continue
 		}
 
-		_, err = p.db.ExecContext(ctx, `
-			UPDATE integrations
-			SET labels = $1::jsonb, updated_at = NOW()
-			WHERE name = $2 AND source = 'agent' AND tenant_id = $3
-		`, string(metaJSON), dsName, tenantID)
-		if err != nil {
-			return fmt.Errorf("failed to update metadata for datasource %s: %w", dsName, err)
+		var matched, updated int64
+		if err := p.db.QueryRowxContext(ctx, updateDatasourceLabelsSQL, string(metaJSON), dsName, tenantID, dsID).Scan(&matched, &updated); err != nil {
+			return notFound, changed, fmt.Errorf("failed to update metadata for datasource %s: %w", dsName, err)
+		}
+		if matched == 0 {
+			notFound = append(notFound, dsID)
+		}
+		if updated > 0 {
+			changed = true
 		}
 	}
 
-	return nil
+	return notFound, changed, nil
 }
 
 // proxyTypeToIntegrationType maps proxy type + datasource type to the integration type name

@@ -273,6 +273,7 @@ type IConversationDao interface {
 	SaveConversationMessageSuggestion(messageId string, accountId string, conversationId string, messages []ConversationSuggestionMessageResponse) error
 	GetConversationAgentParentAgentIdAndPreviousState(agenId string) (string, string)
 	UpdateConversationMessageConfig(id string, config toolcore.NBQueryConfig) error
+	UpdateConversationMessageGitRepo(id, gitRepo string) error
 	UpdateConversationMessageFollowupConfig(id string, followupRequest FollowupRequest) error
 	LoadConversationMessages(accountID, conversationID, userID string, requestType MessageType, k int) ([]map[string]string, error)
 	ListConversationFileRefs(accountId, conversationId string, limit int) ([]FileEvidenceRef, error)
@@ -309,7 +310,7 @@ type IConversationDao interface {
 	GetConversationTokenUsage(conversationId, accountId string) ([]TokenMetrics, error)
 	GetConversationCost(provider string, model string, nonCachedInputTokens, cachedInputTokens, cacheCreationTokens, outputTokens, thinkingTokens int, tenantId string) (float64, error)
 	GetConversationCosts(models []string, tenantId string) (map[string]modelPricing, error)
-	GetImageSupportCatalog() (map[string]bool, error)
+	GetImageSupportCatalog(tenantId string) (map[string]bool, error)
 	GetConversationTokenUsageDetailed(conversationId, accountId string) ([]TokenUsageDetailedRecord, error)
 	GetConversationLifecycleStorageCost(conversationId string, tenantId string) (float64, error)
 	GetConversationToolCallsStats(conversationId, accountId string) (ToolCallsStats, error)
@@ -344,7 +345,7 @@ type IConversationDao interface {
 	DeleteLongTermMemory(id, accountId string) error
 	UpdateMessageProductivityMetrics(messageId string, classification string, successfulTasks int) error
 	GetSuccessfulToolCallsCountByMessage(messageId string) (int, error)
-	ListToolCallOutcomesByMessage(messageId string) ([]ToolCallOutcome, error)
+	ListToolCallTraceByMessage(messageId string, maxInputChars, maxOutputChars, maxRows int) ([]ToolCallTrace, error)
 	RetrieveRelevantMemories(accountId string, query string, limit int) ([]LongTermMemory, error)
 	// FindSimilarMemories performs a RAG similarity search using content as the query and
 	// populates SimilarityScore on each result. Unlike RetrieveRelevantMemories it does NOT
@@ -528,8 +529,9 @@ func (chat *ConversationDao) ListAgentReferences(accountId, conversationId strin
 					-- empty, and runbook references ('runbook:<hash>' ids) have no KB
 					-- row at all — without the fallback both were silently dropped by
 					-- the empty-content skip below and never reached the Additional
-					-- Contexts panel (#34779).
-					WHEN r.reference_type = 'knowledge_base' THEN COALESCE(NULLIF(k.data,''), NULLIF(r.metadata->>'content',''), NULLIF(r.metadata->>'description',''), r.metadata->>'name')
+					-- Contexts panel (#34779). A PDF KB's data is base64 of the
+					-- document, never a displayable body, so it takes the fallback too.
+					WHEN r.reference_type = 'knowledge_base' THEN COALESCE(NULLIF(CASE WHEN k.data_format = 'pdf' THEN '' ELSE k.data END,''), NULLIF(r.metadata->>'content',''), NULLIF(r.metadata->>'description',''), r.metadata->>'name')
 					-- COALESCE(joined-projection, metadata->>'subject', '') so a
 					-- memory row deleted/decayed between injection and read still
 					-- surfaces its historical subject (from the metadata stamped
@@ -2245,13 +2247,43 @@ func (chat *ConversationDao) terminateConversation(ctx *security.RequestContext,
 	return claimed, nil
 }
 
+// UpdateConversationMessageConfig replaces the message's stored config, except
+// that a git_repo already stored on the message is kept.
+//
+// The code agent records the repo it resolved mid-turn
+// (UpdateConversationMessageGitRepo), but it runs as a sub-agent: the top-level
+// request that rewrites the config when the turn ends never saw it and carries
+// whatever repo the turn started with, or none. Letting that stale value win
+// would undo the code agent's write — including a switch from repo A to repo B.
+// The code agent is the only thing that resolves a repo, so the stored value is
+// authoritative once set.
 func (chat *ConversationDao) UpdateConversationMessageConfig(id string, config toolcore.NBQueryConfig) error {
 	configJson, _ := common.MarshalJson(config)
 
-	query := `UPDATE llm_conversation_messages SET message_config = $2 WHERE id = $1`
+	query := `UPDATE llm_conversation_messages
+		SET message_config = CASE
+			WHEN COALESCE(NULLIF(message_config, '')::jsonb ->> 'git_repo', '') <> ''
+			THEN jsonb_set($2::text::jsonb, '{git_repo}', to_jsonb(message_config::jsonb ->> 'git_repo'))::text
+			ELSE $2::text
+		END
+		WHERE id = $1`
 	_, err := chat.dbManager.Db.Exec(query, id, string(configJson))
 	if err != nil {
 		return fmt.Errorf("history: failed to update message: %w", err)
+	}
+	return nil
+}
+
+// UpdateConversationMessageGitRepo records the repository the code agent
+// resolved on the message's stored config, leaving every other field as is. The
+// next message in the conversation inherits it from there instead of detecting a
+// repository again (see the inheritance in handleConversationRequest).
+func (chat *ConversationDao) UpdateConversationMessageGitRepo(id, gitRepo string) error {
+	query := `UPDATE llm_conversation_messages
+		SET message_config = jsonb_set(COALESCE(NULLIF(message_config, ''), '{}')::jsonb, '{git_repo}', to_jsonb($2::text))::text
+		WHERE id = $1`
+	if _, err := chat.dbManager.Db.Exec(query, id, gitRepo); err != nil {
+		return fmt.Errorf("history: failed to update message git repo: %w", err)
 	}
 	return nil
 }
@@ -3246,13 +3278,22 @@ func (chat *ConversationDao) GetConversationCosts(models []string, tenantId stri
 }
 
 // GetImageSupportCatalog returns the explicit vision-capability verdicts recorded
-// in llm_model_pricing.supports_image_input, keyed by "provider:model". Rows
+// in llm_model_pricing.supports_image_input, keyed by "provider:model": the
+// built-in rows when tenantId is empty, otherwise that tenant's own rows. Rows
 // where the column is NULL are omitted — callers must treat a missing key as
 // "unknown", not "false", and fall back to their own default heuristic.
-func (chat *ConversationDao) GetImageSupportCatalog() (map[string]bool, error) {
-	rows, err := chat.dbManager.Db.Queryx(`SELECT provider_name, model_name, supports_image_input
+func (chat *ConversationDao) GetImageSupportCatalog(tenantId string) (map[string]bool, error) {
+	query := `SELECT provider_name, model_name, supports_image_input
 		FROM llm_model_pricing
-		WHERE supports_image_input IS NOT NULL AND tenant_id IS NULL`)
+		WHERE supports_image_input IS NOT NULL AND tenant_id IS NULL`
+	args := []any{}
+	if tenantId != "" {
+		query = `SELECT provider_name, model_name, supports_image_input
+		FROM llm_model_pricing
+		WHERE supports_image_input IS NOT NULL AND tenant_id = $1`
+		args = append(args, tenantId)
+	}
+	rows, err := chat.dbManager.Db.Queryx(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("GetImageSupportCatalog: query failed: %w", err)
 	}
@@ -4559,31 +4600,69 @@ func (chat *ConversationDao) GetSuccessfulToolCallsCountByMessage(messageId stri
 	return count, nil
 }
 
-// ToolCallOutcome is one row of a message's execution manifest: which tool ran
-// and how it ended. Deliberately carries NO tool response body — the post-hoc
-// answer-confidence scorer only needs to know which distinct sources were
-// consulted and whether any failed, and shipping raw observations into a second
-// LLM call would both balloon the prompt and re-expose infrastructure output
-// that already passed the egress filter once.
-type ToolCallOutcome struct {
-	ToolName string `db:"tool_name"`
-	Status   string `db:"status"`
-	Count    int    `db:"count"`
+// ToolCallTrace is one tool call as the post-hoc answer-confidence grader sees
+// it: what ran, with which input, how it ended, and a bounded slice of what it
+// returned. The grader needs the output, not just the tool name — a single
+// shell tool can supply logs, config and events in one answer, and a name-only
+// manifest cannot tell that apart from four repeats of the same lookup.
+//
+// The output goes to a second LLM call through the same egress-filtered,
+// PII-scrubbed model wrapper (llm_config.go) as the investigation that
+// produced it, so it reaches no provider that has not already seen it.
+type ToolCallTrace struct {
+	ToolName   string `db:"tool_name"`
+	Parameters string `db:"parameters"`
+	Status     string `db:"status"`
+	Response   string `db:"response"`
 }
 
-// ListToolCallOutcomesByMessage returns the distinct (tool, status) pairs for a
-// message with their call counts, ordered most-used first. Used to build the
-// execution manifest handed to the answer-confidence scorer.
-func (chat *ConversationDao) ListToolCallOutcomesByMessage(messageId string) ([]ToolCallOutcome, error) {
+// ListToolCallTraceByMessage returns up to maxRows of a message's tool calls,
+// oldest first. Parameters are cut to maxInputChars and a response longer than
+// maxOutputChars keeps its head and tail halves (the command's framing and its
+// final lines); both carry an explicit truncation marker, charged to the budget
+// so neither value exceeds the cap it was given.
+//
+// Both bounds matter and neither substitutes for the other: the per-row cuts
+// stop one multi-MB log dump crossing the wire, maxRows stops a runaway
+// investigation (the record holder ran 18,685 tool calls) doing the same with
+// volume. Bounded by construction rather than by what the caller's gate happens
+// to exclude — the manifest this replaced was bounded twice, and grading is a
+// background task nobody is waiting on, so a quiet cap beats an OOM.
+//
+// When the cap binds, the NEWEST calls are kept: they are the most distilled
+// and sit closest to the conclusion being graded, the same reasoning
+// buildSubAgentEvidence uses. The caller marks the trace as abridged.
+//
+// Ordering is by created_at, which is the transaction start, so tool calls
+// issued in parallel tie and fall back to id. Stable across reads; not
+// guaranteed to be the true execution order for concurrent calls.
+func (chat *ConversationDao) ListToolCallTraceByMessage(messageId string, maxInputChars, maxOutputChars, maxRows int) ([]ToolCallTrace, error) {
 	query := `
-	SELECT tool_name, status, count(*) AS count
-	FROM llm_conversation_tool_calls
-	WHERE message_id = $1 AND COALESCE(tool_name, '') <> ''
-	GROUP BY tool_name, status
-	ORDER BY count DESC, tool_name ASC;`
-	outcomes := []ToolCallOutcome{}
-	if err := chat.dbManager.Db.Select(&outcomes, query, messageId); err != nil {
-		return nil, fmt.Errorf("history: failed to list tool call outcomes for message: %w", err)
+	SELECT tool_name, parameters, status, response FROM (
+		SELECT tool_name,
+		       CASE WHEN length(COALESCE(parameters, '')) > $2
+		            -- 20 = length(' [... truncated ...]'). A clipped inline script or
+		            -- YAML payload would otherwise read as the complete input, and the
+		            -- prompt only warns the grader that outputs are cut.
+		            THEN LEFT(parameters, GREATEST($2 - 20, 0)) || ' [... truncated ...]'
+		            ELSE COALESCE(parameters, '')
+		       END AS parameters,
+		       COALESCE(status, '') AS status,
+		       CASE WHEN length(COALESCE(response, '')) > $3
+		            -- 21 = length(' [... truncated ...] ')
+		            THEN LEFT(response, GREATEST(($3 - 21) / 2, 0)) || ' [... truncated ...] ' || RIGHT(response, GREATEST(($3 - 21) / 2, 0))
+		            ELSE COALESCE(response, '')
+		       END AS response,
+		       created_at, id
+		FROM llm_conversation_tool_calls
+		WHERE message_id = $1 AND COALESCE(tool_name, '') <> ''
+		ORDER BY created_at DESC, id DESC
+		LIMIT $4
+	) t
+	ORDER BY created_at ASC, id ASC;`
+	calls := []ToolCallTrace{}
+	if err := chat.dbManager.Db.Select(&calls, query, messageId, maxInputChars, maxOutputChars, maxRows); err != nil {
+		return nil, fmt.Errorf("history: failed to list tool call trace for message: %w", err)
 	}
-	return outcomes, nil
+	return calls, nil
 }

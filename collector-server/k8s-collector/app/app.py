@@ -5,16 +5,22 @@ import signal
 import sys
 import time
 
-from flask import Flask, Response
+from flask import Flask
 from flask_restx import Api
 from opentelemetry import trace
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.metrics import set_meter_provider
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    ConsoleMetricExporter,
+    PeriodicExportingMetricReader,
+)
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from apis import register_urls
+from metrics.otel_metrics import metric_views, otlp_insecure
 
 
 class TraceIdFilter(logging.Filter):
@@ -31,14 +37,82 @@ class TraceIdFilter(logging.Filter):
         return True
 
 
-def setup_tracing() -> None:
-    """Install a real SDK TracerProvider (no exporter needed) so trace_id logging
-    and inbound / consumer trace continuation work, plus outbound HTTP propagation.
-    A real provider is required because Python's no-op tracer does not preserve an
-    extracted remote parent span context."""
-    resource = Resource.create({"service.name": os.environ.get("OTEL_SERVICE_NAME", "k8s-collector")})
+def _build_metric_exporter(exporter_name: str):
+    """Return the configured metric exporter, or None to leave metrics unexported.
+
+    Mirrors relay-server/pkg/otel: "console" prints to stdout (local development,
+    no collector required), "otlp" ships to OTEL_EXPORTER_OTLP_ENDPOINT over the
+    protocol named by OTEL_EXPORTER_OTLP_PROTOCOL. Anything else -- including the
+    unset default -- disables export, so an install that has not been given a
+    collector endpoint behaves exactly as before rather than failing to start.
+    """
+    if exporter_name == "console":
+        return ConsoleMetricExporter()
+    if exporter_name == "otlp":
+        protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+        if protocol.startswith("http"):
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                OTLPMetricExporter as HttpMetricExporter,
+            )
+
+            return HttpMetricExporter()
+        if protocol == "grpc":
+            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                OTLPMetricExporter as GrpcMetricExporter,
+            )
+
+            return GrpcMetricExporter(insecure=otlp_insecure())
+        raise ValueError(f"Unsupported OTLP protocol: {protocol}")
+    return None
+
+
+def setup_telemetry() -> None:
+    """Install real SDK providers for traces and metrics.
+
+    Traces: a real TracerProvider is installed with no span processor, so spans are
+    created but never exported -- deploy/otel/local-config.yaml's traces pipeline
+    will not receive anything. It exists anyway because trace_id logging and inbound
+    / consumer trace continuation need it: Python's no-op tracer does not preserve
+    an extracted remote parent span context.
+
+    Metrics: pushed over OTLP rather than scraped from a `/metrics` endpoint. The
+    collector runs inside a customer cluster, where a pull model required a
+    Prometheus Operator to be present and still left the samples in the
+    customer's Prometheus with nothing forwarding them to Nudgebee.
+    """
+    # service.instance.id keeps the gunicorn workers apart. Scraping only ever hit
+    # one worker, so duplicate series were invisible; with push, every worker
+    # exports its own copy of the same metric and the backend would sum them into
+    # nonsense (a connection-status gauge of 2, doubled message counters) unless
+    # each process is a distinct instance.
+    resource = Resource.create(
+        {
+            "service.name": os.environ.get("OTEL_SERVICE_NAME", "k8s-collector"),
+            "service.version": os.environ.get("APP_VERSION", "0.0.0"),
+            "service.instance.id": f"{os.environ.get('HOSTNAME', 'local')}-{os.getpid()}",
+        }
+    )
     trace.set_tracer_provider(TracerProvider(resource=resource))
     RequestsInstrumentor().instrument()
+
+    exporter_name = os.environ.get("OTEL_EXPORTER", "").lower()
+    metric_exporter = _build_metric_exporter(exporter_name)
+    if metric_exporter is None:
+        logging.info("OTel metrics export disabled (OTEL_EXPORTER=%r)", exporter_name)
+        return
+
+    # Parsed defensively: this runs at import, so a bad chart value would otherwise
+    # be a CrashLoopBackOff rather than a degraded export interval.
+    raw_interval = os.environ.get("OTEL_METRIC_EXPORT_INTERVAL", "60000")
+    try:
+        export_interval = int(raw_interval)
+    except ValueError:
+        logging.warning("Invalid OTEL_METRIC_EXPORT_INTERVAL=%r, falling back to 60000ms", raw_interval)
+        export_interval = 60000
+
+    reader = PeriodicExportingMetricReader(metric_exporter, export_interval_millis=export_interval)
+    set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader], views=metric_views()))
+    logging.info("OTel metrics export enabled via %s exporter", exporter_name)
 
 
 with open("config/logging.json", "rt") as f:
@@ -46,9 +120,9 @@ with open("config/logging.json", "rt") as f:
 
 logging.config.dictConfig(logging_config)
 
-# Install the real SDK TracerProvider + outbound instrumentation after logging is
+# Install the real SDK providers + outbound instrumentation after logging is
 # configured. Required so trace_id logging and inbound/consumer trace continuation work.
-setup_tracing()
+setup_telemetry()
 
 # Determine application environment - default to Production for security
 ENV_MAPPING = {
@@ -105,12 +179,6 @@ def create_app():
     def health():
         """Shallow process health check for Kubernetes probes."""
         return {"status": "ok"}
-
-    # Add Prometheus metrics endpoint
-    @flask_app.route("/metrics")
-    def metrics():
-        """Prometheus metrics endpoint"""
-        return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
     return flask_app
 

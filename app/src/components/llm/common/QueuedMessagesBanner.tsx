@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { Box, Typography, IconButton, CircularProgress } from '@mui/material';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
-import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed, EditIcon } from '@assets';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import ImageIcon from '@mui/icons-material/Image';
@@ -42,7 +42,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
     return null;
   }
 
-  const count = queuedMessages.filter((message) => !message.saveError).length;
+  const count = queuedMessages.filter((message) => !message.saveError && !message.isForeground).length;
   const waiting = queuedMessages.filter((message) => !message.saving && !message.saveError).length;
   const saving = queuedMessages.filter((message) => message.saving).length;
   const unconfirmed = queuedMessages.filter((message) => message.saveError).length;
@@ -116,7 +116,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
               borderRadius: '999px',
               backgroundColor: isFull ? ds.amber[100] : ds.gray[200],
               color: isFull ? ds.amber[700] : ds.gray[700],
-              fontSize: '11px',
+              fontSize: ds.text.caption,
               fontWeight: 'var(--ds-font-weight-medium)',
               lineHeight: 1,
             }}
@@ -133,7 +133,11 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
               whiteSpace: 'nowrap',
             }}
           >
-            {isFull ? 'Queue full (wait for tasks to finish or delete a message)' : 'Runs after the current response'}
+            {isFull
+              ? 'Queue full (wait for tasks to finish or delete a message)'
+              : waiting
+              ? 'Runs after the current response'
+              : 'Waiting for confirmation'}
           </Typography>
         </Box>
 
@@ -200,12 +204,12 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         component='span'
                         sx={{
                           fontFamily: ds.font.sans,
-                          fontSize: '11px',
+                          fontSize: ds.text.caption,
                           fontWeight: 'var(--ds-font-weight-medium)',
                           color: ds.gray[700],
                           backgroundColor: ds.gray[200],
-                          borderRadius: '4px',
-                          px: '4px',
+                          borderRadius: ds.radius.sm,
+                          px: ds.space[1],
                           py: '1px',
                           flexShrink: 0,
                           lineHeight: 1.2,
@@ -257,7 +261,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                   </Box>
                 )}
                 {/* Actions: Send now, Edit, Delete */}
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[0], flexShrink: 0 }}>
                   <Tooltip title='Send now' placement='top'>
                     <IconButton
                       size='small'
@@ -269,7 +273,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         onSendNow(msg.id);
                       }}
                       sx={{
-                        p: '4px',
+                        p: ds.space[1],
                         color: ds.gray[600],
                         '&:hover': { color: ds.brand[500], backgroundColor: ds.gray[100] },
                       }}
@@ -289,12 +293,12 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         onEdit(msg.id);
                       }}
                       sx={{
-                        p: '4px',
+                        p: ds.space[1],
                         color: ds.gray[600],
                         '&:hover': { color: ds.gray[700], backgroundColor: ds.gray[100] },
                       }}
                     >
-                      <EditOutlinedIcon sx={{ fontSize: 16 }} />
+                      <SafeIcon src={EditIcon} alt='edit' width={16} height={16} />
                     </IconButton>
                   </Tooltip>
 
@@ -314,12 +318,12 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         }
                       }}
                       sx={{
-                        p: '4px',
+                        p: ds.space[1],
                         color: ds.gray[500],
                         '&:hover': { color: ds.red[500] || '#EF4444', backgroundColor: ds.gray[100] },
                       }}
                     >
-                      <DeleteOutlineIcon sx={{ fontSize: 16 }} />
+                      <SafeIcon src={DeleteIconRed} alt='delete' width={16} height={16} />
                     </IconButton>
                   </Tooltip>
                 </Box>

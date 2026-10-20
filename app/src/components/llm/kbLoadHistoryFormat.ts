@@ -31,7 +31,9 @@ export const formatDuration = (seconds?: number | null): string => {
   return `${mins}m ${secs}s`;
 };
 
-// Shows "succeeded / submitted" only when they differ — i.e. a load dropped docs.
+// Counts chunks, not documents: ingestion splits long documents so the reranker
+// can score all of them, and this ledger measures embedding work. Shows
+// "embedded / submitted" only when they differ — i.e. a load dropped some.
 export const formatDocuments = (entry: KBLoadHistoryEntry): string | number => {
   if (entry.expected_document_count != null && entry.expected_document_count !== entry.document_count) {
     return `${entry.document_count} / ${entry.expected_document_count}`;

@@ -1,8 +1,12 @@
 from slack_sdk.web import SlackResponse
 from slack_sdk.web.client import WebClient
+from typing import Any, Dict, Optional
 import logging
+import requests
 
 LOG = logging.getLogger(__name__)
+
+CONTENT_TYPE_JSON = "application/json"
 
 
 class SlackClient(WebClient):
@@ -103,3 +107,38 @@ class SlackClient(WebClient):
     def chat_delete(self, *, token, channel_id=None, ts=None, **kwargs):
         client = WebClient(token=token)
         return client.chat_delete(channel=channel_id, ts=ts, **kwargs)
+
+    @staticmethod
+    def post_to_slack_webhook(
+        webhook_url: str,
+        payload: Dict[str, Any],
+        tenant: Optional[str] = None,
+        timeout: int = 15,
+    ) -> Optional[requests.Response]:
+        """Post a Block Kit message directly to a Slack Incoming Webhook. No
+        token - the URL is the secret and is bound to one channel. Unlike
+        chat.postMessage, Slack answers with a plain-text "ok" body, not JSON.
+        Returns the raw response, or None on a transport failure so one dead
+        webhook doesn't abort the fan-out. The caller decides success (2xx)."""
+        try:
+            # requests.post, not a shared Session: this runs concurrently across
+            # threads via asyncio.to_thread, and a Session isn't thread-safe.
+            response = requests.post(
+                webhook_url,
+                headers={"Content-Type": CONTENT_TYPE_JSON},
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.exceptions.RequestException as exc:
+            LOG.warning("Slack webhook connection failed for tenant %s: %s", tenant, exc)
+            return None
+        if response.status_code >= 400:
+            LOG.warning(
+                "Slack webhook delivery failed for tenant %s: %s - %s",
+                tenant,
+                response.status_code,
+                response.text[:512],
+            )
+        else:
+            LOG.debug("Slack webhook notification sent for tenant %s", tenant)
+        return response

@@ -8,6 +8,7 @@ import (
 
 	"github.com/tmc/langchaingo/callbacks"
 	"github.com/tmc/langchaingo/llms"
+	"nudgebee/llm/llms/internal/contentutil"
 	"nudgebee/llm/llms/openai/internal/openaiclient"
 )
 
@@ -480,7 +481,7 @@ func ExtractToolParts(msg *ChatMessage) ([]llms.ContentPart, []llms.ToolCall) {
 		case llms.ImageURLContent:
 			content = append(content, p)
 		case llms.BinaryContent:
-			content = append(content, p)
+			content = append(content, contentutil.ImageURLFromBinary(p))
 		case llms.ToolCall:
 			toolCalls = append(toolCalls, p)
 		}

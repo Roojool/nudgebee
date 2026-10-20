@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Box, Typography, Card, Divider, IconButton } from '@mui/material';
+import { Box, Typography, Card, IconButton } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import { Checkbox } from '@ui/Checkbox';
 import { Input } from '@ui/Input';
 import { ExpandMore, ExpandLess } from '@mui/icons-material';
@@ -210,11 +211,9 @@ export const FormCard = ({ title, description, icon, number, children, columns =
               //      opacity: 0.3,
               //      borderImage: `repeating-linear-gradient(to right, ${ds.brand[200]} 0 5.5px, transparent 4px 10px) 30`,
               //    }}
-              sx={{
-                borderWidth: '0.4px',
-                borderColor: ds.brand[200],
-                opacity: 0.3,
-              }}
+              color={ds.brand[200]}
+              thickness={2}
+              sx={{ my: 0, opacity: 0.3 }}
             />
 
             <Box sx={containerStyle}>{children}</Box>

@@ -925,7 +925,13 @@ _WORKLOAD_CONFIGMAPS_SQL = """
 # only the newest hands the reader "a deployment happened" and drops the edit
 # that caused it. Several lets them discriminate; the deployment_history
 # playbook remains the place to see the complete list.
+#
+# The limit counts changed OBJECTS, not change rows. Repeat edits to one object
+# fold into one block (see format_evidence), so the query fetches more rows than
+# it shows: an operator-managed ConfigMap rewritten five times would otherwise
+# fill every slot and push out the workload's own deploy.
 CONFIG_CHANGE_CORRELATION_LIMIT = 5
+CONFIG_CHANGE_FETCH_LIMIT = 25
 
 
 # The routing side of the same question: which Ingresses send traffic to this
@@ -1055,7 +1061,7 @@ def get_last_config_change(config_change_event, data, finding):
         )
         values.extend(names)
     conditions.append("({})".format(" or ".join(subject_clauses)))
-    values.append(CONFIG_CHANGE_CORRELATION_LIMIT)
+    values.append(CONFIG_CHANGE_FETCH_LIMIT)
 
     select_config_change_event = sql.SQL(
         "select id, service_key, evidences, starts_at from {} where "
@@ -2173,15 +2179,56 @@ def format_evidence(evidence, config_change_event: List, aggregation_key: str):
             if action_name == "service_map_enricher":
                 check_neighboring_workload_health(item, {})
             item["insight"] = insights
-    # One block per correlated change, newest first. A single block used to be
-    # appended here; with a ConfigMap edit followed by the restart that made it
-    # take effect, that block was always the restart.
+    formatted_evidence.extend(_fold_config_changes(config_change_event, aggregation_key))
+    return formatted_evidence
+
+
+def _fold_config_changes(config_change_event, aggregation_key) -> List[Dict[str, Any]]:
+    """One block per changed object, newest first.
+
+    A single block used to be appended; with a ConfigMap edit followed by the
+    restart that made it take effect, that block was always the restart. Then
+    one block per change row, which on an object edited repeatedly (an
+    operator-managed ConfigMap is rewritten on every rule change) rendered the
+    same card and the same Revert action once per edit. Rows arrive newest
+    first, so the first row of each object is its representative. Every edit,
+    the representative included, is listed in `changes` with its own event id,
+    so the reader can open each earlier edit's diff rather than only its time.
+    """
+    folded: List[Tuple[Dict[str, Any], Any]] = []  # (block, representative starts_at)
+    by_object: Dict[str, Dict[str, Any]] = {}
     for change in config_change_event:
         try:
-            formatted_evidence.append(get_config_change_data(change, aggregation_key))
+            block = get_config_change_data(change, aggregation_key)
         except Exception:
             logger.exception("Failed to handle config change event %s", change)
-    return formatted_evidence
+            continue
+        data = block["data"] if isinstance(block.get("data"), dict) else {}
+        # A block with no resource_name cannot be matched to another; key it by
+        # its own row so it is never folded into an unrelated change.
+        key = str(data.get("resource_name") or "").strip().lower() or "row:{}".format(change[0])
+        existing = by_object.get(key)
+        if existing is not None:
+            existing["additional_info"]["changes"].append(_change_ref(block))
+            continue
+        if len(folded) >= CONFIG_CHANGE_CORRELATION_LIMIT:
+            continue
+        block["additional_info"]["changes"] = [_change_ref(block)]
+        by_object[key] = block
+        folded.append((block, change[3]))
+
+    for block, starts_at in folded:
+        info = block["additional_info"]
+        info["change_count"] = len(info["changes"])
+        if info["change_count"] > 1:
+            title = _change_block_title(block.get("data"), starts_at, info["change_count"])
+            if title:
+                info["title"] = title
+    return [block for block, _ in folded]
+
+
+def _change_ref(block) -> Dict[str, Any]:
+    return {"change_event_id": block["additional_info"].get("change_event_id"), "start_at": block.get("start_at")}
 
 
 def get_event_labels(evidence) -> Dict[str, str]:
@@ -2289,17 +2336,22 @@ def get_config_change_data(config_change_event, aggregation_key):
     # identically-titled rows and the reader cannot tell which is which — or
     # that any of them concern a different object at all.
     title = _change_block_title(config_data.get("data"), starts_at)
+    # The change event this block was read from. The alert can carry several
+    # diff blocks, and a revert with no id undoes the alert's own evidence —
+    # every block at once — so the UI must name the one it means.
+    info = {"change_event_id": str(config_change_event[0])}
     if title:
-        config_data["additional_info"] = {"title": title}
+        info["title"] = title
+    config_data["additional_info"] = info
     return config_data
 
 
-def _change_block_title(diff_data, starts_at) -> str:
+def _change_block_title(diff_data, starts_at, change_count=1) -> str:
     """ "ConfigMap sessions-config changed · 14:05 UTC", from the diff block.
 
     resource_name is "<kind>/<namespace>/<name>.yaml" with the kind lowercased
-    (see BuildKubernetesDiffBlock in the agent). The time disambiguates repeat
-    edits to one object, which otherwise produce two rows with the same title.
+    (see BuildKubernetesDiffBlock in the agent). Repeat edits to one object are
+    folded into one block by format_evidence, which passes their count.
     """
     if not isinstance(diff_data, dict):
         return ""
@@ -2311,9 +2363,11 @@ def _change_block_title(diff_data, starts_at) -> str:
     if name.endswith(".yaml"):
         name = name[: -len(".yaml")]
     title = "{} {} changed".format(_DIFF_KIND_LABELS.get(kind.lower(), kind.title()), name)
+    if change_count > 1:
+        title += " {} times".format(change_count)
     if starts_at is not None:
         try:
-            title += " · {} UTC".format(starts_at.strftime("%H:%M"))
+            title += " · {}{} UTC".format("latest " if change_count > 1 else "", starts_at.strftime("%H:%M"))
         except Exception:
             pass
     return title

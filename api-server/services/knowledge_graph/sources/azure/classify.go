@@ -30,7 +30,8 @@ func shouldSuppressAzureResource(r *sources.CloudResourceRow) bool {
 // createNodeFromResource creates a knowledge graph node from an Azure cloud resource
 func (s *AzureSource) createNodeFromResource(resource *sources.CloudResourceRow, req *core.SourceBuildRequest) *core.DbNode {
 	source := "azure"
-	nodeType := s.determineNodeType(resource.Type, resource.ServiceName)
+	kind := kindFor(resource.Type, resource.ServiceName)
+	nodeType := kind.NodeType
 
 	properties := make(map[string]interface{})
 	properties["name"] = resource.Name
@@ -55,16 +56,17 @@ func (s *AzureSource) createNodeFromResource(resource *sources.CloudResourceRow,
 
 	// Declare the concrete cloud label (specific_type). NewNode lifts this out of
 	// properties into the dedicated column.
-	properties["specific_type"] = s.determineSpecificType(nodeType, resource.ServiceName, resource.Type)
+	properties["specific_type"] = kind.specificType(resource)
 
 	// Parse metadata
 	if len(resource.Meta) > 0 && string(resource.Meta) != "{}" {
 		var metaMap map[string]interface{}
 		if err := json.Unmarshal(resource.Meta, &metaMap); err == nil {
-			s.extractEssentialMetadataByNodeType(properties, metaMap, nodeType, resource.ServiceName)
+			s.extractMetadataForKind(properties, metaMap, kind)
 		}
-		// Store raw meta for VNet nodes so ensureSubnetNodes can extract embedded subnets
-		if nodeType == core.NodeTypeVPC {
+		// Resources whose children are embedded in their metadata keep it, so
+		// the pass that extracts them can read it back (a VNet's subnets).
+		if kind.KeepRawMeta {
 			properties["_raw_meta"] = resource.Meta
 		}
 	}
@@ -97,43 +99,15 @@ func extractServicePrefix(serviceName string) string {
 	return serviceName
 }
 
-// determineNodeType maps Azure resource types to knowledge graph node types.
-// It handles both formats:
-//   - Original format: type="VirtualMachine", service_name="Microsoft.Compute"
-//   - DB format:       type="virtualmachines", service_name="microsoft.compute/virtualmachines"
-func (s *AzureSource) determineNodeType(resourceType, serviceName string) core.NodeType {
-	resourceTypeLower := strings.ToLower(resourceType)
-
-	// Step 1: Direct type lookup (handles both singular and plural lowercase)
-	if nodeType, exists := azureTypeToNodeType[resourceTypeLower]; exists {
-		return nodeType
-	}
-
-	// Step 2: Some collectors store the full provider-qualified form
-	// (e.g. "Microsoft.Network/routeTables") instead of the bare type segment.
-	// Try the last "/"-delimited segment as a fallback.
-	if idx := strings.LastIndex(resourceTypeLower, "/"); idx >= 0 && idx < len(resourceTypeLower)-1 {
-		if nodeType, exists := azureTypeToNodeType[resourceTypeLower[idx+1:]]; exists {
-			return nodeType
-		}
-	}
-
-	// Step 3: Service prefix fallback
-	servicePrefix := strings.ToLower(extractServicePrefix(serviceName))
-	if nodeType, exists := azureServicePrefixToNodeType[servicePrefix]; exists {
-		return nodeType
-	}
-
-	return core.NodeTypeCloudResource
-}
-
-// extractEssentialMetadataByNodeType extracts Azure-specific metadata fields based on node type.
+// extractMetadataForKind extracts the metadata fields a node keeps: the ones
+// common to every Azure resource, then the ones the resource's own extractor
+// pulls out of the Resource Graph "properties" object.
 // Azure Resource Graph returns meta in a nested format:
 //
 //	{ "id": "...", "name": "...", "properties": { ...actual resource data... } }
 //
 // This method normalizes by checking both top-level and nested "properties" keys.
-func (s *AzureSource) extractEssentialMetadataByNodeType(properties map[string]interface{}, metaMap map[string]interface{}, nodeType core.NodeType, serviceName string) {
+func (s *AzureSource) extractMetadataForKind(properties map[string]interface{}, metaMap map[string]interface{}, kind resourceKind) {
 	// Azure Resource Graph nests actual data under "properties" key
 	propsMap := metaMap
 	if nested, ok := metaMap["properties"].(map[string]interface{}); ok {
@@ -154,28 +128,7 @@ func (s *AzureSource) extractEssentialMetadataByNodeType(properties map[string]i
 	// Extract VNet/Subnet IDs common to many resource types (check both levels)
 	s.extractCommonNetworkIDs(properties, metaMap, propsMap)
 
-	switch nodeType {
-	case core.NodeTypeComputeInstance:
-		s.extractVMMetadata(properties, propsMap)
-	case core.NodeTypeManagedCluster:
-		s.extractAKSMetadata(properties, propsMap)
-	case core.NodeTypeVPC:
-		s.extractVNetMetadata(properties, propsMap)
-	case core.NodeTypeSubnet:
-		s.extractSubnetMetadata(properties, propsMap)
-	case core.NodeTypeSecurityGroup:
-		s.extractNSGMetadata(properties, propsMap)
-	case core.NodeTypeDatabase:
-		s.extractDatabaseMetadata(properties, propsMap)
-	case core.NodeTypeLoadBalancer:
-		s.extractLoadBalancerMetadata(properties, propsMap)
-	case core.NodeTypeCache:
-		s.extractCacheMetadata(properties, propsMap)
-	case core.NodeTypeNetworkInterface:
-		s.extractNICMetadata(properties, propsMap)
-	case core.NodeTypeCDN:
-		s.extractCDNMetadata(properties, propsMap)
-	case core.NodeTypeDNSZone:
-		s.extractDNSZoneMetadata(properties, propsMap)
+	if kind.Extract != nil {
+		kind.Extract(s, properties, propsMap)
 	}
 }

@@ -95,11 +95,6 @@ jest.mock('@ui/Stat', () => ({
   Stat: ({ label, value }) => <div data-testid={`summary-${label}`}>{value}</div>,
 }));
 
-jest.mock('@ui/WidgetCard', () => ({
-  __esModule: true,
-  default: ({ children }) => <div data-testid='widget-card'>{children}</div>,
-}));
-
 jest.mock('@components/k8s/common/ClusterNameWithRegion', () => ({
   __esModule: true,
   default: ({ name, region }) => (

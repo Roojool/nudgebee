@@ -8,14 +8,7 @@ import {
   LOG_LIMIT_OPTIONS,
 } from "./awsMonitoringLocators";
 
-// Cloud Account > AWS > Monitoring — Alert Manager, Cloud Logs and Cloud Metrics
-// (app/src/pages/cloud-account/details/[CloudAccountDetails].jsx:653-657).
-//
-// Read-only by construction. The module's only write action is the row menu's
-// Enable/Disable toggle, which flips a rule on an account other suites share, so that
-// flow is opened and cancelled but never confirmed. Create New Alert is shipped
-// disabled (CloudAccountAlertManager.tsx:303), so the module offers no create journey
-// to cover at all — see the PR's Follow-ups.
+// Read-only: Enable/Disable or Mute changes a rule other suites share, so it is only cancelled; Create New Alert ships disabled.
 
 // A name no alert rule can carry, so the empty-listing assertion is about the search
 // filtering rather than about what the dev account happens to hold.
@@ -150,7 +143,7 @@ test(
 );
 
 test(
-  "Cloud Monitoring - open a rule's row menu and cancel the enable/disable confirmation, verify the rule keeps its original status",
+  "Cloud Monitoring - open a rule's row menu and cancel the enable/disable or mute confirmation, verify the rule keeps its original status",
   { tag: ["@dev", "@regression", "@negative", "@functional"] },
   async ({ page }) => {
     test.setTimeout(MONITORING_TIMEOUT_MS);
@@ -160,33 +153,26 @@ test(
     test.skip(baseline === 0, "the dev AWS account has no alert rules, so there is no row menu to open");
 
     const statusBefore = (await m.alertCell(0, "status").textContent())?.trim() ?? "";
-    expect(statusBefore, "the first rule should report a status before the dialog opens").toMatch(/^(Enabled|Disabled)$/);
+    expect(statusBefore, "the first rule should report a status before the dialog opens").toMatch(/^(Enabled|Disabled)/);
 
     await m.alertRowMenuTrigger(0).click();
 
-    // The menu is gated on write access (getMenuItems returns [] without it), so an
-    // absent toggle means the run's user cannot administer rules rather than a bad locator.
-    const toggle = m.rowMenuItem("toggle-enabled", /^(Enable|Disable)$/);
-    await expect(toggle, "the row menu should offer Enable/Disable — needs write access on the account").toBeVisible({
+    await expect(m.ruleChangeMenuItem, "the row menu should offer Enable/Disable or Mute — needs write access on the account").toBeVisible({
       timeout: 15000,
     });
-    await toggle.click();
+    await m.ruleChangeMenuItem.click();
 
     await test.step("The confirmation names the rule it would change", async () => {
       await expect(m.confirmDialog).toBeVisible({ timeout: 15000 });
-      await expect(m.confirmDialogTitle).toContainText(/^(Disable|Enable) the alert/);
+      await expect(m.confirmDialogTitle).toContainText(/^((Disable|Enable) the alert|Mute ")/);
       await expect(m.submitBtn).toBeVisible();
     });
 
     await test.step("Cancel closes it and changes nothing", async () => {
-      // Deliberately never clicks #submit: confirming calls disableAlertManager and
-      // flips a rule on an account every other AWS suite reads.
+      // Never clicks #submit: confirming disables or mutes a rule every other AWS suite reads.
       await m.cancelBtn.click();
       await expect(m.confirmDialogTitle).toHaveCount(0, { timeout: 15000 });
-      // No success snackbar means no mutation was issued (the handler raises one on
-      // either outcome, CloudAccountAlertManager.tsx:251-253).
-      await expect(page.getByText(/Rule .* (Enabled|Disabled) Successful/)).toHaveCount(0);
-      // The row still reports what it reported before the dialog opened.
+      await expect(m.ruleChangeSnackbar).toHaveCount(0);
       await expect(m.alertCell(0, "status")).toHaveText(statusBefore);
     });
   }

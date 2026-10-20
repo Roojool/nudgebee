@@ -410,10 +410,25 @@ func newInvalidK8sOrdinalError(value string) *InvalidK8sOrdinalError {
 }
 
 // TODO improve based on existing db rather than adhoc logic
+// Returns "" when the pod name matches no known pattern: a pod with no controller owns no
+// k8s_workloads row, so returning the pod name only yields a failed workload lookup.
 func applicationNameFromPodName(namespaceName, podName string, cache map[string]string) string {
 
 	if cache[fmt.Sprintf("%s/%s", namespaceName, podName)] != "" {
 		return cache[fmt.Sprintf("%s/%s", namespaceName, podName)]
+	}
+
+	// Check for UUID suffix pattern: <app_name>-<uuid>
+	// Example: workspace-3f2504e0-4f89-11d3-9a0c-0305e82c3301
+	// Checked before the ordinal pattern because a UUID's last group can be all
+	// digits, which the StatefulSet check below would read as an ordinal.
+	if len(podName) > k8sUUIDLength+1 {
+		hyphenPos := len(podName) - k8sUUIDLength - 1
+		if podName[hyphenPos] == '-' {
+			if _, err := uuid.Parse(podName[hyphenPos+1:]); err == nil {
+				return podName[:hyphenPos]
+			}
+		}
 	}
 
 	// Check for StatefulSet pattern: <app_name>-<ordinal>
@@ -432,8 +447,11 @@ func applicationNameFromPodName(namespaceName, podName string, cache map[string]
 		}
 	}
 
-	return podName
+	return ""
 }
+
+// k8sUUIDLength is the length of a UUID in its canonical form (8-4-4-4-12 hex digits).
+const k8sUUIDLength = 36
 
 // parseK8sOrdinal checks if the given string is a valid integer (ordinal for StatefulSets).
 func parseK8sOrdinal(s string) (int, error) {
@@ -740,12 +758,12 @@ func discoverAndUpdateFrameworkAndDashboardAttributes(ctx *security.RequestConte
 
 	for arn, discovery := range appArnDataMap {
 		if discovery.application == "" {
-			ctx.GetLogger().Error("discovery: unable to identify application", "arn", arn, "data", slog.AnyValue(discovery))
+			ctx.GetLogger().Warn("discovery: unable to identify application", "arn", arn, "data", slog.AnyValue(discovery))
 			continue
 		}
 		workloadResourceId, ok := workloadIdMap[fmt.Sprintf("%s/%s", discovery.namespace, discovery.application)]
 		if !ok {
-			ctx.GetLogger().Error("discovery: unable to identify workload", "arn", arn, "data", slog.AnyValue(discovery))
+			ctx.GetLogger().Warn("discovery: unable to identify workload", "arn", arn, "data", slog.AnyValue(discovery))
 			continue
 		}
 

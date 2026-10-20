@@ -1167,7 +1167,10 @@ func TestResolveESMetricsIndex(t *testing.T) {
 		{"blank selection falls back", "   ", "metrics-configured", "metrics-configured"},
 		{"trims the selection", "  metrics-explicit  ", "", "metrics-explicit"},
 		{"trims the configured index", "", "  metrics-configured  ", "metrics-configured"},
-		{"nothing configured stays empty", "", "", ""},
+		// Was "": every query on an account with Elasticsearch connected but no
+		// metrics index failed with "index is required", while the utilisation and
+		// noisy-neighbours paths defaulted to metrics-* and worked.
+		{"nothing configured falls back to the default", "", "", esDefaultMetricsIndex},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

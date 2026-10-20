@@ -137,11 +137,11 @@ describe('OwnershipSection', () => {
     expect(modal).toHaveAttribute('data-resource-key', 'res-1');
   });
 
-  it('warns when nobody owns the resource', async () => {
+  it('says nobody owns the resource in one row, not a callout', async () => {
     resolveOwners.mockResolvedValue(respond(K8S_CHAIN, unowned, unowned, unowned));
     render(<OwnershipSection rec={k8sRec()} />);
 
-    expect(await screen.findByText('No owner set yet')).toBeInTheDocument();
+    expect(await screen.findByText('Not set')).toBeInTheDocument();
     expect(screen.queryByText('Ownership chain')).not.toBeInTheDocument();
     // An admin can still assign from scratch on an unowned resource.
     expect(screen.getByRole('button', { name: 'Assign owner' })).toBeInTheDocument();

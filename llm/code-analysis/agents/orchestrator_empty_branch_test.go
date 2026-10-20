@@ -9,15 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A branch with no commits must be reported as a terminal no-op, distinguishable
-// from a real failure.
+// A branch with no commits must stay distinguishable from other push failures.
 //
 // Pushing an empty branch used to produce
 // "GraphQL: Head sha can't be blank, Base sha can't be blank, No commits" from
-// the provider — an opaque API error for what is really "the change is already
-// present". Recurring since at least April. The caller keys off this sentinel to
-// set execution_status no_op instead of pr_creation_status failed, so a wrapped
-// error must still be recognisable.
+// the provider — an opaque API error. Recurring since at least April. The caller
+// keys off this sentinel to report that the fix was applied but never reached the
+// branch, so a wrapped error must still be recognisable.
 func TestErrNoCommitsToPublish_IsDistinguishable(t *testing.T) {
 	require.Error(t, errNoCommitsToPublish)
 

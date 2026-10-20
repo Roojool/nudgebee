@@ -95,6 +95,8 @@ async def generate_recommendations(
     datadog_site: Optional[str] = None,
     elasticsearch: Optional[Dict[str, Any]] = None,
     tenant_id: str = "",
+    metric_provider: Optional[str] = None,
+    metric_provider_source: Optional[str] = None,
 ):
     config = Config(
         namespaces=None if namespace is None else [namespace],
@@ -118,8 +120,15 @@ async def generate_recommendations(
         datadog_site=datadog_site,
         elasticsearch=elasticsearch,
         tenant_id=tenant_id,
+        metric_provider=metric_provider or "",
+        metric_provider_source=metric_provider_source or "",
     )
-    return await runner.run()
+    try:
+        return await runner.run()
+    finally:
+        # In a finally, not after the await: the scans that leak are the ones that raise.
+        # A scan that aborts immediately still built the pool, and still leaked it.
+        runner.close()
 
 
 def get_resource_minimal(resource: ResourceType) -> float:
@@ -1499,6 +1508,8 @@ async def generate_and_process_recommendation(
     datadog_app_key: Optional[str] = None,
     datadog_site: Optional[str] = None,
     elasticsearch: Optional[Dict[str, Any]] = None,
+    metric_provider: Optional[str] = None,
+    metric_provider_source: Optional[str] = None,
 ) -> RecommendationProcessingResult:
     """Generate and process rightsizing recommendations with improved modularity."""
     ctx_logger = get_contextual_logger(tenant_id, account_id, namespace)
@@ -1542,6 +1553,8 @@ async def generate_and_process_recommendation(
                     datadog_site=datadog_site,
                     elasticsearch=elasticsearch,
                     tenant_id=tenant_id,
+                    metric_provider=metric_provider,
+                    metric_provider_source=metric_provider_source,
                 )
                 gen_span.set_attribute("rightsizing.recommendations_generated", len(rightsizing_recommendations.scans))
             except Exception as e:

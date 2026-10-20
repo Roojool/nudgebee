@@ -63,6 +63,25 @@ func GetNudgebeeUIReferenceForClusterDetails(
 	return ref
 }
 
+// BuildAutomationURL returns the absolute /automation/<id>?accountId=... page URL.
+// Returns "" if any input is missing; callers must then omit the link.
+func BuildAutomationURL(accountId, workflowId string, extraQuery url.Values, fragment string) string {
+	base := strings.TrimRight(config.Config.BaseUrl, "/")
+	if base == "" || accountId == "" || workflowId == "" {
+		return ""
+	}
+	q := url.Values{}
+	for k, v := range extraQuery {
+		q[k] = append([]string(nil), v...)
+	}
+	q.Set("accountId", accountId)
+	link := base + "/automation/" + url.PathEscape(workflowId) + "?" + q.Encode()
+	if fragment != "" {
+		link += "#" + fragment
+	}
+	return link
+}
+
 func GetNudgebeeUIReference(ctx NbToolContext, page string, text string, queryParameters map[string]string, query string) NBToolResponseReference {
 	url := config.Config.BaseUrl
 	if url == "" {

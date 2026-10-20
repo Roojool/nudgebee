@@ -67,7 +67,7 @@ const CopyableValue = ({ value }: { value: string }) => {
       <Typography
         sx={{
           fontSize: ds.text.small,
-          fontFamily: 'monospace',
+          fontFamily: ds.font.mono,
           color: ds.gray[600],
           overflow: 'hidden',
           textOverflow: 'ellipsis',
@@ -140,7 +140,7 @@ const LogExpandedRow = ({ row }: { row: any[] }) => {
               <Typography
                 sx={{
                   fontSize: ds.text.small,
-                  fontFamily: 'monospace',
+                  fontFamily: ds.font.mono,
                   wordBreak: 'break-all',
                   color: ds.gray[600],
                 }}
@@ -233,7 +233,7 @@ const CloudLogsTable: React.FC<CloudLogsTableProps> = ({ logs = [], id = 'cloudL
               <Typography
                 sx={{
                   fontSize: ds.text.small,
-                  fontFamily: 'monospace',
+                  fontFamily: ds.font.mono,
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
@@ -258,7 +258,7 @@ const CloudLogsTable: React.FC<CloudLogsTableProps> = ({ logs = [], id = 'cloudL
             component='pre'
             sx={{
               fontSize: ds.text.small,
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-all',
               m: 0,

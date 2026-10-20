@@ -104,6 +104,13 @@ type GetMetricActionParams struct {
 	Statistic       string              `json:"statistic"`
 	StartTimeOffset string              `json:"start_time_offset"` // e.g., "-15m", "-1h"
 	EndTimeOffset   string              `json:"end_time_offset"`   // e.g., "+5m", "0m"
+	// MetricsJSON is the alarm's whole configuration.metrics array, serialized
+	// to JSON by the yaml template (via the toJson helper). Namespace/MetricName
+	// above can only ever hold one metric's identity — a Go template always
+	// renders to a single string — so a metric-math alarm's raw sub-metrics and
+	// its expression travel through here instead, to be decoded with
+	// encoding/json rather than forced through the single-string template path.
+	MetricsJSON string `json:"metrics_json,omitempty"`
 }
 
 type GetLogActionParams struct {
@@ -116,6 +123,12 @@ type GetLogActionParams struct {
 	// Fields required for auto-discovery if AutoDetectLogGroup is true
 	ClusterName string `json:"cluster_name,omitempty"` // Required if AutoDetectLogGroup is true
 	ServiceName string `json:"service_name,omitempty"` // Required if AutoDetectLogGroup is true
+
+	// Alternative discovery mode: look up a specific container's log group directly
+	// from its task definition instead of guessing by naming convention. Set both,
+	// or neither — falls back to LogGroupName if the lookup fails to find a match.
+	TaskDefinitionArn string `json:"task_definition_arn,omitempty"`
+	ContainerName     string `json:"container_name,omitempty"`
 }
 
 // EventProcessingRule defines a single rule for processing an event.

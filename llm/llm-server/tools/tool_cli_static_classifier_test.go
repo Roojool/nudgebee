@@ -32,6 +32,7 @@ func TestStaticCLIClassifiers(t *testing.T) {
 		{"helm version constraint is still create", inferHelmRequestType, "helm install api ./chart --version 1.2.3", core.ToolRequestTypeCreate},
 
 		{"github issue list", inferGithubRequestType, "gh issue list", core.ToolRequestTypeRead},
+		{"github repo clone", inferGithubRequestType, "gh repo clone acme/api", core.ToolRequestTypeRead},
 		{"github pr create", inferGithubRequestType, "gh pr create --title fix", core.ToolRequestTypeCreate},
 		{"github pr merge", inferGithubRequestType, "gh pr merge 42 --squash", core.ToolRequestTypeUpdate},
 		{"github repo delete", inferGithubRequestType, "gh repo delete acme/api --yes", core.ToolRequestTypeDelete},
@@ -46,6 +47,7 @@ func TestStaticCLIClassifiers(t *testing.T) {
 		{"github missing executable defers", inferGithubRequestType, "issue list", ""},
 
 		{"gitlab mr view", inferGitlabRequestType, "glab mr view 42", core.ToolRequestTypeRead},
+		{"gitlab repo clone", inferGitlabRequestType, "glab repo clone acme/api", core.ToolRequestTypeRead},
 		{"gitlab ci retry", inferGitlabRequestType, "glab ci retry 42", core.ToolRequestTypeUpdate},
 		{"gitlab issue delete", inferGitlabRequestType, "glab issue delete 42", core.ToolRequestTypeDelete},
 		{"gitlab api defaults to read", inferGitlabRequestType, "glab api projects/1/repository/files/main.go/raw?ref=main", core.ToolRequestTypeRead},

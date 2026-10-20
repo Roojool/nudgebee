@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Dict, Optional
 
 from rag.core.types import Document
@@ -6,6 +7,8 @@ from rag.core.types import Document
 from rag.core.utils.db_query import get_live_kb_collection_names, get_tenant_id_for_account
 from rag.qdrant.client import list_collections_optimized
 from rag.core.llm import local_reranker
+from rag.core.llm import ranking
+from rag.core.monitoring.audit import RetrievalTrace, TraceCandidate
 from utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -229,6 +232,134 @@ def _retrieve_documents_from_collections(
     return all_docs
 
 
+def _scorer_version() -> str:
+    """Describe the scoring configuration, derived from it rather than declared.
+
+    Composed from the settings that actually decide a score, so changing any of
+    them changes this string on its own. A hand-maintained version label goes
+    stale silently and makes two different configurations indistinguishable in
+    the trace, which is the one thing the trace exists to prevent.
+    """
+    return (
+        f"emb={Config.embeddings_model_id};"
+        f"rr={Config.reranker_model}/{Config.reranker_max_length}/{Config.reranker_max_doc_chars};"
+        f"score=w{Config.ranked_similarity_weight:.2f};"
+        f"limit={Config.ranked_limit}"
+    )
+
+
+def _ranked_documents(query, similar_docs_flat, no_of_results, token_usage, trace):
+    """Score every candidate, group chunks into documents, return the best N.
+
+    No filtering: a per-query normalised blend cannot carry an absolute
+    relevance decision, because its top candidate scores 1.0 whether or not
+    anything relevant was found. The caller decides.
+    """
+    pool_size = max(no_of_results * 2, Config.reranking_max_docs)
+    pool = similar_docs_flat[:pool_size]
+
+    started = time.monotonic()
+    scores, ok = local_reranker.score_documents(query, pool)
+    score_ms = int((time.monotonic() - started) * 1000)
+    if not ok:
+        # Same contract as the threshold path: an unscored list is not a ranked
+        # one, and returning it unranked is what previously put six irrelevant
+        # documents into a prompt.
+        logger.warning("Reranking unavailable — returning no documents rather than unranked ones")
+        if trace is not None:
+            trace.fallback_reason = "rerank_unavailable"
+            trace.n_retrieved = len(pool)
+            trace.n_injected = 0
+            trace.score_ms = score_ms
+        return [], token_usage, trace
+
+    scored_chunks = [(doc, sim, scores[i]) for i, (doc, sim) in enumerate(pool)]
+    ranked = ranking.rank_documents(
+        scored_chunks, limit=Config.ranked_limit, similarity_weight=Config.ranked_similarity_weight
+    )
+
+    if trace is not None:
+        trace.scorer_version = _scorer_version()
+        trace.requested_k = no_of_results
+        trace.n_retrieved = len(pool)
+        trace.n_injected = len(ranked)
+        trace.score_ms = score_ms
+        blended = ranking.blend(scored_chunks, Config.ranked_similarity_weight)
+        # The chunk that won each returned document's slot, by identity — several
+        # chunks of one document can tie on score, and only one of them was
+        # actually sent.
+        winners = {id(r.document) for r in ranked}
+        order = {r.parent_id: i for i, r in enumerate(ranked)}
+        for index, (doc, sim, rr) in enumerate(scored_chunks):
+            key = ranking.parent_key(doc)
+            title, url = _candidate_identity(doc)
+            if id(doc) in winners:
+                # This chunk represented its document in the response.
+                status, rank_out = "returned", order.get(key)
+            elif key in order:
+                # Its document was returned, but through a better chunk of the
+                # same document. Distinct from being dropped on relevance: the
+                # text did reach the caller, this passage did not.
+                status, rank_out = "dropped_sibling", None
+            else:
+                status, rank_out = "dropped_rank", None
+            trace.candidates.append(
+                TraceCandidate(
+                    rank_in=index,
+                    rank_out=rank_out,
+                    ref=key,
+                    chunk=doc.page_content or "",
+                    status=status,
+                    sim=sim,
+                    rr=rr,
+                    # Recorded for every candidate, not only the survivors, so
+                    # "how close was what we dropped" is answerable.
+                    weighted=blended[index],
+                    title=title,
+                    url=url,
+                )
+            )
+
+    logger.info(
+        f"Ranked {len(pool)} chunks into {len(ranked)} documents " f"(limit={Config.ranked_limit}, score_ms={score_ms})"
+    )
+    return [(_with_retrieval_metadata(r, rank), r.weighted) for rank, r in enumerate(ranked)], token_usage, trace
+
+
+def _with_retrieval_metadata(ranked, rank):
+    """Attach the per-signal scores to the document the caller receives.
+
+    The caller needs the similarity and cross-encoder scores separately, not only
+    the blend they were combined into — it is judging these candidates and the
+    two signals disagree in ways the single number hides. Carrying them on the
+    document's metadata keeps the ``(document, score)`` shape every existing
+    caller unpacks, rather than forking the return type by mode.
+
+    The metadata dict is copied rather than mutated: it comes from the Qdrant
+    payload, and the collection metadata cache hands out shared objects.
+    """
+    document = ranked.document
+    metadata = dict(document.metadata or {})
+    metadata["retrieval"] = {
+        "rank": rank,
+        "parent_id": ranked.parent_id,
+        "similarity": round(float(ranked.similarity), 4),
+        "reranker_score": round(float(ranked.reranker_score), 4),
+        "weighted": round(float(ranked.weighted), 4),
+        "n_chunks": ranked.n_chunks,
+    }
+    document.metadata = metadata
+    return document
+
+
+def _candidate_identity(document) -> tuple[str | None, str | None]:
+    """The document's title and link, for naming it to a reader."""
+    metadata = getattr(document, "metadata", None) or {}
+    title = metadata.get("title") or None
+    url = metadata.get("url") or None
+    return (str(title) if title else None, str(url) if url else None)
+
+
 def get_matching_documents(
     query: str,
     no_of_results: int,
@@ -239,10 +370,13 @@ def get_matching_documents(
     use_reranking: bool = False,
     tenant_id: Optional[str] = None,
     restrict_to_collection: bool = False,
+    trace: Optional[RetrievalTrace] = None,
 ):
     """
     Returns:
-        tuple: (documents, token_usage_metadata) where token_usage_metadata contains LLM usage info
+        tuple: (documents, token_usage_metadata, trace) where token_usage_metadata
+        contains LLM usage info and trace records every candidate that was scored,
+        returned or dropped. trace is None when the caller did not ask for one.
     """
     # Resolve tenant_id lazily from the account when the caller didn't supply
     # one — keeps tenant-scoped integration collections (Confluence, ServiceNow)
@@ -256,6 +390,12 @@ def get_matching_documents(
     )
 
     token_usage: dict = {}
+
+    if trace is not None:
+        # Set here rather than in the ranking helper so it survives every exit —
+        # the no-collections, empty, reranker-down and exception paths all
+        # returned rows with no k at all, which reads as "no search happened".
+        trace.requested_k = no_of_results
 
     try:
         # Find relevant collections
@@ -274,7 +414,14 @@ def get_matching_documents(
             f"tenant {tenant_id}, collections: {collection_names}"
         )
         if not collection_names:
-            return [], {}
+            # No collection was visible to this account/tenant. Distinct from a
+            # search that ran and found nothing, and the trace has to say which:
+            # this is usually a scoping or eligibility problem, not a relevance one.
+            if trace is not None:
+                trace.fallback_reason = "no_collections"
+                trace.n_retrieved = 0
+                trace.n_injected = 0
+            return [], {}, trace
 
         # Retrieve documents from collections using multiprocessing
         logger.info(f"Retrieving documents from collections: {collection_names}")
@@ -287,10 +434,20 @@ def get_matching_documents(
             collection_metadata={c.name: _collection_classification(c, tenant_id) for c in collections},
         )
         if not similar_docs_flat:
-            return [], {}
+            # Collections were searched and returned nothing — an unreachable
+            # Qdrant looks identical to an empty index from here, so record that
+            # retrieval came back empty rather than leaving a blank row.
+            if trace is not None:
+                trace.fallback_reason = "rag_empty"
+                trace.n_retrieved = 0
+                trace.n_injected = 0
+            return [], {}, trace
 
         # Sort by relevance score
         similar_docs_flat.sort(key=lambda x: x[1], reverse=True)
+
+        if use_reranking and Config.ranked_mode:
+            return _ranked_documents(query, similar_docs_flat, no_of_results, token_usage, trace)
 
         if use_reranking:
             # Cap docs sent to the reranker to bound latency.
@@ -306,13 +463,41 @@ def get_matching_documents(
                 # yields its nearest k, and without a working relevance score
                 # nothing downstream can tell a good hit from a bad one.
                 logger.warning("Reranking unavailable — returning no documents rather than unranked ones")
-                return [], token_usage
+                if trace is not None:
+                    trace.fallback_reason = "rerank_unavailable"
+                    trace.n_retrieved = len(similar_docs_flat)
+                    trace.n_injected = 0
+                return [], token_usage, trace
         else:
             logger.info("Skipping reranking (use_reranking=False)")
             docs_reranked = similar_docs_flat
 
-        logger.info(f"Request complete - Returned {len(docs_reranked[:no_of_results])} docs")
-        return docs_reranked[:no_of_results], token_usage
+        returned = docs_reranked[:no_of_results]
+        if trace is not None:
+            # The unranked path serves callers that ask for no reranking, and it
+            # was writing a row carrying only the query — no counts, no
+            # candidates, indistinguishable from a search that never ran.
+            trace.n_retrieved = len(similar_docs_flat)
+            trace.n_injected = len(returned)
+            kept = {id(doc) for doc, _ in returned}
+            for index, (doc, sim) in enumerate(docs_reranked):
+                title, url = _candidate_identity(doc)
+                trace.candidates.append(
+                    TraceCandidate(
+                        rank_in=index,
+                        rank_out=index if id(doc) in kept else None,
+                        ref=ranking.parent_key(doc),
+                        chunk=doc.page_content or "",
+                        status="returned" if id(doc) in kept else "dropped_rank",
+                        sim=sim,
+                        title=title,
+                        url=url,
+                    )
+                )
+        logger.info(f"Request complete - Returned {len(returned)} docs")
+        return returned, token_usage, trace
     except Exception as e:
         logger.error(f"Error in get_matching_documents: {str(e)}")
-        return [], token_usage
+        if trace is not None:
+            trace.fallback_reason = "error"
+        return [], token_usage, trace

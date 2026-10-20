@@ -11,8 +11,9 @@ import { OptimizeModuleLocators, RESOLUTIONS_TABLE } from "../optimizeModuleLoca
 // Rung choices below were measured against what those two files actually render:
 //   ResolutionsView.tsx 4 data-testid   ResolutionDetailPanel.tsx 3 data-testid
 // So rung 1 exists for every container here and leads. The status cards additionally take
-// role="button" from WidgetCard with an accessible name composed of the Stat label and its
-// value, which is a real rung-2 fallback; the panel's close control has an aria-label.
+// role="button" from ds/Card (interactive, muted ones included) with an accessible name composed
+// of the Stat label and its value, which is a real rung-2 fallback; the panel's close control
+// has an aria-label.
 
 // The status values ResolutionsView's STATUS_CARDS declares, paired with the card testid it
 // derives from each (`resolutions-card-${status.toLowerCase()}`) and the label the Stat
@@ -120,10 +121,10 @@ export class ResolutionsLocators extends OptimizeModuleLocators {
     return this.statusCardByTestId(testId, label);
   }
 
-  // WidgetCard spreads its props onto the Box, so the testid, role="button" and aria-pressed
-  // all reach the DOM. The accessible name is the Stat's label followed by its value, hence
-  // the prefix match rather than an exact one. Scoped to the page root so the fallback
-  // cannot escape onto another tab's cards.
+  // ds/Card renders the testid, role="button" (interactive) and aria-pressed (its `pressed`
+  // prop) on its root, so all three reach the DOM. The accessible name is the Stat's label
+  // followed by its value, hence the prefix match rather than an exact one. Scoped to the
+  // page root so the fallback cannot escape onto another tab's cards.
   private statusCardByTestId(testId: string, label: string): Locator {
     return this.page
       .getByTestId(testId)

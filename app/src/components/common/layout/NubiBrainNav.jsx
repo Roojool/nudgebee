@@ -122,7 +122,9 @@ const NubiBrainNav = ({ surface = 'dark', accountId }) => {
   // nothing rather than silently open something. Kept here rather than
   // exported from the modal so this stays a link allowlist, not a second
   // copy of the registry.
-  const DEEP_LINKABLE_TABS = ['digests'];
+  // 'knowledge-base': the Setup Center's Skills item deep-links here —
+  // `SetupCenter.tsx`'s `openIntegration` special-cases the same id.
+  const DEEP_LINKABLE_TABS = ['digests', 'knowledge-base'];
 
   useEffect(() => {
     if (!router.isReady) return;

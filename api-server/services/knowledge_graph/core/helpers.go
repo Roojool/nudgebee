@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -90,6 +91,19 @@ func CanonicalWorkloadKind(kind string) string {
 		return canonical
 	}
 	return kind
+}
+
+// CanonicalWorkloadKinds returns the canonical PascalCase Kubernetes kinds this
+// package normalizes to. sources/k8s checks it against the kinds it declares:
+// a kind here that k8s does not build would normalize observed traffic to a
+// specific_type no node carries.
+func CanonicalWorkloadKinds() []string {
+	out := make([]string, 0, len(canonicalWorkloadKinds))
+	for _, canonical := range canonicalWorkloadKinds {
+		out = append(out, canonical)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // NewNode creates a new node with generated ID and timestamps.
@@ -261,21 +275,22 @@ func DeduplicateEdges(edges []*DbEdge) []*DbEdge {
 type EdgeSourcePriority int
 
 const (
-	EdgePriority1 EdgeSourcePriority = 1 // Highest priority (k8s)
-	EdgePriority2 EdgeSourcePriority = 2 // manual (user-declared dependencies)
-	EdgePriority3 EdgeSourcePriority = 3 // aws
-	EdgePriority4 EdgeSourcePriority = 4 // ebpf
-	EdgePriority5 EdgeSourcePriority = 5 // traces
-	EdgePriority6 EdgeSourcePriority = 6 // datadog-apm
-	EdgePriority7 EdgeSourcePriority = 7 // newrelic-apm
-	EdgePriority8 EdgeSourcePriority = 8 // aws-vpc-flow (VPC Flow Logs — coarsest network observation: no L7, no latency, IP-derived)
-	EdgePriority9 EdgeSourcePriority = 9 // Lowest priority (unknown sources)
+	EdgePriority1  EdgeSourcePriority = 1  // Highest priority (k8s)
+	EdgePriority2  EdgeSourcePriority = 2  // manual (user-declared dependencies)
+	EdgePriority3  EdgeSourcePriority = 3  // aws
+	EdgePriority4  EdgeSourcePriority = 4  // ebpf
+	EdgePriority5  EdgeSourcePriority = 5  // traces
+	EdgePriority6  EdgeSourcePriority = 6  // datadog-apm
+	EdgePriority7  EdgeSourcePriority = 7  // newrelic-apm
+	EdgePriority8  EdgeSourcePriority = 8  // elastic-apm
+	EdgePriority9  EdgeSourcePriority = 9  // aws-vpc-flow (VPC Flow Logs — coarsest network observation: no L7, no latency, IP-derived)
+	EdgePriority10 EdgeSourcePriority = 10 // Lowest priority (unknown sources)
 )
 
 // Aliases for readability
 const (
 	EdgePriorityHighest = EdgePriority1
-	EdgePriorityLowest  = EdgePriority9
+	EdgePriorityLowest  = EdgePriority10
 )
 
 // edgeTypePriorities defines source priority for each edge type.
@@ -299,7 +314,8 @@ var edgeTypePriorities = map[RelationshipType]map[string]EdgeSourcePriority{
 		"gcp-cloud-traces": EdgePriority5, // GCP Cloud Trace (disjoint from K8s "traces" accounts)
 		"datadog-apm":      EdgePriority6, // External APM source (instrumentation-derived)
 		"newrelic-apm":     EdgePriority7, // External APM source (NRQL Span aggregation)
-		"aws-vpc-flow":     EdgePriority8, // VPC Flow Logs: sees cloud-managed edges others miss, but coarsest (no L7/latency) — loses to any richer source that corroborates
+		"elastic-apm":      EdgePriority8, // External APM source (Elastic APM service_destination metrics + parent.id join)
+		"aws-vpc-flow":     EdgePriority9, // VPC Flow Logs: sees cloud-managed edges others miss, but coarsest (no L7/latency) — loses to any richer source that corroborates
 	},
 	RelationshipResolvesTo: {
 		"k8s":              EdgePriority1, // K8s DNS resolution
@@ -1265,6 +1281,7 @@ func GetK8sAccountsForTenant(tenantID string, cloudAccountIDs []string) ([]K8sAc
 		FROM cloud_accounts ca
 		INNER JOIN agent a ON ca.id = a.cloud_account_id
 		WHERE ca.cloud_provider = 'K8s'
+		  AND ca.status = 'active'
 		  AND a.status = 'CONNECTED'
 		  AND ca.tenant = ?`
 

@@ -74,6 +74,31 @@ func TestRecommendationsV2_LeanPathKeepsDisplayColumns(t *testing.T) {
 	assert.Contains(t, sql, "resource_cloud_service")
 }
 
+// See the DefGenerator comment: status pushdown is only safe when the window
+// doesn't run.
+func TestRecommendationsV2_StatusNotPushedWhenWindowRuns(t *testing.T) {
+	request := QueryRequest{
+		Table:   "recommendations_v2",
+		Columns: cols("id", "resource_name", "is_primary_recommendation"),
+		Where:   QueryWhereClause{Binary: BinaryWhereClause{"status": {Eq: "Archive"}}},
+	}
+	sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendations_v2"])
+	require.NoError(t, err)
+	require.Contains(t, sql, "ROW_NUMBER")
+	assert.NotContains(t, sql, "r.status = 'Archive'")
+	assert.Contains(t, sql, "Archive", "the filter must still be applied somewhere (the outer WHERE), not silently dropped")
+
+	leanRequest := QueryRequest{
+		Table:   "recommendations_v2",
+		Columns: cols("id", "resource_name"),
+		Where:   QueryWhereClause{Binary: BinaryWhereClause{"status": {Eq: "Archive"}}},
+	}
+	leanSQL, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", leanRequest, table_metadata["recommendations_v2"])
+	require.NoError(t, err)
+	require.NotContains(t, leanSQL, "ROW_NUMBER")
+	assert.Contains(t, leanSQL, "r.status = 'Archive'", "safe to push on the lean (no window) path")
+}
+
 // Vulnerabilities join gating (needsVulnJoin) is independent of needsWindow —
 // a request needing both the vuln join and the window must still get both,
 // with valid SQL (no missing comma between the two conditionally-spliced

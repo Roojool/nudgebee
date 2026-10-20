@@ -8,6 +8,7 @@ import (
 
 	"nudgebee/runbook/config"
 	"nudgebee/runbook/internal/model"
+	"nudgebee/runbook/services/notification"
 
 	"github.com/google/uuid"
 )
@@ -115,10 +116,33 @@ func (s *optimizerService) sendCompletionSummary(ctx context.Context, ao *model.
 	if _, hasChange := buildCompletionSummary(ao, tasks, ""); !hasChange {
 		return
 	}
-	s.sendToConfiguredChannels(ao, func(platform string) string {
+	s.sendToConfiguredChannels(ao, completionEventType(tasks), func(platform string) string {
 		body, _ := buildCompletionSummary(ao, tasks, platform)
 		return body
 	})
+}
+
+// completionEventType classifies the whole run summary: one failed task makes
+// the message actionable, so it is reported as a failure rather than a
+// routine completion.
+func completionEventType(tasks []model.AutoOptimizeTask) string {
+	for _, t := range tasks {
+		if classifyTask(t) == outcomeFailed {
+			return notification.EventTaskFailed
+		}
+	}
+	return notification.EventTaskCompleted
+}
+
+// prsReadyEventType reports the PR follow-up as a failure when any pull
+// request creation failed.
+func prsReadyEventType(tasks []model.AutoOptimizeTask, resolutions map[uuid.UUID][]model.RecommendationResolution) string {
+	for _, rid := range prTaskRecommendationIDs(tasks) {
+		if _, failed := resolutionFailure(resolutions[rid]); failed {
+			return notification.EventPRFailed
+		}
+	}
+	return notification.EventPRCreated
 }
 
 // buildCompletionSummary returns the run summary (with platform-appropriate

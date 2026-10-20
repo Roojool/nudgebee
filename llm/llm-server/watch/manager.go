@@ -403,7 +403,11 @@ func (m *Manager) UpdatePollResult(ctx context.Context, tenantID uuid.UUID, id u
 	now := m.clock()
 	failureClause := ""
 	if resetFailures {
-		failureClause = ", failure_count = 0"
+		// Clear the failure message alongside the counter. They are one fact:
+		// leaving `error` populated after a recovered poll leaves an ACTIVE
+		// watch advertising a failure it no longer has, which the watches API
+		// and WatchesTab surface verbatim.
+		failureClause = ", failure_count = 0, error = NULL"
 	}
 	q := fmt.Sprintf(`
 UPDATE llm_watch_tasks
@@ -455,12 +459,12 @@ WHERE id = $4 AND tenant_id = $5 AND status IN ('PENDING','ACTIVE')`
 // and the caller must skip the post-terminal side effects (summarizer,
 // responder append, notifier) — otherwise the user sees a "✅ COMPLETED"
 // message for a watch they just cancelled.
-func (m *Manager) MarkTerminal(ctx context.Context, tenantID uuid.UUID, id uuid.UUID, status Status, final string, errMsg string) (int64, error) {
+func (m *Manager) MarkTerminal(ctx context.Context, tenantID uuid.UUID, id uuid.UUID, t TerminalUpdate) (int64, error) {
 	if tenantID == uuid.Nil {
 		return 0, fmt.Errorf("watch: tenant_id is required")
 	}
-	if !status.IsTerminal() {
-		return 0, fmt.Errorf("watch: status %q is not terminal", status)
+	if !t.Status.IsTerminal() {
+		return 0, fmt.Errorf("watch: status %q is not terminal", t.Status)
 	}
 	db, err := m.dbHandle()
 	if err != nil {
@@ -468,23 +472,55 @@ func (m *Manager) MarkTerminal(ctx context.Context, tenantID uuid.UUID, id uuid.
 	}
 	now := m.clock()
 	var finalPtr, errPtr *string
-	if strings.TrimSpace(final) != "" {
-		s := truncate(final, 4000)
+	if strings.TrimSpace(t.Final) != "" {
+		s := truncate(t.Final, 4000)
 		finalPtr = &s
 	}
-	if strings.TrimSpace(errMsg) != "" {
-		s := truncate(errMsg, 2000)
+	if strings.TrimSpace(t.ErrMsg) != "" {
+		s := truncate(t.ErrMsg, 2000)
 		errPtr = &s
 	}
-	const q = `
+	// A terminating poll is still a poll. UpdatePollResult / IncFailures own
+	// the counter on every non-terminal outcome, so without this the poll
+	// that actually ended the watch was never counted: a watch that met its
+	// predicate on the first poll reported poll_count = 0 in the API and the
+	// WatchesTab. Only set on ticks that genuinely observed (or attempted to
+	// observe) — cancel touches no counters.
+	// Polled and Observation are deliberately independent clauses rather than
+	// nested ones. Nesting the observation write inside `if t.Polled` would
+	// make "a non-nil Observation is always persisted" an invariant held by
+	// convention — a future caller passing Polled:false with an observation
+	// would have it silently dropped. Each field now means exactly what it says.
+	pollClause := ""
+	args := []any{string(t.Status), finalPtr, errPtr, now, id, tenantID}
+	if t.Polled {
+		pollClause = ",\n    poll_count = poll_count + 1"
+	}
+	// Preserve the evidence the terminal decision was made on. Previously
+	// last_poll_result kept whatever the *previous* non-terminal poll saw
+	// (usually NULL for a first-poll completion), so a COMPLETED watch carried
+	// no record of the observation that completed it.
+	//
+	// nil means no observation was obtained; "" means the command produced no
+	// output, which is itself the evidence (see the "^$" predicate) and must
+	// overwrite any stale earlier value.
+	if t.Observation != nil {
+		stored := *t.Observation
+		if len(stored) > MaxObservationStorageBytes {
+			stored = truncate(stored, MaxObservationStorageBytes) + "[truncated]"
+		}
+		pollClause += ",\n    last_poll_result = $7"
+		args = append(args, stored)
+	}
+	q := fmt.Sprintf(`
 UPDATE llm_watch_tasks
 SET status = $1,
     final_result = $2,
     error = $3,
     last_poll_at = $4,
-    updated_at = $4
-WHERE id = $5 AND tenant_id = $6 AND status IN ('PENDING','ACTIVE')`
-	res, err := db.ExecContext(ctx, q, string(status), finalPtr, errPtr, now, id, tenantID)
+    updated_at = $4%s
+WHERE id = $5 AND tenant_id = $6 AND status IN ('PENDING','ACTIVE')`, pollClause)
+	res, err := db.ExecContext(ctx, q, args...)
 	if err != nil {
 		return 0, fmt.Errorf("watch: mark terminal failed: %w", err)
 	}

@@ -128,7 +128,7 @@ const PriorityCard = ({ item, onOpen, onAskNubi, assistantName, showDivider = tr
           )}
         </Box>
         {isMoney && (
-          <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'flex-end', gap: '2px' }}>
+          <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'flex-end', gap: ds.space[0] }}>
             <Typography
               sx={{
                 fontSize: ds.text.body,

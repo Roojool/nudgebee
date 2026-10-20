@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"regexp"
 
 	"nudgebee/llm/common"
 	"nudgebee/llm/tools/core"
@@ -69,10 +70,23 @@ func PrimaryRecommendationRank(alias, accountAlias string) string {
 		)`, alias, accountAlias)
 }
 
+// safeSavingsScopeColumns: the only columns scopeFilter may compare on --
+// others can crown the wrong row primary (see recommendation_groupings_v2's
+// DefGenerator in api-server/services/query/metadata.go). Matched regardless
+// of alias prefix (or lack of one): an unqualified "rule_name = $1" resolves
+// against r2 just as unsafely as "r2.rule_name = $1" would, since r2 is the
+// only aliased table in scope where scopeFilter lands.
+var safeSavingsScopeColumns = map[string]bool{
+	"tenant_id":        true,
+	"cloud_account_id": true,
+}
+var savingsScopeColumnPattern = regexp.MustCompile(`(?i)\bAND\s+(?:\w+\.)?(\w+)\s*(?:=|IN\b)`)
+
 // PrimarySavingsSubquery builds a subquery over `recommendation` that keeps one
 // row per opportunity (the highest-saving alternative), projecting groupCol and
 // estimated_savings. scopeFilter is AND-ed into the inner WHERE and must be
-// written against alias `r2` (e.g. " AND r2.tenant_id = $1").
+// written against alias `r2` (e.g. " AND r2.tenant_id = $1"), restricted to
+// safeSavingsScopeColumns above.
 //
 // Every savings roll-up in this service goes through here so the AI cannot
 // report one total from spend_summary and a different one from the
@@ -82,6 +96,11 @@ func PrimaryRecommendationRank(alias, accountAlias string) string {
 // cannot be pushed in, and the rank would be computed across the whole tenant —
 // 247k open recommendations on the largest dev tenant.
 func PrimarySavingsSubquery(groupCol, scopeFilter string) string {
+	for _, m := range savingsScopeColumnPattern.FindAllStringSubmatch(scopeFilter, -1) {
+		if !safeSavingsScopeColumns[m[1]] {
+			panic(fmt.Sprintf("PrimarySavingsSubquery: scopeFilter references %s, not provably constant within a PrimaryRecommendationRank partition -- see safeSavingsScopeColumns", m[1]))
+		}
+	}
 	return fmt.Sprintf(`(
 			SELECT %[1]s, SUM(estimated_savings) AS estimated_savings
 			FROM (
@@ -204,7 +223,7 @@ func (m RecommendationExecuteTool) ToolPrompt() []string {
 		"- dedupe_group (STRING): Marks rows that are alternative ways to act on the SAME opportunity, e.g. 'aws_commitment:<account>:AmazonEC2' for the 1yr/3yr × All/No-Upfront purchase variants of one Savings Plan. NULL for standalone recommendations",
 		"",
 		"**Safety / Impact Fields (blast radius from the dependency graph):**",
-		"- safety_band (STRING): What applying calls for — 'safe', 'review', 'risky', 'unknown'; NULL when impact has not been computed yet. Show people the product's words — safe → Safe, review → Quick check, risky → Plan it, NULL/unknown → Not assessed, and Irreversible when change_class is 'destructive' — but pass the stored value unchanged to any tool that takes safety_band",
+		"- safety_band (STRING): What applying calls for — 'safe', 'review', 'risky', 'unknown'; NULL when impact has not been computed yet. Show people the product's words — safe → Safe, review → Quick check, risky → Plan it, NULL/unknown → Not assessed, and Irreversible when change_class is 'destructive' (Stops workload when that row's rule_name is abandoned_resource or abandoned-resources, a scale-down to zero) — but pass the stored value unchanged to any tool that takes safety_band",
 		"- change_class (STRING): What the change does to the resource — 'additive', 'reductive', 'destructive'; NULL when unclassified",
 		"- safety_reason (STRING): One-line reason behind the band (e.g. '2 production dependent(s) would be affected')",
 		"- dependent_count (INT), production_dependents (INT): Number of dependent services, and how many are production",
@@ -244,7 +263,7 @@ func (m RecommendationExecuteTool) ToolPrompt() []string {
 		"- Combine category and rule_name for precise filtering",
 		"- Rounding a savings total works directly: ROUND(SUM(estimated_saving), 2). estimated_saving is already numeric in the view.",
 		"",
-		"**Presenting a recommendation listing (any category):** a Markdown table is the primary format. Columns: Namespace | Resource | Category | Severity | Est. Saving ($/mo) | Safety | Rule | Status | Age. Safety renders safety_band in the product's words — safe → Safe, review → Quick check, risky → Plan it, NULL → '—'; a row whose change_class is 'destructive' reads Irreversible. ALWAYS include each row's recommendation id — append an Id column (or an id list after the table when the table is wide); callers need the id to act on a row, so never drop it. Fit the first column to the rows: Namespace applies only to Kubernetes rows (service = 'kubernetes'); for cloud-resource rows (namespace NULL) replace it with Service and render the short name (AmazonRDS -> RDS, AmazonEC2 -> EC2); a mixed result shows both with '—' where a value does not apply. Sort cost rows by estimated_saving descending (nulls last) and non-cost rows (Security, Configuration, InfraUpgrade) by severity, Critical > High > Medium > Low > Info. For a null/zero estimated_saving show '—', never '$0.00'; a negative estimated_saving means resolving it ADDS cost — render it as added cost (e.g. '+$12/mo cost'), never as savings. After the table, add one line: the row count and, when any row carries savings, the total quantified savings (positive estimated_saving only). Append [recommendation_execute] to a column header or cell of the table (in-table placement survives callers that relay only the table). Relay the table as-is to the user; do not re-encode it as JSON.",
+		"**Presenting a recommendation listing (any category):** a Markdown table is the primary format. Columns: Namespace | Resource | Category | Severity | Est. Saving ($/mo) | Safety | Rule | Status | Age. Safety renders safety_band in the product's words — safe → Safe, review → Quick check, risky → Plan it, NULL → '—'; a row whose change_class is 'destructive' reads Irreversible, except rule_name abandoned_resource or abandoned-resources (a scale-down to zero), which reads Stops workload. ALWAYS include each row's recommendation id — append an Id column (or an id list after the table when the table is wide); callers need the id to act on a row, so never drop it. Fit the first column to the rows: Namespace applies only to Kubernetes rows (service = 'kubernetes'); for cloud-resource rows (namespace NULL) replace it with Service and render the short name (AmazonRDS -> RDS, AmazonEC2 -> EC2); a mixed result shows both with '—' where a value does not apply. Sort cost rows by estimated_saving descending (nulls last) and non-cost rows (Security, Configuration, InfraUpgrade) by severity, Critical > High > Medium > Low > Info. For a null/zero estimated_saving show '—', never '$0.00'; a negative estimated_saving means resolving it ADDS cost — render it as added cost (e.g. '+$12/mo cost'), never as savings. After the table, add one line: the row count and, when any row carries savings, the total quantified savings (positive estimated_saving only). Append [recommendation_execute] to a column header or cell of the table (in-table placement survives callers that relay only the table). Relay the table as-is to the user; do not re-encode it as JSON.",
 		"",
 		"**Canonical savings queries (adapt, do not invent new shapes):**",
 		"- Total by category: SELECT category, COUNT(*) as recommendation_count, ROUND(SUM(estimated_saving), 2) as total_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY category ORDER BY total_savings DESC",

@@ -45,6 +45,13 @@ export const PREFERENCE_CLOUD_TOUR_SEEN = 'cloud_tour_seen';
 // than this are "unread". Replaces the standalone `nb.productUpdates.lastSeenAt`
 // key so it lives in the consolidated `nudgebee.userPreferences` entry.
 export const PREFERENCE_PRODUCT_UPDATES_LAST_SEEN = 'product_updates_last_seen';
+// Map of tenantId -> ISO timestamp until which the setup progress banner
+// (home) stays hidden for that tenant, then returns — a snooze, not a
+// dismissal. Scoped per tenant like PREFERENCE_RECENT_PAGE_SEARCHES above: an
+// admin who dismisses this while viewing one tenant must not silently
+// suppress it on another tenant sharing the same browser. It gates nothing
+// (the underlying gate is accounts, not this flag) — see SetupProgressBanner.tsx.
+export const PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL = 'setup_banner_hidden_until';
 
 const availablePreferences = [
   PREFERENCE_LAST_ACCOUNT_ID,
@@ -61,6 +68,7 @@ const availablePreferences = [
   PREFERENCE_TICKETS_TOUR_SEEN,
   PREFERENCE_CLOUD_TOUR_SEEN,
   PREFERENCE_PRODUCT_UPDATES_LAST_SEEN,
+  PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL,
 ];
 
 export const GET_CLOUD_ACCOUNTS = `
@@ -224,27 +232,44 @@ query ListUserTokens {
       id
       name
       provider
+      kind
       status
       created_at
       accessed_at
+      expires_at
+      scopes
+      limits { metric period value model }
+      usage { requests tokens cost_usd }
     }
   }
 }
 `;
 
 const CREATE_USER_TOKEN = `
-mutation CreateUserToken($name: String!) {
-  users_create_token(user: {name: $name}) {
+mutation CreateUserToken($name: String!, $kind: String, $expires_at: String, $limits: [TokenLimitInput!], $scopes: [String!]) {
+  users_create_token(user: {name: $name, kind: $kind, expires_at: $expires_at, limits: $limits, scopes: $scopes}) {
     token
     name
+    kind
+    expires_at
+    scopes
   }
 }
 `;
 
 const DELETE_USER_TOKEN = `
-mutation DeleteUserToken($name: String!) {
-  users_delete_token(user: {name: $name}) {
+mutation DeleteUserToken($id: String, $name: String) {
+  users_delete_token(user: {id: $id, name: $name}) {
     name
+  }
+}
+`;
+
+const UPDATE_USER_TOKEN = `
+mutation UpdateUserToken($id: String!, $expires_at: String, $limits: [TokenLimitInput!]) {
+  users_update_token(user: {id: $id, expires_at: $expires_at, limits: $limits}) {
+    id
+    status
   }
 }
 `;
@@ -637,6 +662,27 @@ const apiUser = {
     return updated;
   },
 
+  // ISO timestamp a tenant's setup-progress-banner snooze runs until, or
+  // undefined if never snoozed (or no tenant id yet). Scoped per tenant —
+  // see PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL above.
+  getSetupBannerHiddenUntil: function (tenantId) {
+    if (!tenantId) {
+      return undefined;
+    }
+    const prefs = apiUser.getUserPreferences() || {};
+    const map = prefs[PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL] || {};
+    return map[tenantId];
+  },
+
+  setSetupBannerHiddenUntil: function (until, tenantId) {
+    if (!until || !tenantId) {
+      return;
+    }
+    const prefs = apiUser.getUserPreferences() || {};
+    const existing = prefs[PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL] || {};
+    apiUser.storeUserPreferences(PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL, { ...existing, [tenantId]: until });
+  },
+
   // Whether the K8s-agent banner for a given cluster has been dismissed by the
   // user. Stored as a single consolidated map instead of one localStorage key
   // per cluster.
@@ -741,32 +787,48 @@ const apiUser = {
       };
     }
   },
-  createUserToken: async function (name) {
+  createUserToken: async function ({ name, kind, expiresAt = null, limits = [], scopes = null }) {
     try {
-      const response = await queryGraphQL(CREATE_USER_TOKEN, 'CreateUserToken', { name: name });
+      const response = await queryGraphQL(CREATE_USER_TOKEN, 'CreateUserToken', {
+        name,
+        kind,
+        expires_at: expiresAt,
+        limits,
+        scopes,
+      });
       return {
         data: response?.data?.data?.users_create_token,
         errors: response?.data?.errors,
       };
     } catch (err) {
-      return {
-        data: null,
-        errors: [err],
-      };
+      return { data: null, errors: [err] };
     }
   },
-  deleteUserToken: async function (name) {
+  deleteUserToken: async function ({ id = null, name = null }) {
     try {
-      const response = await queryGraphQL(DELETE_USER_TOKEN, 'DeleteUserToken', { name: name });
+      const response = await queryGraphQL(DELETE_USER_TOKEN, 'DeleteUserToken', { id, name });
       return {
         data: response?.data?.data?.users_delete_token,
         errors: response?.data?.errors,
       };
     } catch (err) {
+      return { data: null, errors: [err] };
+    }
+  },
+  // Leave expiresAt/limits undefined to keep them; '' clears the expiry, [] clears the limits.
+  updateUserToken: async function ({ id, expiresAt, limits }) {
+    try {
+      const response = await queryGraphQL(UPDATE_USER_TOKEN, 'UpdateUserToken', {
+        id,
+        expires_at: expiresAt,
+        limits,
+      });
       return {
-        data: null,
-        errors: [err],
+        data: response?.data?.data?.users_update_token,
+        errors: response?.data?.errors,
       };
+    } catch (err) {
+      return { data: null, errors: [err] };
     }
   },
 };

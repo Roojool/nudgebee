@@ -13,7 +13,7 @@ import { useRouter } from 'next/router';
 import SafeIcon from '@shared/icons/SafeIcon';
 import Label from '@ui/Label';
 import { Link } from '@ui/Link';
-import CustomBorderCard from '@ui/CustomBorderCard';
+import { Card } from '@ui/Card';
 import { ds } from '@utils/colors';
 import { safeJSONParse } from '@utils/common';
 
@@ -275,8 +275,11 @@ function CollapsableCard({
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)', minWidth: 0 }}>
               <SearchOutlined style={{ width: ds.space[4], height: ds.space[4], color: 'var(--ds-gray-400)' }} />
               <Box component='div' sx={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+                {/* This line is shown when a card produced no highlight, which says nothing about
+                    whether the card is empty — several cards hold the root cause and highlight
+                    nothing. So it asks the reader to look instead of claiming there is nothing there. */}
                 <Text
-                  value={'Nothing major to show. Check the card for more.'}
+                  value={'Open the card to see what it holds.'}
                   showAutoEllipsis
                   sx={{
                     gap: 'var(--ds-space-1)',
@@ -358,11 +361,12 @@ function CollapsableCard({
           }}
         >
           {isExpanded && eventResolution && (
-            <CustomBorderCard
-              borderLeftColor={eventResolution.status === 'Failed' ? 'var(--ds-red-500)' : 'var(--ds-blue-400)'}
-              borderLeftWidth={ds.space[0]}
-              padding={`${ds.space.mul(0, 5)} ${ds.space[4]}`}
-              sx={{ mb: 'var(--ds-space-3)', bgcolor: 'var(--ds-background-200)' }}
+            <Card
+              variant='accent'
+              tone={eventResolution.status === 'Failed' ? 'danger' : 'info'}
+              size='sm'
+              elevation='flat'
+              sx={{ mb: 'var(--ds-space-3)' }}
             >
               <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 'var(--ds-space-2)' }}>
                 <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--ds-space-2)' }}>
@@ -402,7 +406,7 @@ function CollapsableCard({
                   </Box>
                 )}
               </Box>
-            </CustomBorderCard>
+            </Card>
           )}
           {isExpanded && contentComponents.map((Component, index) => <Component key={index} />)}
         </Box>

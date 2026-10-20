@@ -38,13 +38,36 @@ func (m LoadSkillsTool) callWorkspaceKnowledge(ctx core.NbToolContext, input cor
 	if len(keyword) > 256 {
 		return knowledgeFailure(fmt.Errorf("keyword exceeds 256 bytes"))
 	}
+	_, hasKeyword := input.Arguments["keyword"]
+	rawStartLine, hasStartLine := input.Arguments["start_line"]
+	rawStartByte, hasStartByte := input.Arguments["start_byte"]
+	if hasStartByte && (hasKeyword || hasStartLine) {
+		return knowledgeFailure(fmt.Errorf("start_byte cannot be combined with keyword or start_line"))
+	}
 	start := 1
-	if raw, ok := input.Arguments["start_line"]; ok {
-		value, err := strconv.Atoi(fmt.Sprint(raw))
+	if hasStartLine {
+		value, err := strconv.Atoi(fmt.Sprint(rawStartLine))
 		if err != nil || value < 1 {
 			return knowledgeFailure(fmt.Errorf("start_line must be a positive integer"))
 		}
 		start = value
+	}
+	var startByte int64
+	if hasStartByte {
+		if value, ok := rawStartByte.(float64); ok {
+			// Tool JSON numbers arrive as float64. Formatting large values can
+			// produce exponent notation, which ParseInt would reject.
+			if value < 0 || value > float64(core.MaxKnowledgeDocumentBytes) || value != float64(int64(value)) {
+				return knowledgeFailure(fmt.Errorf("start_byte must be a non-negative integer within the document limit"))
+			}
+			startByte = int64(value)
+		} else {
+			value, err := strconv.ParseInt(fmt.Sprint(rawStartByte), 10, 64)
+			if err != nil || value < 0 || value > core.MaxKnowledgeDocumentBytes {
+				return knowledgeFailure(fmt.Errorf("start_byte must be a non-negative integer within the document limit"))
+			}
+			startByte = value
+		}
 	}
 	deadline, cancel := context.WithTimeout(ctx.Ctx.GetContext(), 90*time.Second)
 	defer cancel()
@@ -58,14 +81,25 @@ func (m LoadSkillsTool) callWorkspaceKnowledge(ctx core.NbToolContext, input cor
 		if err != nil {
 			return knowledgeFailure(err)
 		}
-		if kbType == "integration" {
-			docs := core.QueryRAGCollectionReranked(deadline, ctx.UserId, ctx.AccountId, ctx.Query, ragKBModule, selected.Collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+		if kbType == "integration" || kbType == core.KnowledgeKindIndexedOnly {
+			searchCtx, traceID := core.WithRetrievalTraceID(deadline)
+			// load_skills names a document but states no search intent, so the
+			// turn's task prompt was being embedded. Prefer the model's own
+			// keyword; else build from the subject. Falls back to ctx.Query.
+			searchQuery := core.BuildRetrievalQuery(keyword, ctx.QueryConfig, ctx.Query)
+			if searchQuery == "" {
+				searchQuery = ctx.Query
+			}
+			docs := core.QueryRAGCollectionReranked(searchCtx, ctx.UserId, ctx.AccountId, searchQuery, ragKBModule, selected.Collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+			docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, searchQuery, docs, traceID)
 			var scoped core.RAGSearchResults
 			for _, doc := range docs {
 				if collection, _ := doc.Metadata["collection"].(string); collection == selected.Collection {
 					scoped = append(scoped, doc)
 				}
 			}
+			// PDF chunks need their account-owned category before handles are cached.
+			scoped = core.ResolveManualKnowledge(ctx.Ctx, ctx.AccountId, scoped)
 			menu := cacheSearchKnowledgeCandidates(ctx, scoped)
 			if len(menu) == 0 {
 				return knowledgeFailure(fmt.Errorf("no indexed documents found in this knowledge base"))
@@ -107,15 +141,15 @@ func (m LoadSkillsTool) callWorkspaceKnowledge(ctx core.NbToolContext, input cor
 		reader = io.NopCloser(strings.NewReader(c.Content))
 	}
 	defer func() { _ = reader.Close() }()
-	text, err := readKnowledgeLinesForPurpose(reader, c.FileSHA256, keyword, start, c.Purpose)
+	text, err := readKnowledgeLinesFromByte(reader, c.FileSHA256, keyword, start, startByte, c.Purpose)
 	if err != nil {
 		return knowledgeFailure(err)
 	}
-	refs := []core.NBToolResponseReference{{Text: c.Title, Url: c.ReferenceID, Type: "knowledge_base", Description: core.KnowledgePurposeGuidance(c.Purpose)}}
+	refs := []core.NBToolResponseReference{{Text: c.Title, Url: c.ReferenceID, Type: "knowledge_base", Description: core.KnowledgePurposeGuidance(c.Purpose), Snippet: text}}
 	result := fmt.Sprintf("%s\nTitle: %s\nHandle: %s\nSize: %d bytes. Use load_skills with this handle and keyword or start_line for selective reads.\n%s", core.KnowledgePurposeGuidance(c.Purpose), c.Title, c.ID, c.Bytes, text)
 	if c.Path != "" {
 		refs = append(refs, core.NBToolResponseReference{Text: c.Title, Url: c.Path, Type: "file", Query: c.ID, Description: core.KnowledgePurposeGuidance(c.Purpose) + " Read through load_skills using " + c.ID})
-		result = "Saved knowledge document to workspace: " + c.Path + "\nUse shell_execute (grep/tail) on this exact path when available, or load_skills for bounded reads.\n" + result
+		result = "Saved knowledge document to workspace: " + c.Path + "\nUse shell_execute on this exact path and bound both rows and width (e.g. grep -n -o for known text or sed -n for a line range, piped through head -n 20 and cut -c1-200). Avoid cat on large files. Use load_skills for hash-checked continuation.\n" + result
 	}
 	return core.NBToolResponse{Status: core.NBToolResponseStatusSuccess, Type: core.NBToolResponseTypeText, Data: result, References: refs}, nil
 }
@@ -201,6 +235,10 @@ func readKnowledgeLines(source io.Reader, version, keyword string, start int) (s
 }
 
 func readKnowledgeLinesForPurpose(source io.Reader, version, keyword string, start int, purpose core.KnowledgeContentPurpose) (string, error) {
+	return readKnowledgeLinesFromByte(source, version, keyword, start, 0, purpose)
+}
+
+func readKnowledgeLinesFromByte(source io.Reader, version, keyword string, start int, startByte int64, purpose core.KnowledgeContentPurpose) (string, error) {
 	digest := sha256.New()
 	limited := &io.LimitedReader{R: source, N: core.MaxKnowledgeDocumentBytes + 1}
 	reader := bufio.NewReaderSize(io.TeeReader(limited, digest), 32*1024)
@@ -209,16 +247,28 @@ func readKnowledgeLinesForPurpose(source io.Reader, version, keyword string, sta
 	matcher := regexp.MustCompile("(?i)" + regexp.QuoteMeta(keyword))
 	truncated := false
 	tail := ""
+	var scanned, nextByte int64
+	continuation := false
 	for {
 		fragment, err := reader.ReadSlice('\n')
 		if len(fragment) > 0 {
+			fragmentStart := scanned
+			scanned += int64(len(fragment))
 			text := string(fragment)
 			search := tail + text
 			location := matcher.FindStringIndex(search)
 			matching := keyword == "" || location != nil
-			if line >= start && matching {
+			if line >= start && matching && scanned > startByte {
+				effectiveStart := fragmentStart
+				if startByte > fragmentStart {
+					effectiveStart = startByte
+					text = text[int(startByte-fragmentStart):]
+				}
 				if (matches >= 100 && (purpose != core.KnowledgePurposeProcedure || keyword != "")) || output.Len() >= knowledgeReadBytes-128 {
 					truncated = true
+					if keyword == "" && !continuation {
+						nextByte, continuation = effectiveStart, true
+					}
 				} else {
 					// Include a boundary-spanning match without retaining the whole line.
 					if keyword != "" {
@@ -231,6 +281,9 @@ func readKnowledgeLinesForPurpose(source io.Reader, version, keyword string, sta
 					if len(text) > available {
 						text = common.TruncateHead(text, available)
 						truncated = true
+						if keyword == "" && !continuation {
+							nextByte, continuation = effectiveStart+int64(len(text)), true
+						}
 					}
 					output.WriteString(prefix)
 					output.WriteString(strings.ToValidUTF8(strings.TrimSuffix(text, "\n"), ""))
@@ -263,7 +316,11 @@ func readKnowledgeLinesForPurpose(source io.Reader, version, keyword string, sta
 		return "No matching lines found in this indexed document.", nil
 	}
 	if truncated {
-		fmt.Fprintf(&output, "\n[Read output limited. Refine keyword or use start_line after the last shown line.]\n")
+		if continuation {
+			fmt.Fprintf(&output, "\n[Read output limited. Continue this document with start_byte=%d; unread content remains.]\n", nextByte)
+		} else {
+			fmt.Fprintf(&output, "\n[Read output limited. Refine keyword or use start_line after the last shown line.]\n")
+		}
 	}
 	return output.String(), nil
 }

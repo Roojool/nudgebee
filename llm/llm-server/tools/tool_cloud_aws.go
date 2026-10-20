@@ -25,8 +25,9 @@ func init() {
 // investigation methodology, decision trees, and rich examples.
 func (t AwsCliTool) ToolPrompt() []string {
 	return []string{
-		"**Routing boundary:** These rules apply after the active agent has selected `aws_execute`; they do not override an agent policy that routes AWS reads and local computation through the workspace shell.",
-		"**Evidence-based:** Run command → parse output → make statement. NEVER invent resource IDs, ARNs, or IPs — empty CLI results = 'not found'.",
+		"**Routing boundary:** These rules apply after the active agent has selected `aws_execute`; they do not override an agent policy that routes AWS commands and local computation through the workspace shell.",
+		"**Target preservation:** If the task names an AWS account, pass that exact name in `account` on every `aws_execute` call; for a command routed through `shell_execute`, pass it as `--profile <name>`. Never silently fall back to the conversation default.",
+		"**Evidence-based:** Run command → parse output → make statement. NEVER invent resource IDs, ARNs, or IPs — empty CLI results = 'not found'. Every result starts with its resolved account name; preserve that provenance in conclusions.",
 		"**IAM safety:** NEVER attempt to modify your own IAM permissions or roles to grant access. `aws iam add-user-policy`, `aws iam attach-role-policy`, and similar are OFF LIMITS. Report missing permissions as a finding.",
 		"**Filter syntax gotcha:** `--filters` is plural. Values follow `Name=<filter>,Values=<value>` — e.g. `--filters Name=vpc-id,Values=vpc-12345`. Common wrong forms: `--filter …` (singular), `vpc-id=vpc-12345` (missing Name=/Values=).",
 		"**Group-by syntax gotcha:** `--group-by` values are `Type=DIMENSION,Key=<KEY>` space-separated between groups — e.g. `--group-by Type=DIMENSION,Key=SERVICE Type=DIMENSION,Key=REGION`. NOT `Type=SERVICE Type=REGION` and NOT comma-separated between groups.",
@@ -49,7 +50,32 @@ func init() {
 	})
 }
 
-type AwsCliTool struct{}
+type AwsCliTool struct {
+	// workspaceManager is injectable for tests; nil uses the real manager.
+	workspaceManager workspace.WorkspaceManager
+}
+
+func (t AwsCliTool) workspace() workspace.WorkspaceManager {
+	if t.workspaceManager != nil {
+		return t.workspaceManager
+	}
+	return workspace.NewWorkspaceManager()
+}
+
+// ConfirmationKey scopes a write approval to the AWS account named in the
+// account argument
+// (see targetConfirmationKey).
+func (t AwsCliTool) ConfirmationKey(toolInput string) string {
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	return targetConfirmationKey(t.Name(), RequestedAwsAccount(req.Arguments))
+}
+
+// RequestedTarget returns the AWS account a call explicitly names, for the
+// executor's write-access check on that account.
+func (t AwsCliTool) RequestedTarget(toolInput string) (string, error) {
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	return RequestedAwsAccount(req.Arguments), nil
+}
 
 func (t AwsCliTool) Name() string {
 	return ToolExecuteAwsCliCommand
@@ -74,8 +100,9 @@ func (t AwsCliTool) Description() string {
 
 		**Usage:**
 
-		* **Routing:** Availability does not make this tool the default for every AWS command. Follow the active agent's system prompt when choosing between this direct tool and a workspace shell. If that prompt assigns AWS reads to the workspace shell, do not use this tool for those reads; keep this direct path for mutations and commands with uncertain effects so approval and resume behavior is preserved.
+		* **Routing:** Availability does not make this tool the default for every AWS command. Follow the active agent's system prompt when choosing between this direct tool and a workspace shell. Both paths use the normal command classification and approval flow.
 		* **Input:**  A valid 'aws' CLI command string.  Include necessary options and arguments. Be explicit about regions.
+		* **Account:** By default the command runs in the conversation's current AWS account. To run it in another connected AWS account, pass its name in 'account'. AWS commands inside shell_execute can select an account with '--profile <name>'. An unknown name returns the list of available accounts. If the conversation has no current AWS account yet, the first account you name becomes it. Only aws commands switch accounts; other tools stay on the current account. Every result starts with "[account: <name>]"; cite it.
 		* **Output:**  The raw output of the executed 'aws' CLI command.
 
 		**Examples:**
@@ -99,6 +126,10 @@ func (t AwsCliTool) InputSchema() core.ToolSchema {
 				Type:        core.ToolSchemaTypeString,
 				Description: "The 'aws' CLI command to execute.",
 			},
+			"account": {
+				Type:        core.ToolSchemaTypeString,
+				Description: "Optional. Name of the connected AWS account to run this command in (or its account id when only one connection has it). Omit to use the conversation's current AWS account.",
+			},
 		},
 		Required: []string{"command"},
 	}
@@ -106,50 +137,36 @@ func (t AwsCliTool) InputSchema() core.ToolSchema {
 
 func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
 
-	if nbRequestContext.ToolConfig.Name == "" {
+	command := strings.TrimSpace(input.Command)
+	requested := RequestedAwsAccount(input.Arguments)
+	if requested == "" && nbRequestContext.ToolConfig.Name == "" {
 		return core.NBToolResponse{}, fmt.Errorf("no tool configs found for - %s, please configure", t.Name())
 	}
-
-	command := strings.TrimSpace(input.Command)
-
-	accountId := ""
-	for _, v := range nbRequestContext.ToolConfig.Values {
-		if v.Name == "id" {
-			accountId = v.Value
-			break
-		}
+	target, err := ResolveRequestedTarget(nbRequestContext.Ctx, nbRequestContext.AccountId, t.Name(), nbRequestContext.ToolConfig, requested)
+	if err != nil {
+		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
 	}
+	provenance := awsTargetProvenance(target)
+
+	accountId := TargetAccountID(target)
 
 	if accountId == "" {
 		return core.NBToolResponse{}, fmt.Errorf("unable to identify accountId - %s, please configure", t.Name())
 	}
 
-	creds, err := GetCloudAccountCredentials(accountId)
-	if err != nil {
-		return core.NBToolResponse{}, err
+	env := map[string]string{
+		workspace.ENV_NB_TOOL_CONFIG_NAME:  target.Name,
+		workspace.ENV_NB_TARGET_ACCOUNT_ID: accountId,
 	}
-
-	auth, err := BuildAwsAuth(nbRequestContext.Ctx.GetContext(), creds)
+	response, err := t.workspace().ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 	if err != nil {
-		// Check for permanent STS errors that should not be retried
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "PERMANENT ERROR") {
-			return core.NBToolResponse{
-				Data:   errMsg,
-				Status: core.NBToolResponseStatusError,
-			}, nil
-		}
-		return core.NBToolResponse{}, err
-	}
-
-	auth.Env[workspace.ENV_NB_TOOL_CONFIG_NAME] = nbRequestContext.ToolConfig.Name
-
-	wm := workspace.NewWorkspaceManager()
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, auth.Env)
-	if err != nil {
-		nbRequestContext.Ctx.GetLogger().Error("aws: unable to execute shell script", "error", err.Error(), "command", command)
+		nbRequestContext.Ctx.GetLogger().Error("aws: unable to execute shell script", "error", err.Error(), "command", command, "account", target.Name)
 		if response == "" {
 			response = err.Error()
+		}
+		response = provenance + response
+		if isPermanentAwsCredentialFailure(response + " " + err.Error()) {
+			return core.NBToolResponse{Data: response, Status: core.NBToolResponseStatusError}, nil
 		}
 		// aws uses `aws <service> help` (no dashes), NOT `--help`, as the
 		// canonical help subcommand — hardcoding `--help` here would send
@@ -159,12 +176,34 @@ func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 			Status: core.NBToolResponseStatusError,
 		}, err
 	}
+	response = provenance + response
 
 	return core.NBToolResponse{
 		Data:   response,
 		Type:   core.NBToolResponseTypeText,
 		Status: core.NBToolResponseStatusSuccess,
 	}, nil
+}
+
+func isPermanentAwsCredentialFailure(message string) bool {
+	lower := strings.ToLower(message)
+	credentialOperation := strings.Contains(lower, "assumerole") || strings.Contains(lower, "assume role") || strings.Contains(lower, "credential")
+	permanentRejection := strings.Contains(lower, "accessdenied") || strings.Contains(lower, "access denied") || strings.Contains(lower, "not authorized") || strings.Contains(lower, "status code: 403")
+	return credentialOperation && permanentRejection
+}
+
+func awsTargetProvenance(target core.ToolConfig) string {
+	return cloudTargetProvenance(target)
+}
+
+func cloudTargetProvenance(target core.ToolConfig) string {
+	return fmt.Sprintf("[account: %s]\n", target.Name)
+}
+
+// matchAwsVerbPrefix ensures short prefixes (like "add", "set", "tag", "run", "put")
+// do not falsely match resource nouns like "addresses", "settings", "tags".
+func matchAwsVerbPrefix(verb, prefix string) bool {
+	return verb == prefix || strings.HasPrefix(verb, prefix+"-")
 }
 
 // classifyAwsVerb checks a single verb against AWS verb lists.
@@ -190,7 +229,7 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 		"wait", // waits are polling, not mutations
 	}
 	for _, p := range readPrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchAwsVerbPrefix(verb, p) {
 			return core.ToolRequestTypeRead
 		}
 	}
@@ -223,7 +262,7 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 		"request", "initiate",
 	}
 	for _, p := range createPrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchAwsVerbPrefix(verb, p) {
 			return core.ToolRequestTypeCreate
 		}
 	}
@@ -243,7 +282,7 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 		"stop", "start", // state changes, not resource creation/deletion
 	}
 	for _, p := range updatePrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchAwsVerbPrefix(verb, p) {
 			return core.ToolRequestTypeUpdate
 		}
 	}
@@ -254,7 +293,7 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 		"revoke", "cancel", "purge", "destroy",
 	}
 	for _, p := range deletePrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchAwsVerbPrefix(verb, p) {
 			return core.ToolRequestTypeDelete
 		}
 	}
@@ -430,6 +469,30 @@ func (m AwsCliTool) ConfigSchema(ctx *security.RequestContext) core.ToolConfigSc
 }
 
 func (m AwsCliTool) IdentifyConfig(ctx core.NbToolContext, input core.NBToolCallRequest, availableConfigs []core.ToolConfig) (core.ToolConfig, error) {
+	// An account the call names explicitly (account argument) wins,
+	// matched by name, or by account id when exactly one config has it.
+	parsed := core.ParseNBToolCallRequestFromInput(input.Command)
+	for k, v := range input.Arguments {
+		if parsed.Arguments == nil {
+			parsed.Arguments = map[string]any{}
+		}
+		parsed.Arguments[k] = v
+	}
+	if requested := RequestedAwsAccount(parsed.Arguments); requested != "" {
+		var byNumber []core.ToolConfig
+		for _, config := range availableConfigs {
+			if strings.EqualFold(config.Name, requested) {
+				return config, nil
+			}
+			if strings.EqualFold(targetAccountNumber(config), requested) {
+				byNumber = append(byNumber, config)
+			}
+		}
+		if len(byNumber) == 1 {
+			return byNumber[0], nil
+		}
+	}
+
 	for _, config := range availableConfigs {
 		var accountNumber string
 		for _, v := range config.Values {

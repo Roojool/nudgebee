@@ -8,8 +8,8 @@ test.describe.configure({ mode: "default", timeout: 180000 });
 test("Add multiple users from list", { tag: ["@dev", "@test", "@oss", "@regression", "@functional", "@crud"] }, async ({ page }) => {
   const locators = await setup(page);
 
-  for (const user of users) {
-    await test.step(`Processing: ${user.email}`, async () => {
+  for (const [i, user] of users.entries()) {
+    await test.step(`Processing: users[${i}]`, async () => {
       await locators.addNewUserBtn.click();
       await locators.firstNameInput.fill(user.first);
       await locators.lastNameInput.fill(user.last);
@@ -24,15 +24,15 @@ test("Add multiple users from list", { tag: ["@dev", "@test", "@oss", "@regressi
         .catch(() => "timeout");
 
       if (result === "success") {
-        console.log(`SUCCESS: User "${user.email}" added successfully.`);
+        console.log(`SUCCESS: users[${i}] added successfully.`);
         await locators.addUserSubmitBtn.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
       } else if (result === "duplicate") {
-        console.log(`DUPLICATE: User "${user.email}" already exists.`);
-        await locators.cancelBtn.click();
+        console.log(`DUPLICATE: users[${i}] already exists.`);
+        await locators.cancel();
       } else {
-        console.log(`ERROR: Timeout for "${user.email}". No response notification found.`);
+        console.log(`ERROR: Timeout for users[${i}]. No response notification found.`);
         if (await locators.cancelBtn.isVisible()) {
-          await locators.cancelBtn.click();
+          await locators.cancel();
         }
       }
       await page.waitForTimeout(500);
@@ -226,7 +226,7 @@ test.describe("Users — validation & edge cases", () => {
       await expect(page.getByText("This field should be alpha-numeric")).toHaveCount(2);
 
       // Close without saving — non-mutating, nothing to clean up.
-      await locators.cancelBtn.click();
+      await locators.cancel();
     }
   );
 
@@ -247,7 +247,7 @@ test.describe("Users — validation & edge cases", () => {
 
       await expect(page.getByText("This field required")).toHaveCount(2);
 
-      await locators.cancelBtn.click();
+      await locators.cancel();
     }
   );
 
@@ -266,7 +266,7 @@ test.describe("Users — validation & edge cases", () => {
 
       await expect(page.getByText("Should start with an alphabet")).toHaveCount(2);
 
-      await locators.cancelBtn.click();
+      await locators.cancel();
     }
   );
 
@@ -288,7 +288,7 @@ test.describe("Users — validation & edge cases", () => {
       await locators.firstNameInput.click(); // blur email
       await expect(page.getByText("Please enter a email")).toBeVisible();
 
-      await locators.cancelBtn.click();
+      await locators.cancel();
     }
   );
 
@@ -314,7 +314,7 @@ test.describe("Users — validation & edge cases", () => {
         await expect(page.getByText("Please enter a valid email")).toBeVisible();
       }
 
-      await locators.cancelBtn.click();
+      await locators.cancel();
     }
   );
 
@@ -348,7 +348,7 @@ test.describe("Users — validation & edge cases", () => {
       await expect(locators.addUserSubmitBtn).toBeDisabled();
 
       // Cancel without saving — no mutation, no reset needed.
-      await locators.cancelBtn.click();
+      await locators.cancel();
     }
   );
 
@@ -373,7 +373,7 @@ test.describe("Users — validation & edge cases", () => {
       await expect(locators.successMsg).not.toBeVisible();
       await expect(locators.firstNameInput).toBeVisible();
 
-      await locators.cancelBtn.click();
+      await locators.cancel();
     }
   );
 

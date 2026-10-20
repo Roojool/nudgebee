@@ -1,4 +1,4 @@
-import { getImpactSummary, getChangeClass, deriveVerdict, businessCriticalCount } from './safetyBand';
+import { getImpactSummary, getChangeClass, deriveVerdict, businessCriticalCount, destructiveKindOf } from './safetyBand';
 
 export interface ApplyReadiness {
   tone: 'success' | 'info' | 'warning' | 'critical';
@@ -22,6 +22,9 @@ export const restartSafeguard = (inPlace: boolean): string =>
 // still points at the resource.
 const REMOVAL_SAFEGUARD = "Removal can't be undone — confirm nothing still depends on it, and snapshot first where the resource supports it.";
 
+// A scale-down keeps the manifest, so the safeguard is the way back, not a snapshot.
+const STOP_SAFEGUARD = 'The pods stop but the manifest stays — scale it back up if anything turns out to need it.';
+
 // applyReadiness is the safety verdict re-presented at the moment of applying:
 // the same band, reason and tone the details panel shows, plus the safeguard
 // that makes applying fine. Only an irreversible change is red; it also asks
@@ -29,7 +32,10 @@ const REMOVAL_SAFEGUARD = "Removal can't be undone — confirm nothing still dep
 // the backend grades it Review for. Null when the recommendation row simply
 // wasn't loaded with its safety columns (the summary projection omits them);
 // that is "not fetched", not "unknown", so nothing is claimed.
-export const applyReadiness = (rec: any, inPlace: boolean): ApplyReadiness | null => {
+// `safeguard` replaces the default line for a change that is not a pod resize
+// or a delete: a volume resize has no in-place path to turn on, and a scale-down
+// keeps its manifest, so neither the restart line nor the snapshot line fits.
+export const applyReadiness = (rec: any, inPlace: boolean, safeguard?: string): ApplyReadiness | null => {
   if (!rec || (rec.safety_band === undefined && rec.finops_score_breakdown === undefined)) return null;
   const band: string | undefined = rec.safety_band || undefined;
   const impact = getImpactSummary(rec);
@@ -42,7 +48,8 @@ export const applyReadiness = (rec: any, inPlace: boolean): ApplyReadiness | nul
     };
   }
   const changeClass = getChangeClass(rec);
-  const verdict = deriveVerdict(band, impact?.production_dependents, impact?.dependent_count, impact?.truncated, changeClass);
+  const kind = destructiveKindOf(rec);
+  const verdict = deriveVerdict(band, impact?.production_dependents, impact?.dependent_count, impact?.truncated, changeClass, kind);
   const reason = sentence(impact?.safety_reason);
   if (verdict.tone === 'success') {
     return {
@@ -59,7 +66,7 @@ export const applyReadiness = (rec: any, inPlace: boolean): ApplyReadiness | nul
   return {
     tone: verdict.tone === 'critical' ? 'critical' : 'warning',
     title: verdict.title,
-    message: `${facts} ${destructive ? REMOVAL_SAFEGUARD : restartSafeguard(inPlace)}`.trim(),
+    message: `${facts} ${safeguard || (destructive ? (kind === 'stop' ? STOP_SAFEGUARD : REMOVAL_SAFEGUARD) : restartSafeguard(inPlace))}`.trim(),
     needsAck: band === 'risky' || prod > 0 || destructive,
   };
 };

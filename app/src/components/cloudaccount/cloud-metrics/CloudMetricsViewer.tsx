@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Box, Typography } from '@mui/material';
 import { ListingLayout } from '@ui/ListingLayout';
 import MetricQueryInfo from '@shared/MetricQueryInfo';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Banner } from '@ui/Banner';
 import { EmptyState } from '@ui/EmptyState';
 import { Button as DsButton } from '@ui/Button';
@@ -127,17 +127,25 @@ function buildSaasCharts(results: any[]): MetricChartData[] {
   return charts;
 }
 
-function buildChartData(chartMap: Record<string, ChartMapEntry>): MetricChartData[] {
+function buildChartData(chartMap: Record<string, ChartMapEntry>, isGcp: boolean): MetricChartData[] {
   return Object.entries(chartMap).map(([metricName, data]) => {
     const sortedTimestamps = [...data.timestamps.keys()].sort((a, b) => a - b);
     const labels = sortedTimestamps.map((ts) => new Date(ts).toLocaleString());
 
+    // GCP reports utilization as a 0–1 fraction while AWS/Azure already report 0–100
+    // percent, so GCP Percent metrics are scaled ×100. Keyed off the provider, not the
+    // value magnitude. Mirrors useLiveResourceMetrics.ts.
+    const unit = inferMetricUnit(metricName);
+    const isFraction = isGcp && unit === 'Percent';
+
     const dataset = Object.entries(data.datasets).map(([resourceId, valueMap]) => ({
       label: resourceId,
-      data: sortedTimestamps.map((ts) => valueMap.get(ts) ?? 0),
+      data: sortedTimestamps.map((ts) => {
+        const v = valueMap.get(ts) ?? 0;
+        return isFraction ? Math.round(v * 10000) / 100 : v;
+      }),
     }));
 
-    const unit = inferMetricUnit(metricName);
     return { metricName, labels, dataset, unit, query: data.query };
   });
 }
@@ -158,7 +166,7 @@ function renderCharts(charts: MetricChartData[]): React.ReactNode {
         const chartTitle = showUnitInTitle ? `${displayName} (${getUnitLabel(chart.unit)})` : displayName;
         const scaleOptions = buildScaleOptions(chart.unit);
         return (
-          <WidgetCard key={chart.metricName}>
+          <Card key={chart.metricName} sx={{ mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], mb: ds.space[2] }}>
               <Typography
                 sx={{
@@ -174,7 +182,7 @@ function renderCharts(charts: MetricChartData[]): React.ReactNode {
               <MetricQueryInfo queries={chart.query ? { Query: chart.query } : null} />
             </Box>
             <Chart.Line dataset={chart.dataset} labels={chart.labels} data={[]} loading={false} scaleOptions={scaleOptions} />
-          </WidgetCard>
+          </Card>
         );
       })}
     </Box>
@@ -376,7 +384,7 @@ const CloudMetricsViewer: React.FC<CloudMetricsViewerProps> = ({ accountId, prov
       const response = await observability.metricsQuery(requestPayload);
       const results = response?.data?.data?.metrics_list?.results || [];
       const chartMap = parseMetricResults(results, setError);
-      const chartData = buildChartData(chartMap);
+      const chartData = buildChartData(chartMap, provider === 'GCP');
 
       setCharts(chartData);
     } catch (err: unknown) {
@@ -391,7 +399,7 @@ const CloudMetricsViewer: React.FC<CloudMetricsViewerProps> = ({ accountId, prov
     // failing one sets it back to a message — two real state changes, so listing
     // it here churns this callback's identity, which re-fires the effect below
     // that calls it, which fails again: an endless retry on any query error.
-  }, [accountId, dateRange, isNative, selectedProvider, saasQuery, saasEsIndex, saasEsQueryType]);
+  }, [accountId, dateRange, isNative, provider, selectedProvider, saasQuery, saasEsIndex, saasEsQueryType]);
 
   const handleDateRangeChange = (passedSelectedDateTime: { shortcutClickTime: number; startTime: number; endTime: number }): void => {
     if (passedSelectedDateTime.shortcutClickTime > 0) {
@@ -495,7 +503,7 @@ const CloudMetricsViewer: React.FC<CloudMetricsViewerProps> = ({ accountId, prov
               >
                 <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600] }}>Metrics Provider:</Typography>
                 <CloudProviderIcon cloud_provider={selectedOption?.iconKey || selectedProvider} width='18px' height='18px' />
-                <Typography sx={{ fontSize: ds.text.small, fontWeight: 600, color: ds.gray[700] }}>
+                <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
                   {selectedOption?.label || snakeToTitleCase(selectedProvider)}
                 </Typography>
                 <KeyboardArrowDownIcon sx={{ fontSize: 18, color: ds.gray[500] }} />

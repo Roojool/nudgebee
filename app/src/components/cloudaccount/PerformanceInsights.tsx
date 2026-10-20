@@ -7,7 +7,7 @@ import Banner from '@ui/Banner';
 import Chip from '@ui/Chip';
 import Tooltip from '@ui/Tooltip';
 import Skeleton from '@ui/Skeleton';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { DropdownMenu as DsDropdownMenu } from '@ui/DropdownMenu';
 import { Button as DsButton } from '@ui/Button';
 import DownloadButton from '@shared/buttons/DownloadButton';
@@ -110,9 +110,9 @@ const LoadMetricsChart = ({ data, loading }: { data: QueryDatabasePerformanceRes
         const chartData = [{ label: metric.name, data: metric.values }];
 
         return (
-          <WidgetCard key={metric.name}>
+          <Card key={metric.name} sx={{ mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
             <Chart.Line chartTitle={`${metric.name} (${metric.unit})`} dataset={chartData} labels={labels} data={[]} loading={loading} />
-          </WidgetCard>
+          </Card>
         );
       })}
     </Box>
@@ -130,7 +130,7 @@ const SqlQueryCell = ({ query }: { query: PerformanceQuery }) => {
           <Typography
             sx={{
               fontSize: ds.text.small,
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               color: ds.gray[500],
               fontStyle: 'italic',
             }}
@@ -149,7 +149,7 @@ const SqlQueryCell = ({ query }: { query: PerformanceQuery }) => {
         <Typography
           sx={{
             fontSize: ds.text.small,
-            fontFamily: 'monospace',
+            fontFamily: ds.font.mono,
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
             maxHeight: ds.space.mul(0, 30),
@@ -384,9 +384,9 @@ const ResourceMetricsChart = ({ data, loading }: { data: QueryDatabasePerformanc
         const chartData = [{ label: metric.name, data: metric.values }];
 
         return (
-          <WidgetCard key={metric.name}>
+          <Card key={metric.name} sx={{ mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
             <Chart.Line chartTitle={`${metric.name} (${metric.unit})`} dataset={chartData} labels={labels} data={[]} loading={loading} />
-          </WidgetCard>
+          </Card>
         );
       })}
     </Box>

@@ -344,3 +344,83 @@ func (s *AWSSource) propagateVPCNamesToResources(nodes []*core.DbNode, lookup *s
 			"new_unique_key", node.UniqueKey)
 	}
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	vPCRows := resourceKind{
+		Service:      "AmazonVPC",
+		NodeType:     core.NodeTypeVPC,
+		SpecificType: "EC2Vpc",
+	}
+	registerKind(resourceKind{
+		Service:      "AmazonVPC",
+		Types:        []string{"subnet"},
+		NodeType:     core.NodeTypeSubnet,
+		SpecificType: "EC2Subnet",
+	})
+	registerKind(vPCRows)
+	registerKind(vPCRows.withTypes("vpc"))
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// VPC↔VPC peering (fetched live per region via the ec2 CLI); VPCs otherwise
+	// have no outgoing edges of their own.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeVPC, Name: "peering",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createVPCPeeringEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). VPCs and subnets are inferred and
+// renamed by account-wide passes (ensureVPCNodes, ensureSubnetNodes,
+// propagateVPCNamesToResources), so any change to one rebuilds the account.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"EC2Vpc", string(core.NodeTypeVPC), "EC2Subnet", string(core.NodeTypeSubnet)},
+		AccountLevel:  true,
+	}, nil)
+}
+
+// defaultVPCEdgeSpec completes the spec of a resource type that has no edge
+// builder of its own and therefore falls to createDefaultVPCEdges in
+// convertResourcesToGraph: its only own edge is HOSTED_ON its VPC.
+func defaultVPCEdgeSpec(spec sources.PatchSpec) (sources.PatchSpec, edgeBuilder) {
+	spec.Context = append(spec.Context, core.NodeTypeVPC)
+	spec.Signature = signature(edgeKind(core.RelationshipHostedOn, "vpc"))
+	return spec, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createDefaultVPCEdges([]*core.DbNode{node}, lookup, req), nil
+	}
+}
+
+// unresolvedNetworkReferences returns the vpc and subnet ids the nodes refer to
+// that lookup cannot resolve: the ids ensureVPCNodes and ensureSubnetNodes would
+// create an inferred node for. A patch cannot create those nodes, so any result
+// means the resource needs the account build.
+func unresolvedNetworkReferences(nodes []*core.DbNode, lookup *sources.NodeLookup) []string {
+	missing := make([]string, 0)
+	for _, node := range nodes {
+		if vpcID, ok := node.Properties["vpc_id"].(string); ok && vpcID != "" {
+			if _, found := lookup.ByResourceID[vpcID]; !found {
+				missing = append(missing, vpcID)
+			}
+		}
+		// The same two places ensureSubnetNodes collects subnet references from.
+		subnetIDs := make([]string, 0, 2)
+		if subnetID, ok := node.Properties["subnet_id"].(string); ok && subnetID != "" {
+			subnetIDs = append(subnetIDs, subnetID)
+		}
+		if meta, ok := getMetadataMap(node); ok {
+			if subnetID, ok := meta["SubnetId"].(string); ok && subnetID != "" {
+				subnetIDs = append(subnetIDs, subnetID)
+			}
+		}
+		for _, subnetID := range subnetIDs {
+			if _, found := lookup.ByResourceID[subnetID]; !found {
+				missing = append(missing, subnetID)
+			}
+		}
+	}
+	return missing
+}

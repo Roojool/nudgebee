@@ -17,6 +17,14 @@ import (
 	"github.com/google/shlex"
 )
 
+// QuoteCommandArg encodes one argv value for the shlex round trip used by
+// SecureExecute. SecureExecute never invokes a shell, but it accepts a command
+// string and tokenizes it, so dynamically sourced values must remain one
+// literal argument.
+func QuoteCommandArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
 // ValidateCliCommand checks if the command's positional arguments (skipping flags)
 // match any blocked subcommand sequence. blockedPrefixes are space-separated token
 // sequences after the CLI tool name, e.g. ["configure", "sso", "config set"].
@@ -68,9 +76,98 @@ func ValidateCliCommand(command string, blockedPrefixes []string) error {
 
 // SecureCommandOptions defines the parameters for running a secure command.
 type SecureCommandOptions struct {
-	Command string
-	Env     []string
-	Timeout time.Duration
+	Command        string
+	Env            []string
+	Timeout        time.Duration
+	MaxOutputBytes int
+	// OutputTruncated, when non-nil, is set after both process streams are
+	// drained. The process is never allowed to block merely because capture hit
+	// its limit.
+	OutputTruncated *bool
+}
+
+// CommandExitError reports a process exit while preserving its concrete status
+// for callers such as workspace CLI shims. Its text intentionally matches the
+// legacy SecureExecute error.
+type CommandExitError struct{ ExitCode int }
+
+func (e *CommandExitError) Error() string {
+	return fmt.Sprintf("command exited with status %d", e.ExitCode)
+}
+
+// CommandTimeoutError distinguishes a process deadline from transport and
+// executor failures without requiring callers to inspect error strings.
+type CommandTimeoutError struct{ Timeout time.Duration }
+
+func (e *CommandTimeoutError) Error() string {
+	return fmt.Sprintf("command timed out after %v", e.Timeout)
+}
+
+type cappedBuffer struct {
+	buffer    bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	return &cappedBuffer{remaining: limit}
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	originalLen := len(p)
+	if b.remaining <= 0 {
+		if originalLen > 0 {
+			b.truncated = true
+		}
+		return originalLen, nil
+	}
+	toWrite := len(p)
+	if toWrite > b.remaining {
+		toWrite = b.remaining
+		b.truncated = true
+	}
+	_, _ = b.buffer.Write(p[:toWrite])
+	b.remaining -= toWrite
+	return originalLen, nil
+}
+
+func (b *cappedBuffer) String() string { return b.buffer.String() }
+
+const structuredOutputDrainTimeout = 5 * time.Second
+
+// waitForCommandOutput waits for both pipes to reach EOF. In structured mode,
+// bound that wait because a descendant which outlives the direct child can
+// retain an inherited pipe descriptor indefinitely. Closing the readers is
+// equivalent to exec.Cmd's WaitDelay behavior for this lower-level ForkExec
+// implementation and lets the copy goroutines terminate.
+func waitForCommandOutput(structured bool, stdoutReader, stderrReader *os.File, stdoutDone, stderrDone <-chan struct{}, drainTimeout time.Duration) bool {
+	if !structured {
+		<-stdoutDone
+		<-stderrDone
+		return false
+	}
+
+	timer := time.NewTimer(drainTimeout)
+	defer timer.Stop()
+	for stdoutDone != nil || stderrDone != nil {
+		select {
+		case <-stdoutDone:
+			stdoutDone = nil
+		case <-stderrDone:
+			stderrDone = nil
+		case <-timer.C:
+			_ = stdoutReader.Close()
+			_ = stderrReader.Close()
+			if stdoutDone != nil {
+				<-stdoutDone
+			}
+			if stderrDone != nil {
+				<-stderrDone
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // killProcessGroup kills the process group led by pid (set up via Setpgid in
@@ -88,6 +185,7 @@ func killProcessGroup(pid int, reason string) {
 }
 
 func SecureExecute(ctx context.Context, opts SecureCommandOptions) (string, string, error) {
+	structuredResult := opts.MaxOutputBytes > 0 || opts.OutputTruncated != nil
 	// 1. Parse the command string using shlex to safely handle arguments
 	args, err := shlex.Split(opts.Command)
 	if err != nil {
@@ -138,16 +236,21 @@ func SecureExecute(ctx context.Context, opts SecureCommandOptions) (string, stri
 	_ = stderrWriter.Close()
 
 	// Read output from pipes concurrently
-	var stdoutBuf, stderrBuf bytes.Buffer
+	maxOutputBytes := opts.MaxOutputBytes
+	if maxOutputBytes <= 0 {
+		maxOutputBytes = int(^uint(0) >> 1)
+	}
+	stdoutBuf := newCappedBuffer(maxOutputBytes)
+	stderrBuf := newCappedBuffer(maxOutputBytes)
 	stdoutChan := make(chan struct{})
 	stderrChan := make(chan struct{})
 
 	go func() {
-		_, _ = io.Copy(&stdoutBuf, stdoutReader)
+		_, _ = io.Copy(stdoutBuf, stdoutReader)
 		close(stdoutChan)
 	}()
 	go func() {
-		_, _ = io.Copy(&stderrBuf, stderrReader)
+		_, _ = io.Copy(stderrBuf, stderrReader)
 		close(stderrChan)
 	}()
 
@@ -167,6 +270,7 @@ func SecureExecute(ctx context.Context, opts SecureCommandOptions) (string, stri
 		close(done)
 	}()
 
+	var terminalErr error
 	select {
 	case <-done:
 		timer.Stop()
@@ -184,7 +288,11 @@ func SecureExecute(ctx context.Context, opts SecureCommandOptions) (string, stri
 			}
 		default:
 			killProcessGroup(pid, "timed-out")
-			return "", "", fmt.Errorf("command timed out after %v", timeout)
+			if !structuredResult {
+				return "", "", fmt.Errorf("command timed out after %v", timeout)
+			}
+			terminalErr = &CommandTimeoutError{Timeout: timeout}
+			<-done
 		}
 	case <-ctx.Done():
 		timer.Stop()
@@ -195,16 +303,29 @@ func SecureExecute(ctx context.Context, opts SecureCommandOptions) (string, stri
 			}
 		default:
 			killProcessGroup(pid, "cancelled")
-			return "", "", fmt.Errorf("command cancelled: %w", ctx.Err())
+			if !structuredResult {
+				return "", "", fmt.Errorf("command cancelled: %w", ctx.Err())
+			}
+			terminalErr = fmt.Errorf("command cancelled: %w", ctx.Err())
+			<-done
 		}
 	}
 
-	// Wait for pipe reading to complete
-	<-stdoutChan
-	<-stderrChan
+	// Wait for pipe reading to complete. The structured path bounds this wait
+	// in case a grandchild retains an inherited stdout/stderr descriptor.
+	drainTimedOut := waitForCommandOutput(structuredResult, stdoutReader, stderrReader, stdoutChan, stderrChan, structuredOutputDrainTimeout)
+	if opts.OutputTruncated != nil {
+		*opts.OutputTruncated = stdoutBuf.truncated || stderrBuf.truncated || drainTimedOut
+	}
 
+	if terminalErr != nil {
+		return stdoutBuf.String(), stderrBuf.String(), terminalErr
+	}
 	if ws.Exited() && ws.ExitStatus() != 0 {
-		return stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("command exited with status %d", ws.ExitStatus())
+		if !structuredResult {
+			return stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("command exited with status %d", ws.ExitStatus())
+		}
+		return stdoutBuf.String(), stderrBuf.String(), &CommandExitError{ExitCode: ws.ExitStatus()}
 	}
 	if ws.Signaled() {
 		return stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("command terminated by signal %d", ws.Signal())

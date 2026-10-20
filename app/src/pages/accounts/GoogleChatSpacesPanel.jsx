@@ -19,6 +19,7 @@ import { ds } from 'src/utils/colors';
 import { getIntegrationDescription } from '@lib/integrationDescriptions';
 import { EmptyState } from '@ui/EmptyState';
 import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
+import GChatWebhookTargets from '@components/notifications/GChatWebhookTargets';
 
 const GOOGLE_CHAT_SPACE_TYPE = 'google_chat_space';
 const SPACE_ID_PATTERN = /^spaces\/[A-Za-z0-9_-]+$/;
@@ -377,6 +378,7 @@ export default function GoogleChatSpacesPanel() {
         title='Unbind Google Chat space?'
         subtitle={toDelete ? `${toDelete.displayName} (${toDelete.spaceId})` : ''}
         confirmText='Unbind'
+        confirmTone='danger'
         cancelText='Cancel'
         loader={!!busyId}
         onConfirm={handleDelete}
@@ -386,6 +388,8 @@ export default function GoogleChatSpacesPanel() {
           Connect card.
         </Typography>
       </Modal>
+
+      <GChatWebhookTargets />
     </>
   );
 }

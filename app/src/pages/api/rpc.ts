@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'crypto';
 import { context, propagation, trace, SpanStatusCode } from '@opentelemetry/api';
-import { authenticateRequest, buildSessionVariables, forwardAction, NO_TENANT_ROLE_MESSAGE } from '@lib/rpcGateway';
+import { authenticateRequest, buildSessionVariables, forwardAction, NO_TENANT_ROLE_MESSAGE, tokenScopeDeniedMessage } from '@lib/rpcGateway';
 import { clientGone } from '@lib/graphqlGatewayHandler';
 
 // JSON-RPC 2.0 gateway. Thin protocol shell — auth, route lookup, envelope
@@ -178,6 +178,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
                 allowedRoles: result.error.allowedRoles,
               })
             );
+            return;
+          case 'token_scope_denied':
+            res.status(403).json(rpcError(rpcId, RPC_FORBIDDEN, tokenScopeDeniedMessage(method), { code: 'TOKEN_SCOPE_DENIED' }));
             return;
           case 'upstream_unreachable':
             console.error(

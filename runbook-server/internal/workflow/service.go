@@ -22,6 +22,7 @@ import (
 	"nudgebee/runbook/services/integrations"
 	"nudgebee/runbook/services/security"
 	"nudgebee/runbook/services/ticket"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1563,6 +1564,10 @@ func (s *Service) DryRunWorkflow(ctx *security.RequestContext, accountId string,
 		if queryErr == nil {
 			var trace []model.TaskExecutionDetails
 			if err := queryResp.Get(&trace); err == nil {
+				// The queried trace never passed through processWorkflowHistory,
+				// so it has had no redaction at all.
+				RedactSecretsFromTasks(trace, request.Definition)
+				ScrubTaskValues(trace, s.secretValues(ctx, accountId))
 				response.Tasks = trace
 			} else {
 				ctx.GetLogger().Warn("failed to deserialize dry run trace", "error", err)
@@ -1580,6 +1585,8 @@ func (s *Service) DryRunWorkflow(ctx *security.RequestContext, accountId string,
 			response.Output = output
 		}
 	}
+
+	response.Error = ScrubSecretValues(response.Error, s.secretValues(ctx, accountId))
 
 	return response, nil
 }
@@ -1643,6 +1650,10 @@ func (s *Service) CheckTriggerMatch(ctx *security.RequestContext, accountId stri
 		return model.CheckTriggerMatchResponse{}, fmt.Errorf("trigger type '%s' cannot be checked against a payload", request.TriggerType)
 	}
 
+	if resp, done := checkTriggerAccountGate(request, accountId); done {
+		return resp, nil
+	}
+
 	if filter == "" {
 		return model.CheckTriggerMatchResponse{Matched: true, Gate: model.CheckTriggerGateFilter, Reason: "no filter is set, so every event of this type matches"}, nil
 	}
@@ -1662,6 +1673,29 @@ func (s *Service) CheckTriggerMatch(ctx *security.RequestContext, accountId stri
 		resp.Reason = "the filter did not evaluate to true for this payload"
 	}
 	return resp, nil
+}
+
+// checkTriggerAccountGate mirrors the registry's account check: the payload's account
+// (account_id, else cloud_account_id, as the consumer resolves it) must be one the trigger listens to.
+func checkTriggerAccountGate(request model.CheckTriggerMatchRequest, workflowAccountID string) (model.CheckTriggerMatchResponse, bool) {
+	payloadAccount, _ := request.Payload["account_id"].(string)
+	if payloadAccount == "" {
+		payloadAccount, _ = request.Payload["cloud_account_id"].(string)
+	}
+	if payloadAccount == "" {
+		return model.CheckTriggerMatchResponse{
+			Gate:   model.CheckTriggerGateAccount,
+			Reason: "this payload has no account_id or cloud_account_id, so it cannot be routed to any automation",
+		}, true
+	}
+	trigger := model.Trigger{Type: request.TriggerType, Params: request.Params}
+	if !slices.Contains(trigger.ListenAccounts(workflowAccountID), payloadAccount) {
+		return model.CheckTriggerMatchResponse{
+			Gate:   model.CheckTriggerGateAccount,
+			Reason: fmt.Sprintf("this event is from account '%s', which this automation does not listen to", payloadAccount),
+		}, true
+	}
+	return model.CheckTriggerMatchResponse{}, false
 }
 
 // checkEventTriggerGates applies the event-type and lifecycle-phase gates, returning
@@ -3519,13 +3553,45 @@ func (s *Service) CancelWorkflowExecution(ctx *security.RequestContext, accountI
 		return common.ErrorUnauthorized("account not accessible")
 	}
 
-	temporalId, err := s.ResolveTemporalWorkflowID(ctx, accountId, workflowId, executionId)
+	// Stopping the run outlives the click. A browser that navigates away cancels
+	// the request context, and a lookup, terminate or status write issued on a
+	// canceled context fails on the spot — silently leaving the automation on
+	// "Running", which is the exact failure this function exists to end.
+	stopCtx, releaseStopCtx := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), cancelCompletionTimeout)
+	defer releaseStopCtx()
+
+	temporalId, err := s.ResolveTemporalWorkflowID(ctx.WithContext(stopCtx), accountId, workflowId, executionId)
 	if err != nil {
 		return err
 	}
-	if err := s.temporalClient.CancelWorkflow(ctx.GetContext(), temporalId, executionId); err != nil {
+
+	if err := s.temporalClient.CancelWorkflow(stopCtx, temporalId, executionId); err != nil {
 		return err
 	}
+
+	// Cancel is only a request: a run parked on a task that never observes it
+	// keeps running, and the automation keeps reporting "Running" no matter how
+	// often the user clicks Cancel (#37544). Give the run a moment to stop
+	// itself — that path records CANCELED and runs the On.Always hook — then
+	// terminate whatever is still standing, exactly as deleting a workflow does.
+	var terminateErr error
+	if !s.awaitExecutionClosed(stopCtx, temporalId, executionId) {
+		terminateErr = s.temporalClient.TerminateWorkflow(stopCtx, temporalId, executionId, "Canceled by user")
+	}
+
+	// The listing reads last_execution_status off the workflow row, and a
+	// canceled run cannot always write its own (see cleanupContext in the
+	// executor). Reconcile the row from Temporal before returning so the Cancel
+	// click is visible on the next render instead of never. Runs even when the
+	// terminate failed — the commonest reason is a run that closed itself in
+	// the window after the last poll, which is precisely the case whose status
+	// the row is still missing.
+	s.syncLastExecutionStatus(stopCtx, ctx.GetSecurityContext().GetTenantId(), accountId, workflowId)
+
+	if terminateErr != nil {
+		return terminateErr
+	}
+
 	emitWorkflowAudit(
 		ctx, accountId,
 		audit.EventTypeAutomationExecutionCancel, audit.EventActionUpdate, audit.EventStatusSuccess,
@@ -3534,6 +3600,88 @@ func (s *Service) CancelWorkflowExecution(ctx *security.RequestContext, accountI
 		nil,
 	)
 	return nil
+}
+
+// cancelSettleAttempts / cancelSettleInterval bound how long a cancel waits for
+// a graceful stop before it escalates to a terminate. Long enough for a run
+// that honours cancellation to close its own books, short enough to stay inside
+// one UI click. cancelCompletionTimeout caps the whole stop sequence once it is
+// detached from the request.
+const (
+	cancelSettleAttempts    = 6
+	cancelSettleInterval    = 500 * time.Millisecond
+	cancelCompletionTimeout = 30 * time.Second
+)
+
+// awaitExecutionClosed reports whether the run reached a terminal state within
+// the settle window. A Describe error is treated as "not closed": escalating to
+// a terminate on a run that is already closed is harmless (Temporal rejects it
+// and the caller surfaces the error), while skipping the escalation on a run
+// that is still going is the bug this exists to prevent.
+func (s *Service) awaitExecutionClosed(ctx context.Context, temporalId, executionId string) bool {
+	for attempt := 0; attempt < cancelSettleAttempts; attempt++ {
+		desc, err := s.temporalClient.DescribeWorkflowExecution(ctx, temporalId, executionId)
+		if err == nil && desc.GetWorkflowExecutionInfo().GetStatus() != enums.WORKFLOW_EXECUTION_STATUS_RUNNING {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(cancelSettleInterval):
+		}
+	}
+	return false
+}
+
+// syncLastExecutionStatus writes the workflow row's last_execution_* columns
+// from its latest Temporal execution. Same reconciliation reconcileRunningStatuses
+// does lazily on list, run on demand for one workflow — and reading the LATEST
+// run rather than assuming the canceled one keeps a concurrent second run from
+// being mislabelled.
+func (s *Service) syncLastExecutionStatus(ctx context.Context, tenantID, accountId, workflowId string) {
+	query := fmt.Sprintf("%s='%s' AND %s='%s' AND %s='%s'",
+		model.SearchAttrTenantID, tenantID,
+		model.SearchAttrAccountID, accountId,
+		model.SearchAttrWorkflowID, workflowId)
+
+	resp, err := s.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
+		Query:    query,
+		PageSize: 1,
+	})
+	if err != nil || resp == nil || len(resp.Executions) == 0 {
+		return
+	}
+
+	latestExec := resp.Executions[0]
+	latestStatus := mapTemporalStatusToModelStatus(latestExec.GetStatus())
+	if latestStatus == model.WorkflowExecutionStatusRunning || latestStatus == model.WorkflowExecutionStatusUnspecified {
+		return
+	}
+
+	closeTime := time.Now().UTC()
+	if latestExec.CloseTime != nil {
+		closeTime = latestExec.CloseTime.AsTime()
+	}
+	var runVersion *int
+	if latestExec.Memo != nil {
+		if val, ok := latestExec.Memo.Fields[model.MemoWorkflowVersionNumber]; ok {
+			var vn int64
+			if err := s.dataConverter.FromPayload(val, &vn); err == nil {
+				v := int(vn)
+				runVersion = &v
+			}
+		}
+	}
+	var statusMessage string
+	switch latestStatus {
+	case model.WorkflowExecutionStatusCanceled:
+		statusMessage = "Execution canceled"
+	case model.WorkflowExecutionStatusTerminated:
+		statusMessage = "Execution terminated"
+	}
+	if err := s.store.SetLastExecutionStatus(ctx, tenantID, accountId, workflowId, latestStatus, closeTime, statusMessage, runVersion); err != nil {
+		slog.Error("failed to sync last execution status after cancel", "workflowID", workflowId, "error", err)
+	}
 }
 
 func (s *Service) PauseWorkflow(ctx *security.RequestContext, accountId, id string) error {
@@ -3876,6 +4024,27 @@ func (s *Service) ListMCPTools(ctx *security.RequestContext, accountId string, p
 	return map[string]any{"tools": tools}, nil
 }
 
+// secretValues returns the account's credential values for scrubbing error
+// text; nil when configs cannot be read, which leaves the text as it was.
+func (s *Service) secretValues(ctx *security.RequestContext, accountID string) []string {
+	if s.configService == nil {
+		return nil
+	}
+	tenantID := ctx.GetSecurityContext().GetTenantId()
+	configs, err := s.configService.ListConfigsDecrypted(ctx.GetContext(), tenantID, &accountID, nil)
+	if err != nil {
+		ctx.GetLogger().Warn("failed to fetch secrets for error scrubbing", "error", err)
+		return nil
+	}
+	secrets := make(map[string]any)
+	for _, cfg := range configs {
+		if cfg.Type == model.ConfigTypeSecret {
+			secrets[cfg.Key] = cfg.Value
+		}
+	}
+	return SecretValues(secrets)
+}
+
 func (s *Service) ValidateWorkflow(ctx *security.RequestContext, accountId string, wf model.Workflow) error {
 	if !ctx.GetSecurityContext().HasAccountAccess(accountId, security.SecurityAccessTypeCreate) &&
 		!canInspectWorkflows(ctx.GetSecurityContext(), accountId) {
@@ -3896,10 +4065,18 @@ func (s *Service) ValidateWorkflow(ctx *security.RequestContext, accountId strin
 		return common.ErrorBadRequest(err.Error())
 	}
 
+	if err := ValidateNoSecretsInState(wf.Definition.Tasks); err != nil {
+		return common.ErrorBadRequest(err.Error())
+	}
+
 	// Surface non-fatal date-format lint warnings (e.g. mixing strftime %-codes with
 	// the Go reference layout) without blocking the save.
 	for _, w := range LintTemplates(wf.Definition.Tasks) {
 		ctx.GetLogger().Warn("workflow template lint", "workflow_id", wf.ID, "warning", w)
+	}
+
+	if err := validateTriggerAccounts(ctx, accountId, wf.Definition.Triggers); err != nil {
+		return err
 	}
 
 	return s.validateTaskTypes(ctx, accountId, wf)
@@ -4887,7 +5064,7 @@ func (s *Service) processWorkflowHistory(ctx *security.RequestContext, accountID
 
 	// Redact after virtualization so synthesized and skipped rows are covered and
 	// task IDs are exact definition IDs.
-	RedactSecretsFromTasks(workflowDetails.Tasks, wfDef)
+	RedactExecutionSecrets(workflowDetails, wfDef, s.secretValues(ctx, accountID))
 
 	var sanitizeTaskExecutionDetails func([]model.TaskExecutionDetails)
 	sanitizeTaskExecutionDetails = func(tasks []model.TaskExecutionDetails) {

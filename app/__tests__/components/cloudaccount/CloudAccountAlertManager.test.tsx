@@ -23,11 +23,14 @@ jest.mock('@lib/auth', () => ({
 
 jest.mock('@api1/kubernetes1', () => ({
   __esModule: true,
+  firstGraphQLError: (res: any) => res?.data?.errors?.[0]?.message,
   default: {
     getDistinctData: jest.fn(),
     getEventRules: jest.fn(),
     getAgentPlaybookOfEvent: jest.fn(),
     disableAlertManager: jest.fn(),
+    getEventRuleCapabilities: jest.fn(),
+    updateEventRuleMute: jest.fn(),
   },
 }));
 
@@ -244,6 +247,30 @@ const sampleRules = [
   },
 ];
 
+const cap = (available: boolean, reason = 'not here') => (available ? { available } : { available, reason });
+
+const capabilitiesFor = (ruleId: string, overrides: Record<string, any> = {}, muted = false) => ({
+  rule_id: ruleId,
+  alert: '',
+  source: '',
+  target: 'prom_cr',
+  muted,
+  operations: {
+    edit_definition: cap(true),
+    update_threshold: cap(true),
+    update_duration: cap(true),
+    disable_at_source: cap(true),
+    mute: cap(true),
+    pr: cap(false),
+    ...overrides,
+  },
+});
+
+const allCapabilities = {
+  'r-1': capabilitiesFor('r-1'),
+  'r-2': capabilitiesFor('r-2'),
+};
+
 const mockRulesResponse = (rules = sampleRules, count?: number) => ({
   data: {
     event_rules: rules,
@@ -260,6 +287,8 @@ describe('CloudAccountAlertManager (integration)', () => {
     k8sApi.getEventRules.mockResolvedValue(mockRulesResponse());
     k8sApi.getAgentPlaybookOfEvent.mockResolvedValue({ data: { data: { agent_playbook: [] } } });
     k8sApi.disableAlertManager.mockResolvedValue({ data: {} });
+    k8sApi.getEventRuleCapabilities.mockResolvedValue(allCapabilities);
+    k8sApi.updateEventRuleMute.mockResolvedValue({ data: { data: { mute: capabilitiesFor('r-1', {}, true) } } });
   });
 
   it('does not fetch when accountId is missing or literal "undefined"', async () => {
@@ -468,5 +497,72 @@ describe('CloudAccountAlertManager (integration)', () => {
     fireEvent.click(screen.getByTestId('ndialog-submit'));
 
     await waitFor(() => expect(snackbar.error).toHaveBeenCalledWith(expect.stringContaining('Failed to Disable Alert Rule')));
+  });
+
+  it('asks for capabilities of the listed rules', async () => {
+    render(<CloudAccountAlertManager accountId='acc-1' />);
+    await waitFor(() => expect(k8sApi.getEventRuleCapabilities).toHaveBeenCalledWith(['r-1', 'r-2']));
+  });
+
+  it('shows no write control until capabilities are known, and none if they fail to load', async () => {
+    k8sApi.getEventRuleCapabilities.mockResolvedValue({});
+    render(<CloudAccountAlertManager accountId='acc-1' />);
+    await waitFor(() => expect(screen.getByText('CPU High')).toBeInTheDocument());
+    await act(async () => {});
+    expect(screen.queryByTestId('menu-Disable-CPU High')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('menu-Edit-CPU High')).not.toBeInTheDocument();
+  });
+
+  it('hides disable and edit when the change cannot reach the source, keeping mute', async () => {
+    k8sApi.getEventRuleCapabilities.mockResolvedValue({
+      'r-1': capabilitiesFor('r-1', { disable_at_source: cap(false), edit_definition: cap(false) }),
+      'r-2': capabilitiesFor('r-2', { disable_at_source: cap(false), edit_definition: cap(false), mute: cap(false) }),
+    });
+    render(<CloudAccountAlertManager accountId='acc-1' />);
+
+    await waitFor(() => expect(screen.getByTestId('menu-Mute in Nudgebee-CPU High')).toBeInTheDocument());
+    expect(screen.queryByTestId('menu-Disable-CPU High')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('menu-Edit-CPU High')).not.toBeInTheDocument();
+    expect(screen.getByTestId('menu-Change this rule where it is defined-Disk Full')).toBeInTheDocument();
+  });
+
+  it('mutes a rule and shows it as muted', async () => {
+    render(<CloudAccountAlertManager accountId='acc-1' />);
+    await waitFor(() => expect(screen.getByTestId('menu-Mute in Nudgebee-CPU High')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('menu-Mute in Nudgebee-CPU High'));
+    expect(screen.getByTestId('ndialog-title')).toHaveTextContent('The rule itself is not changed');
+    fireEvent.click(screen.getByTestId('ndialog-submit'));
+
+    await waitFor(() => expect(k8sApi.updateEventRuleMute).toHaveBeenCalledWith({ rule_id: 'r-1', account_id: 'acc-1', muted: true }));
+    await waitFor(() => expect(screen.getByText('Enabled · Muted')).toBeInTheDocument());
+    expect(screen.getByTestId('menu-Unmute-CPU High')).toBeInTheDocument();
+    expect(snackbar.success).toHaveBeenCalledWith('CPU High muted');
+  });
+
+  it('shows the server reason when a mute is rejected', async () => {
+    k8sApi.updateEventRuleMute.mockResolvedValue({ data: { errors: [{ message: 'account unauthorized' }] } });
+    render(<CloudAccountAlertManager accountId='acc-1' />);
+    await waitFor(() => expect(screen.getByTestId('menu-Mute in Nudgebee-CPU High')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('menu-Mute in Nudgebee-CPU High'));
+    fireEvent.click(screen.getByTestId('ndialog-submit'));
+
+    await waitFor(() => expect(snackbar.error).toHaveBeenCalledWith('Failed to mute CPU High: account unauthorized'));
+    expect(screen.queryByText('Enabled · Muted')).not.toBeInTheDocument();
+  });
+
+  it('shows the backend warning in the disable dialog', async () => {
+    k8sApi.getEventRuleCapabilities.mockResolvedValue({
+      'r-1': capabilitiesFor('r-1', {
+        disable_at_source: { available: true, warning: 'Nudgebee finds this Azure alert by name' },
+      }),
+      'r-2': capabilitiesFor('r-2'),
+    });
+    render(<CloudAccountAlertManager accountId='acc-1' />);
+    await waitFor(() => expect(screen.getByTestId('menu-Disable-CPU High')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('menu-Disable-CPU High'));
+    expect(screen.getByText('Nudgebee finds this Azure alert by name')).toBeInTheDocument();
   });
 });

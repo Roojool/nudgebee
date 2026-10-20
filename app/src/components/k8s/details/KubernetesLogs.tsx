@@ -22,9 +22,9 @@ import { RefreshSubmitButton } from '@components/k8s/common/RefreshSubmitButton'
 import UserHistoryButton from '@shared/widgets/UserHistory';
 import { useNubiGlobalChat } from '@context/NubiGlobalChatContext';
 import QueryModeSwitcher from '@components/k8s/common/QueryModeSwitcher';
-import { OperatorDescriptor } from '@components/k8s/common/operatorCatalog';
+import { OperatorDescriptor, splitSetMembership } from '@components/k8s/common/operatorCatalog';
 import { LogDate } from '@components/k8s/common/LogDate';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import { isAtMost70PercentDifferent, parseHttpResponseBodyMessage, safeJSONParse, snakeToTitleCase } from 'src/utils/common';
 import { useData } from '@context/DataContext';
@@ -112,12 +112,20 @@ const buildStructuredQueryFromItems = (items: any[]): any[] =>
       value = true;
     }
 
-    // Set membership arrives as a comma-separated string from the chip input.
-    if (item.operator === 'is_one_of' || item.operator === 'is_not_one_of') {
-      value = String(item.value)
-        .split(',')
-        .map((v: string) => v.trim())
-        .filter((v: string) => v !== '');
+    // The value-less "is null" chip carries '' — _is_null means absent unless the chip says
+    // "false". The backend requires a boolean here.
+    if (backendOp === '_is_null' && typeof value !== 'boolean') {
+      value =
+        String(value ?? '')
+          .trim()
+          .toLowerCase() !== 'false';
+    }
+
+    // Set membership arrives as a comma-separated string from the chip input. Keyed on the
+    // backend operator: catalog chips store '_in' / '_not_in' directly, and keying on the
+    // legacy names sent "a,b" as one value that matched nothing.
+    if (backendOp === '_in' || backendOp === '_not_in') {
+      value = splitSetMembership(item.value);
     }
 
     return {
@@ -479,7 +487,7 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
                     lineHeight: '1.6',
                     overflowWrap: 'anywhere',
                     wordBreak: 'break-all',
-                    fontFamily: 'monospace',
+                    fontFamily: ds.font.mono,
                   }}
                 />
                 {existingTicket && (
@@ -546,6 +554,14 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
   // FIX: Removed the query argument. Always uses logQuery state.
   const handleSubmit = useCallback(
     async (fromOnSubmit = false) => {
+      // Builder mode never runs an unfiltered query: every builder branch below
+      // returns with this warning. On a Run Query click, check it before the table
+      // is cleared, so the rows on screen stay instead of turning into "No Data".
+      const noFilterChips = !logQueryItems || logQueryItems.length === 0;
+      if (fromOnSubmit && qLEditor === 'build' && noFilterChips && !(queryRequestFromProps && queryRequestFromProps.length > 0)) {
+        snackbar.warning('Please select at least one label filter');
+        return;
+      }
       setErrorMsg('');
       if (!pollLogs) {
         setData([]);
@@ -719,12 +735,9 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
                 value = true;
               }
 
-              // is_one_of/is_not_one_of → split comma-separated string into array
-              if (item.operator === 'is_one_of' || item.operator === 'is_not_one_of') {
-                value = String(item.value)
-                  .split(',')
-                  .map((v: string) => v.trim())
-                  .filter((v: string) => v !== '');
+              // in / not in → split comma-separated string into array (legacy names map here)
+              if (backendOp === '_in' || backendOp === '_not_in') {
+                value = splitSetMembership(item.value);
               }
 
               structuredQuery.push({
@@ -1056,7 +1069,15 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
       return <KubernetesWorkloadRelayLogs accountId={accountId} namespace={namespaceName} workloadName={workloadName} workloadType={workloadType} />;
     }
     return (
-      <WidgetCard sx={{ maxWidth: ds.space.mul(0, 250), mx: 'auto', textAlign: 'center' }}>
+      <Card
+        sx={{
+          mt: 'var(--ds-space-5)',
+          padding: 'var(--ds-space-4) var(--ds-space-5)',
+          maxWidth: ds.space.mul(0, 250),
+          mx: 'auto',
+          textAlign: 'center',
+        }}
+      >
         <Text
           value='No Logs Available'
           sx={{
@@ -1074,7 +1095,7 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
           }
           sx={{ color: 'var(--ds-gray-600)' }}
         />
-      </WidgetCard>
+      </Card>
     );
   }
 
@@ -1284,10 +1305,13 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
           )}
           {executedQuery && (
             <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 'var(--ds-space-1)', px: 'var(--ds-space-2)', py: 'var(--ds-space-1)' }}>
-              <Box component='span' sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 600, color: ds.gray[600], whiteSpace: 'nowrap' }}>
+              <Box
+                component='span'
+                sx={{ fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.semibold, color: ds.gray[600], whiteSpace: 'nowrap' }}
+              >
                 {logProvider ? `${logProvider} query:` : 'Query:'}
               </Box>
-              <Box component='span' sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-small)', color: ds.gray[700], wordBreak: 'break-all' }}>
+              <Box component='span' sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-small)', color: ds.gray[700], wordBreak: 'break-all' }}>
                 {executedQuery}
               </Box>
             </Box>

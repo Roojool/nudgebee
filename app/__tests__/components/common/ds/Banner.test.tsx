@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { Banner } from '@ui/Banner';
+import { Banner, type BannerTone } from '@ui/Banner';
 
 describe('Banner', () => {
   it('renders message text', () => {
@@ -23,14 +23,28 @@ describe('Banner', () => {
     });
   });
 
-  it('uses role=alert for critical tone', () => {
-    render(<Banner tone='critical' message='Critical!' />);
-    expect(screen.getByRole('alert')).toBeInTheDocument();
+  // Shared guard with Callout: an unknown tone (e.g. MUI Alert's 'error' from a .jsx caller)
+  // falls back to info instead of crashing on the palette lookup.
+  it('falls back to the info tone for an unknown tone', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    render(<Banner tone={'error' as unknown as BannerTone} message='Still shown' />);
+    expect(screen.getByRole('status')).toHaveTextContent('Still shown');
+    expect(screen.getByTestId('InfoOutlinedIcon')).toBeInTheDocument();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Banner: unknown tone'));
+    warn.mockRestore();
   });
 
-  it('uses role=status for info tone', () => {
-    render(<Banner tone='info' message='Info' />);
-    expect(screen.getByRole('status')).toBeInTheDocument();
+  // warning used to be role='alert' with aria-live='polite' — a contradiction. The role alone
+  // now carries the urgency (alert = assertive, status = polite), shared with ds/Callout.
+  it.each([
+    ['info', 'status'],
+    ['success', 'status'],
+    ['warning', 'alert'],
+    ['critical', 'alert'],
+  ] as const)('renders tone %s as role %s with no explicit aria-live', (tone, role) => {
+    render(<Banner tone={tone} message='Msg' />);
+    const el = screen.getByRole(role);
+    expect(el).not.toHaveAttribute('aria-live');
   });
 
   it('renders dismiss button when dismissible=true', () => {

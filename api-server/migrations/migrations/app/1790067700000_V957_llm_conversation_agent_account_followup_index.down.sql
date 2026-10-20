@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_llm_conversation_agent_account_followup;

@@ -176,7 +176,7 @@ type reportScopeKey struct{}
 // NEW to the current message and therefore worth counting on its badge. A
 // secret is NOT new when it either:
 //
-//   - already appears in the pre-turn conversation history (the planner folds
+//   - appears only in the pre-turn conversation history (the planner folds
 //     that history back into every outbound prompt, so a secret pasted on an
 //     earlier turn is re-detected every turn — the cross-turn carry-over), or
 //   - was already reported earlier in THIS turn (one turn drives several LLM
@@ -192,17 +192,17 @@ type reportScopeKey struct{}
 // when the turn ends). Reporting only — block / redact still evaluate the full
 // outbound payload, so a secret re-sent in history is still blocked/redacted.
 type reportScope struct {
-	mu            sync.Mutex
-	history       string
-	seen          map[string]struct{}
-	historyCounts map[string]int
+	mu             sync.Mutex
+	history        string
+	currentMessage string
+	seen           map[string]struct{}
 }
 
-func newReportScope(history string) *reportScope {
+func newReportScope(history, currentMessage string) *reportScope {
 	return &reportScope{
-		history:       history,
-		seen:          make(map[string]struct{}),
-		historyCounts: make(map[string]int),
+		history:        history,
+		currentMessage: currentMessage,
+		seen:           make(map[string]struct{}),
 	}
 }
 
@@ -217,8 +217,6 @@ func (s *reportScope) filter(hits []Hit, payload string) ([]Hit, []bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	occurrencesThisTurn := make(map[string]int)
-
 	for i, h := range hits {
 		if h.Start < 0 || h.End > len(payload) || h.Start >= h.End {
 			mask[i] = true
@@ -226,20 +224,11 @@ func (s *reportScope) filter(hits []Hit, payload string) ([]Hit, []bool) {
 			continue
 		}
 		secret := payload[h.Start:h.End]
-		occurrencesThisTurn[secret]++
-		occurrenceIndex := occurrencesThisTurn[secret]
-
-		// If this occurrence is accounted for by history alone, it is a
-		// pure carry-over from prior turns — drop it.
-		if s.history != "" {
-			count, cached := s.historyCounts[secret]
-			if !cached {
-				count = strings.Count(s.history, secret)
-				s.historyCounts[strings.Clone(secret)] = count
-			}
-			if occurrenceIndex <= count {
-				continue
-			}
+		// Prompt assembly can repeat history arbitrarily. Only the original
+		// current message proves a historical value was explicitly re-entered;
+		// extra copies in planner context or tool arguments do not.
+		if strings.Contains(s.history, secret) && !strings.Contains(s.currentMessage, secret) {
+			continue
 		}
 
 		// Deduplicate within the current turn: if we already reported a new
@@ -264,12 +253,25 @@ func (s *reportScope) filter(hits []Hit, payload string) ([]Hit, []bool) {
 // messages (and any distilled memory) that the planner folds back into every
 // outbound prompt as history.
 //
+// currentMessage must be the original user input, before contextualization or
+// agent delegation. Values explicitly re-entered there are eligible even if
+// history contains them.
+//
 // It must be attached once per turn (a fresh scope per turn), before the
 // turn's LLM calls. The seed suppresses cross-turn carry-over; the scope's
 // accumulated state suppresses within-turn per-call duplicates. An empty seed
 // is still attached so within-turn de-duplication works on the first turn.
-func WithReportBaseline(ctx context.Context, baseline string) context.Context {
-	return context.WithValue(ctx, reportScopeKey{}, newReportScope(baseline))
+func WithReportBaseline(ctx context.Context, baseline, currentMessage string) context.Context {
+	return context.WithValue(ctx, reportScopeKey{}, newReportScope(baseline, currentMessage))
+}
+
+// EnsureReportBaseline preserves a conversation's shared scope when entering
+// child agents. Standalone agent invocations receive their own scope.
+func EnsureReportBaseline(ctx context.Context, baseline, currentMessage string) context.Context {
+	if reportScopeFromContext(ctx) != nil {
+		return ctx
+	}
+	return WithReportBaseline(ctx, baseline, currentMessage)
 }
 
 // reportScopeFromContext returns the attached per-turn scope, or nil if none

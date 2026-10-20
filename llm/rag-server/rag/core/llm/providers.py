@@ -4,9 +4,10 @@ Each provider implements the LLM ABC using native SDK calls.
 Used exclusively for reranking — each provider sends a prompt and returns text + token usage.
 """
 
+import base64
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from rag.core.types import LLM, LLMResult
 
@@ -18,6 +19,42 @@ def _ensure_user_content(prompt: str) -> str:
     vLLM) reject a message set whose only user turn is empty, so fall back to a minimal
     non-empty prompt. Mirrors llm-server's ensureUserMessage."""
     return prompt if prompt and prompt.strip() else "Continue."
+
+
+def _user_message(content: Any) -> Any:
+    """One user message carrying mixed text and image parts.
+
+    Typed as Any on purpose: each SDK generates its own TypedDict union for message
+    payloads, and a dict of content parts satisfies none of them cleanly. Contorting the
+    wire shape to match a generated union would obscure what is actually sent.
+    """
+    return {"role": "user", "content": content}
+
+
+def _openai_image_content(prompt: str, images: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """OpenAI-shaped multimodal content: the images, then the instruction."""
+    content: List[Dict[str, Any]] = [
+        {"type": "image_url", "image_url": {"url": f"data:{img['mime_type']};base64,{img['data']}"}} for img in images
+    ]
+    content.append({"type": "text", "text": _ensure_user_content(prompt)})
+    return content
+
+
+def _bedrock_image_format(mime_type: str) -> str:
+    """Converse names the format, not the media type."""
+    return {"image/png": "png", "image/jpeg": "jpeg", "image/gif": "gif", "image/webp": "webp"}.get(
+        (mime_type or "").lower(), "png"
+    )
+
+
+def supports_vision(llm: Any) -> bool:
+    """Whether this provider can be handed an image at all.
+
+    A provider without the method can never describe a figure; one with it still
+    depends on the configured model being able to see, which only the call itself
+    can tell us.
+    """
+    return callable(getattr(llm, "generate_with_images", None))
 
 
 class OpenAILLM(LLM):
@@ -36,6 +73,20 @@ class OpenAILLM(LLM):
         resp = self._client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": _ensure_user_content(prompt)}],
+            temperature=0,
+        )
+        text = resp.choices[0].message.content or ""
+        usage = resp.usage
+        return LLMResult(
+            text=text,
+            input_tokens=usage.prompt_tokens if usage else 0,
+            output_tokens=usage.completion_tokens if usage else 0,
+        )
+
+    def generate_with_images(self, prompt: str, images: List[Dict[str, str]]) -> LLMResult:
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=[_user_message(_openai_image_content(prompt, images))],
             temperature=0,
         )
         text = resp.choices[0].message.content or ""
@@ -74,6 +125,20 @@ class AzureOpenAILLM(LLM):
             output_tokens=usage.completion_tokens if usage else 0,
         )
 
+    def generate_with_images(self, prompt: str, images: List[Dict[str, str]]) -> LLMResult:
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=[_user_message(_openai_image_content(prompt, images))],
+            temperature=0,
+        )
+        text = resp.choices[0].message.content or ""
+        usage = resp.usage
+        return LLMResult(
+            text=text,
+            input_tokens=usage.prompt_tokens if usage else 0,
+            output_tokens=usage.completion_tokens if usage else 0,
+        )
+
 
 class AnthropicLLM(LLM):
     """Anthropic LLM using the anthropic SDK directly."""
@@ -90,6 +155,29 @@ class AnthropicLLM(LLM):
             max_tokens=1024,
             temperature=0,
             messages=[{"role": "user", "content": _ensure_user_content(prompt)}],
+        )
+        first_block = resp.content[0] if resp.content else None
+        text = first_block.text if first_block and hasattr(first_block, "text") else ""
+        return LLMResult(
+            text=text,
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+        )
+
+    def generate_with_images(self, prompt: str, images: List[Dict[str, str]]) -> LLMResult:
+        content: List[Dict[str, Any]] = [
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": img["mime_type"], "data": img["data"]},
+            }
+            for img in images
+        ]
+        content.append({"type": "text", "text": _ensure_user_content(prompt)})
+        resp = self._client.messages.create(
+            model=self.model,
+            max_tokens=1024,
+            temperature=0,
+            messages=[_user_message(content)],
         )
         first_block = resp.content[0] if resp.content else None
         text = first_block.text if first_block and hasattr(first_block, "text") else ""
@@ -123,6 +211,38 @@ class BedrockLLM(LLM):
         output_tokens = result.get("generation_token_count", 0)
         return LLMResult(text=text, input_tokens=input_tokens, output_tokens=output_tokens)
 
+    def generate_with_images(self, prompt: str, images: List[Dict[str, str]]) -> LLMResult:
+        """Describe images via the Converse API.
+
+        ``generate`` above speaks the llama-style invoke_model body, which has no
+        way to carry an image. Converse is the only Bedrock surface that does,
+        and a model that cannot see rejects the call with a ValidationException —
+        which is what the caller treats as "this model has no vision".
+        """
+        content: List[Dict[str, Any]] = [
+            {
+                "image": {
+                    "format": _bedrock_image_format(img["mime_type"]),
+                    "source": {"bytes": base64.b64decode(img["data"])},
+                }
+            }
+            for img in images
+        ]
+        content.append({"text": _ensure_user_content(prompt)})
+        resp = self._client.converse(
+            modelId=self.model,
+            messages=[{"role": "user", "content": content}],
+            inferenceConfig={"temperature": 0, "maxTokens": 1024},
+        )
+        blocks = resp.get("output", {}).get("message", {}).get("content", [])
+        text = next((b["text"] for b in blocks if "text" in b), "")
+        usage = resp.get("usage", {})
+        return LLMResult(
+            text=text,
+            input_tokens=int(usage.get("inputTokens", 0)),
+            output_tokens=int(usage.get("outputTokens", 0)),
+        )
+
 
 class GoogleGenAILLM(LLM):
     """Google Generative AI LLM using google-genai SDK."""
@@ -137,6 +257,26 @@ class GoogleGenAILLM(LLM):
         resp = self._client.models.generate_content(
             model=self.model,
             contents=prompt,
+            config={"temperature": 0},
+        )
+        text = resp.text or ""
+        usage = resp.usage_metadata
+        return LLMResult(
+            text=text,
+            input_tokens=int(usage.prompt_token_count or 0) if usage else 0,
+            output_tokens=int(usage.candidates_token_count or 0) if usage else 0,
+        )
+
+    def generate_with_images(self, prompt: str, images: List[Dict[str, str]]) -> LLMResult:
+        from google.genai import types
+
+        parts: List[Any] = [
+            types.Part.from_bytes(data=base64.b64decode(img["data"]), mime_type=img["mime_type"]) for img in images
+        ]
+        parts.append(_ensure_user_content(prompt))
+        resp = self._client.models.generate_content(
+            model=self.model,
+            contents=parts,
             config={"temperature": 0},
         )
         text = resp.text or ""

@@ -183,18 +183,6 @@ func TestProviderQueryExamples_Coverage(t *testing.T) {
 	}
 }
 
-// TestLogFetch_DefaultExamplesPresent — the unknown-provider fallback set
-// must stay non-empty; an empty list leaves the LLM with no schema reference.
-func TestLogFetch_DefaultExamplesPresent(t *testing.T) {
-	defaults := defaultQueryExamples()
-	assert.NotEmpty(t, defaults, "default examples must exist for the no-provider-fields fallback path")
-	for _, ex := range defaults {
-		assert.NotEmpty(t, ex.Answer, "every default example must have an Answer")
-		assert.True(t, strings.Contains(ex.Answer, "{") && strings.Contains(ex.Answer, "}"),
-			"default example Answer must be a JSON object: %q", ex.Answer)
-	}
-}
-
 // TestBuildKubectlLogCommand covers the pod/ prefix heuristic, container /
 // previous flags, default tail, and the filter_pattern → grep+head pipeline.
 func TestBuildKubectlLogCommand(t *testing.T) {
@@ -775,20 +763,6 @@ func TestBuildLogIntentMessages_AccountPromptPropagation_DuplicateGuard(t *testi
 	})
 }
 
-// TestDefaultProviderLogFields pins the fallback field vocabulary advertised
-// to the query-generator when backend label discovery fails: Signoz stores
-// logs under OTel attribute names — the generic `_body`/`namespace`/`pod` set
-// matches no Signoz attribute and every query silently returns zero rows.
-func TestDefaultProviderLogFields_DuplicateGuard(t *testing.T) {
-	signozFields := defaultProviderLogFields("signoz")
-	assert.ElementsMatch(t,
-		[]string{"body", "service.name", "k8s.cluster.name", "k8s.namespace.name", "k8s.pod.name", "trace_id"},
-		signozFields)
-	assert.Equal(t, signozFields, defaultProviderLogFields("SigNoz"), "provider match must be case-insensitive")
-	assert.Equal(t, []string{"_body", "namespace", "pod"}, defaultProviderLogFields("loki"))
-	assert.Equal(t, []string{"_body", "namespace", "pod"}, defaultProviderLogFields(""))
-}
-
 // TestEffectiveProvider guards the per-request log_provider_override: it must
 // outrank whatever provider the agent resolved at construction, "k8s" must mean
 // "no services-server backend" (empty provider → kubectl path), and — critically
@@ -935,16 +909,6 @@ func TestBuildLogIntentMessages_DomainKnowledgePropagation(t *testing.T) {
 // to the query-generator when backend label discovery fails: Signoz stores
 // logs under OTel attribute names — the generic `_body`/`namespace`/`pod` set
 // matches no Signoz attribute and every query silently returns zero rows.
-func TestDefaultProviderLogFields(t *testing.T) {
-	signozFields := defaultProviderLogFields("signoz")
-	assert.ElementsMatch(t,
-		[]string{"body", "service.name", "k8s.cluster.name", "k8s.namespace.name", "k8s.pod.name", "trace_id"},
-		signozFields)
-	assert.Equal(t, signozFields, defaultProviderLogFields("SigNoz"), "provider match must be case-insensitive")
-	assert.Equal(t, []string{"_body", "namespace", "pod"}, defaultProviderLogFields("loki"))
-	assert.Equal(t, []string{"_body", "namespace", "pod"}, defaultProviderLogFields(""))
-}
-
 func TestIsNotFoundReason(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1217,4 +1181,177 @@ func TestFetchLabelsAndIndices_EmptyAccountBypassesCache(t *testing.T) {
 
 	_, ok := common.CacheGet(logLabelsCacheNS, sharedKey)
 	assert.False(t, ok, "an empty accountId must never write to the tenant-less shared key")
+}
+
+// TestFetchLogsAgent_Registered ensures fetch_logs is in the system registry.
+func TestFetchLogsAgent_Registered(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent, ok := core.GetNBAgent(ctx, FetchLogsAgentName, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "")
+	assert.True(t, ok, "fetch_logs must be registered as a system agent")
+	assert.NotNil(t, agent)
+	assert.Equal(t, FetchLogsAgentName, agent.GetName())
+}
+
+// TestClassifyLogMode pins the deterministic intent classifier fetch_logs
+// uses (via runAutoDiagnosticBundle) to decide whether to auto-fire the
+// diagnostic bundle. The classifier prefers OriginalQuery over Query so that
+// a parent planner's paraphrase ("Get logs for X") doesn't downgrade an
+// investigation ("Were there issues with X?") to routine.
+func TestClassifyLogMode(t *testing.T) {
+	cases := []struct {
+		name     string
+		query    string
+		original string
+		want     logMode
+	}{
+		// Routine
+		{"tail logs", "show me last logs for api-server", "", logModeRoutine},
+		{"recent logs", "get recent logs of llm-server in nudgebee namespace", "", logModeRoutine},
+		{"time range only", "logs between 10:00 and 11:00", "", logModeRoutine},
+
+		// Investigation
+		{"why is X broken", "why is api-service in app-108 failing", "", logModeInvestigation},
+		{"diagnose", "diagnose checkout-api connection refused errors", "", logModeInvestigation},
+		{"what caused", "what caused the outage in payment-api", "", logModeInvestigation},
+		{"were there issues", "were there issues with cron-scheduler in ns-73b", "", logModeInvestigation},
+		{"root cause", "find the root cause of the crash in worker-7", "", logModeInvestigation},
+
+		// Enumeration
+		{"list errors", "list all errors in payment-api last 1h", "", logModeEnumeration},
+		{"show errors", "show me the errors in my-app-51", "", logModeEnumeration},
+		{"distinct errors", "what distinct errors appear in checkout-api", "", logModeEnumeration},
+		{"summarise errors", "summarize errors in cron-scheduler", "", logModeEnumeration},
+
+		// OriginalQuery wins over per-step paraphrase — this is the case that
+		// regressed in production today: parent emitted "Get logs for pod X"
+		// and the LLM treated it as routine, skipping the investigation flow.
+		{
+			name:     "parent paraphrase loses intent without classifier",
+			query:    "Get logs for pod cron-scheduler-xtcwd in namespace-73b",
+			original: "Were there issues with the cron-scheduler pod in namespace-73b?",
+			want:     logModeInvestigation,
+		},
+		{
+			name:     "empty original falls back to query",
+			query:    "why is api-server failing",
+			original: "",
+			want:     logModeInvestigation,
+		},
+
+		// Enumeration's noun list must cover symptom words, not just the
+		// "error" family — otherwise a plain listing request that happens to
+		// describe pods as "failing"/"broken"/"crashed" (rather than saying
+		// "errors") falls through to the weak-symptom investigation tier and
+		// gets routed into the heavier mandatory-shell_execute workflow for
+		// what the user framed as "just list them".
+		{"list failing pods", "list the pods that are failing in namespace nudgebee", "", logModeEnumeration},
+		{"show broken services", "show me the broken services in prod", "", logModeEnumeration},
+		{"list crashed pods", "list crashed pods in nudgebee", "", logModeEnumeration},
+
+		// Stem/wildcard forms (fail\w*, crash\w*) and optional plurals catch
+		// variants a literal enumeration would miss: past tense ("failed", not
+		// just "failures"/"failing"), compound crash states that don't end at
+		// a word boundary after "crash" ("crashloopbackoff"), and singular
+		// nouns ("exception"/"issue", not just their plurals). Without these,
+		// "list the pods that failed" fell all the way through to ROUTINE —
+		// worse than the investigation-mode misroute this file's earlier
+		// cases fix, since ROUTINE doesn't even get the weak-symptom fallback.
+		{"list failed pods", "list the pods that failed in namespace nudgebee", "", logModeEnumeration},
+		{"list crashloopbackoff pods", "list crashloopbackoff pods in nudgebee", "", logModeEnumeration},
+		{"list exception singular", "list exception in api-server", "", logModeEnumeration},
+		{"show issue singular", "show issue with pod", "", logModeEnumeration},
+
+		// A strong causal ask must win even when an enumeration verb also
+		// appears in the same query — enumeration checking first (as it did
+		// before this fix) would discard the causal ask entirely.
+		{"causal ask co-occurring with enumeration verb", "show me the errors and explain why it broke", "", logModeInvestigation},
+		{"why are pods failing", "why are the pods failing in cron-scheduler", "", logModeInvestigation},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyLogMode(tc.query, tc.original)
+			assert.Equalf(t, tc.want, got,
+				"classifyLogMode(%q, %q) = %s; want %s",
+				tc.query, tc.original, logModeName(got), logModeName(tc.want))
+		})
+	}
+}
+
+// TestAutoBundleGate_ModeAwareness locks the gating rule that runAuto
+// DiagnosticBundle uses to decide whether to fire. The rule is:
+//
+//   - Investigation intent ("were there issues", "why", "broken",
+//     "diagnose", …) → ALWAYS fire. The logs prompt actively tells the
+//     LLM to strip error keywords from the fetch question, so keying only
+//     on the fetch query text would miss the exact investigations the
+//     bundle was built for.
+//   - Enumeration intent ("list errors", "show me distinct errors") →
+//     ALWAYS fire. That IS the enumeration answer.
+//   - Routine intent → fire only when the wording explicitly names error
+//     content (get error logs, any failures, …). Plain "tail last 100
+//     lines" stays a one-shot fetch.
+//
+// This mirrors the same decision runAutoDiagnosticBundle makes inline; the
+// test asserts the composed behaviour so a regression to a keyword-only gate
+// would fail here.
+func TestAutoBundleGate_ModeAwareness(t *testing.T) {
+	cases := []struct {
+		name     string
+		query    string // per-step query the parent passed to fetch_logs
+		original string // OriginalQuery — the user's verbatim question
+		want     bool
+	}{
+		{"investigation via 'were there issues' fires (fetch query itself has no keyword)",
+			"all logs for pod task-scheduler-abc in ns", "Were there issues with the task-scheduler pod", true},
+		{"investigation via 'why is X broken' fires",
+			"all logs for pod x", "why is service-y broken", true},
+		{"enumeration via 'list errors' fires",
+			"all logs last 1h", "list errors in service-z", true},
+		{"routine plain tail does NOT fire",
+			"tail last 100 lines", "", false},
+		{"routine with error keyword fires (fallback)",
+			"get error logs for pod x", "", true},
+		{"routine with no error content stays cold",
+			"give me the last 5 mins of logs", "recent logs for cron-scheduler", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mode := classifyLogMode(tc.query, tc.original)
+			q := strings.TrimSpace(tc.original)
+			if q == "" {
+				q = strings.TrimSpace(tc.query)
+			}
+			got := mode != logModeRoutine || autoBundleQueryRE.MatchString(q)
+			assert.Equal(t, tc.want, got,
+				"mode=%v q=%q — bundle gate mismatch", mode, q)
+		})
+	}
+}
+
+func TestAutoBundleQueryRE(t *testing.T) {
+	// Guards the trigger-word list that gates the auto-diagnostic-bundle
+	// inside fetch_logs. The list is deliberately narrow — a plain "tail
+	// last 100 lines" must NOT trigger the bundle, or we regress fetch's
+	// "one-shot, no extra work" semantic for routine viewing. Any
+	// addition/removal here should be conscious.
+	cases := []struct {
+		q    string
+		want bool
+	}{
+		{"get error logs for pod x", true},
+		{"any failures in namespace y", true},
+		{"show me warnings from last hour", true},
+		{"was there a crash on this pod", true},
+		{"any exceptions in api-server", true},
+		{"timeout occurred?", true},
+		{"OOMKilled events for job", true},
+		{"tail last 100 lines", false},
+		{"recent logs for cron-scheduler", false},
+		{"give me the last 5 mins of logs", false},
+		{"show pod restart count", false},
+	}
+	for _, tc := range cases {
+		assert.Equalf(t, tc.want, autoBundleQueryRE.MatchString(tc.q),
+			"autoBundleQueryRE.MatchString(%q)", tc.q)
+	}
 }

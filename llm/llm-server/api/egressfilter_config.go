@@ -43,8 +43,9 @@ import (
 // UnmarshalJSON captures the top-level key set into presentKeys so the
 // merge step can distinguish absent from null (a plain *bool zeroes both).
 type egressConfigRequest struct {
-	Mode    *string `json:"mode"`
-	Enabled *bool   `json:"enabled"`
+	Mode           *string `json:"mode"`
+	Enabled        *bool   `json:"enabled"`
+	EntropyEnabled *bool   `json:"entropy_enabled"`
 
 	// PII sibling detector (V827 backend + this action).
 	PIIEnabled            *bool     `json:"pii_enabled"`
@@ -140,8 +141,10 @@ func egressConfigResponse(cfg *egressfilter.TenantConfig, mode egressfilter.Mode
 		piiMode        string
 		piiCats        []string
 		disabledAgents []string
+		entropyEnabled = config.Config.LlmServerEgressFilterEntropyEnabled
 	)
 	if cfg != nil {
+		entropyEnabled = cfg.EntropyEnabled
 		if cfg.PIIEnabled != nil {
 			piiEnabled = *cfg.PIIEnabled
 		}
@@ -161,6 +164,7 @@ func egressConfigResponse(cfg *egressfilter.TenantConfig, mode egressfilter.Mode
 	return gin.H{
 		"mode":            string(mode),
 		"enabled":         enabled,
+		"entropy_enabled": entropyEnabled,
 		"has_override":    hasOverride,
 		"custom_patterns": patterns,
 		// PII tenant values (nullable → inherit env when null).
@@ -231,9 +235,10 @@ func patternsFromCfg(cfg *egressfilter.TenantConfig) []egressfilter.CustomRule {
 // has no override row yet.
 func defaultTenantConfig(tenantID uuid.UUID) *egressfilter.TenantConfig {
 	return &egressfilter.TenantConfig{
-		TenantID: tenantID,
-		Mode:     egressfilter.ParseMode(config.Config.LlmServerEgressFilterSecretsMode),
-		Enabled:  config.Config.LlmServerEgressFilterSecretsEnabled,
+		TenantID:       tenantID,
+		Mode:           egressfilter.ParseMode(config.Config.LlmServerEgressFilterSecretsMode),
+		Enabled:        config.Config.LlmServerEgressFilterSecretsEnabled,
+		EntropyEnabled: config.Config.LlmServerEgressFilterEntropyEnabled,
 	}
 }
 
@@ -513,6 +518,9 @@ func mergeEgressConfigUpdate(cfg *egressfilter.TenantConfig, request egressConfi
 	}
 	if request.Enabled != nil {
 		cfg.Enabled = *request.Enabled
+	}
+	if request.EntropyEnabled != nil {
+		cfg.EntropyEnabled = *request.EntropyEnabled
 	}
 	if request.isPresent("pii_enabled") {
 		cfg.PIIEnabled = request.PIIEnabled // nil = clear

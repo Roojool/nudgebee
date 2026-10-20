@@ -438,7 +438,7 @@ func TestCommandFailure_IsErrWorkspaceCommandFailed(t *testing.T) {
 //   - no_matches semantic — if this drops out, the LLM goes back to
 //     interpreting grep-family exit-1 as a tool failure and retries.
 //     (find and jq were dropped post-review; see TestIsNoMatchExit.)
-//   - Credential auto-injection — if this drops out, the LLM plans
+//   - Automatic credential handling — if this drops out, the LLM plans
 //     `aws configure` / `gcloud auth login` / `gh auth login` steps
 //     that pollute the shared workspace and confuse later turns.
 func TestShellToolDescription_CarriesWorkspaceContract(t *testing.T) {
@@ -451,17 +451,17 @@ func TestShellToolDescription_CarriesWorkspaceContract(t *testing.T) {
 		"shared with other conversations on the same account": "must explain the /tmp/ scope so the LLM treats it as system scratch, not per-chat scratch",
 		"`ls -la`": "must point the LLM at the discovery move for tool-saved artifacts",
 		"environment setup and the command that consumes it in the same call": "must explain how to use environment variables without persistent executable profiles",
-		"`kubectl`":                   "must surface the shim CLIs the LLM is supposed to call via shell when no specialized agent fits",
-		"`aws`":                       "must surface the cloud CLIs the LLM is supposed to call via shell when no specialized agent fits",
-		"`gh`":                        "must surface the GitHub CLI (auto-injected token relies on it)",
-		"`python3`":                   "must surface python3, which the LLM uses for arithmetic / quick data shaping",
-		"`logs_*`":                    "must name the tool-saved artifact pattern so cleanup advice has a concrete referent",
-		"evidence chain":              "must justify why tool-saved artifacts must not be deleted",
-		"no_matches":                  "must teach the grep-family exit-1 semantic so the LLM stops retrying empty matches",
-		"auto-injected":               "must teach that cloud + GITHUB_TOKEN credentials are auto-injected, so the LLM does not plan an `aws configure` / `gh auth login` step",
-		"`error_hint`":                "must teach the LLM how to read the structured-error envelope produced by Change 6 wrappers (unbalanced quotes, no-such-file, command-not-found)",
-		"`original_error`":            "must teach that raw stderr is preserved verbatim under original_error so the LLM still sees the underlying signal",
-		"It does NOT apply to `find`": "must clarify the post-review narrowing of the no-match rule — find exit 1 is a real error and is NOT reclassified",
+		"`kubectl`":                         "must surface the shim CLIs the LLM is supposed to call via shell when no specialized agent fits",
+		"`aws`":                             "must surface the cloud CLIs the LLM is supposed to call via shell when no specialized agent fits",
+		"`gh`":                              "must surface the GitHub CLI (auto-injected token relies on it)",
+		"`python3`":                         "must surface python3, which the LLM uses for arithmetic / quick data shaping",
+		"`logs_*`":                          "must name the tool-saved artifact pattern so cleanup advice has a concrete referent",
+		"evidence chain":                    "must justify why tool-saved artifacts must not be deleted",
+		"no_matches":                        "must teach the grep-family exit-1 semantic so the LLM stops retrying empty matches",
+		"Credentials handled automatically": "must teach that CLI credentials are provided by their execution boundary, so the LLM does not plan an `aws configure` / `gh auth login` step",
+		"`error_hint`":                      "must teach the LLM how to read the structured-error envelope produced by Change 6 wrappers (unbalanced quotes, no-such-file, command-not-found)",
+		"`original_error`":                  "must teach that raw stderr is preserved verbatim under original_error so the LLM still sees the underlying signal",
+		"It does NOT apply to `find`":       "must clarify the post-review narrowing of the no-match rule — find exit 1 is a real error and is NOT reclassified",
 	}
 	for snippet, why := range required {
 		assert.Contains(t, desc, snippet,

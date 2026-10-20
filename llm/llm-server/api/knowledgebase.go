@@ -108,6 +108,9 @@ type kbDocumentsRequest struct {
 	DocumentId string `json:"document_id"`
 	Limit      int    `json:"limit"`
 	Offset     string `json:"offset"`
+	// Addresses a stored source version, and the load that produced it.
+	ContentHash string `json:"content_hash"`
+	RunId       string `json:"run_id"`
 }
 
 // kbSetDocumentCategoryRequest marks one document of a knowledge base as a
@@ -761,6 +764,55 @@ func kbGetDocument(c *gin.Context, context *security.RequestContext, payload map
 	c.JSON(200, buildApiResponse(resp, nil))
 }
 
+func kbGetDocumentSource(c *gin.Context, context *security.RequestContext, payload map[string]any) {
+	var request kbDocumentsRequest
+	if err := common.DecodeMapToStruct(payload, &request); err != nil {
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+		return
+	}
+	if request.AccountId == "" || request.KbId == "" {
+		c.JSON(400, buildApiResponse(nil, []error{errors.New("kb: account_id and kb_id are required")}))
+		return
+	}
+	if !context.GetSecurityContext().HasAccountAccess(request.AccountId, security.SecurityAccessTypeRead) &&
+		!granted(context.GetSecurityContext(), request.AccountId, moduleAiKbs, "Read", "Write") {
+		c.JSON(403, buildApiResponse(nil, []error{common.Error{Message: errorKBUserAccessMessage}}))
+		return
+	}
+	resp, err := core.GetKBDocumentSource(context, request.AccountId, request.KbId, request.ContentHash)
+	if err != nil {
+		slog.Error("kb: failed to get document source", "error", err, "kb_id", request.KbId)
+		c.JSON(kbDocumentsStatus(err), buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+		return
+	}
+	c.JSON(200, buildApiResponse(resp, nil))
+}
+
+func kbListRunDocuments(c *gin.Context, context *security.RequestContext, payload map[string]any) {
+	var request kbDocumentsRequest
+	if err := common.DecodeMapToStruct(payload, &request); err != nil {
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+		return
+	}
+	if request.AccountId == "" || request.KbId == "" || request.RunId == "" {
+		c.JSON(400, buildApiResponse(nil, []error{errors.New("kb: account_id, kb_id and run_id are required")}))
+		return
+	}
+	if !context.GetSecurityContext().HasAccountAccess(request.AccountId, security.SecurityAccessTypeRead) &&
+		!granted(context.GetSecurityContext(), request.AccountId, moduleAiKbs, "Read", "Write") {
+		c.JSON(403, buildApiResponse(nil, []error{common.Error{Message: errorKBUserAccessMessage}}))
+		return
+	}
+	resp, err := core.ListKBRunDocuments(
+		context, request.AccountId, request.KbId, request.RunId, request.Limit, request.Offset)
+	if err != nil {
+		slog.Error("kb: failed to list run documents", "error", err, "kb_id", request.KbId)
+		c.JSON(kbDocumentsStatus(err), buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+		return
+	}
+	c.JSON(200, buildApiResponse(resp, nil))
+}
+
 // kbUpsertDocumentCategory marks a single document Fact or SOP, or clears the
 // mark when note_category is empty. Write access, unlike the read-only document
 // endpoints: a document marked as an SOP is one agents are told to follow.
@@ -946,6 +998,12 @@ func handleKnowledgebaseApis(r *gin.Engine, tracer trace.Tracer, meter metric.Me
 		case "ai_upsert_kb_document_category":
 			common.MetricsApiRequestsTotal("kb_upsert_document_category")
 			kbUpsertDocumentCategory(c, context, payload)
+		case "ai_get_kb_document_source":
+			common.MetricsApiRequestsTotal("kb_get_document_source")
+			kbGetDocumentSource(c, context, payload)
+		case "ai_list_kb_run_documents":
+			common.MetricsApiRequestsTotal("kb_list_run_documents")
+			kbListRunDocuments(c, context, payload)
 		case "ai_list_kb_retrieval":
 			common.MetricsApiRequestsTotal("kb_test_retrieval")
 			kbTestRetrieval(c, context, payload)

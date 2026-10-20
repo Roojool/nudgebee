@@ -168,6 +168,8 @@ func TestInferKubectlVerbType(t *testing.T) {
 	}{
 		{"incomplete describe remains read", "kubectl describe pods -n nudgebee -l", core.ToolRequestTypeRead},
 		{"json wrapped describe", `{"command":"kubectl describe pods -n nudgebee -l"}`, core.ToolRequestTypeRead},
+		{"port-forward is read", "kubectl port-forward svc/my-svc 8080:80", core.ToolRequestTypeRead},
+		{"proxy is read", "kubectl proxy --port=8001", core.ToolRequestTypeRead},
 		{"global flags before read verb", "kubectl --context prod -n nudgebee get pods", core.ToolRequestTypeRead},
 		{"read config current-context", "kubectl config current-context", core.ToolRequestTypeRead},
 		{"read config get-contexts", "kubectl config get-contexts", core.ToolRequestTypeRead},
@@ -194,13 +196,7 @@ func TestInferKubectlVerbType(t *testing.T) {
 		{"unknown verb falls through", "kubectl frobnicate pods", ""},
 		{"missing kubectl prefix falls through", "describe pods -n nudgebee", ""},
 		{"other shell command falls through", "rm -rf /tmp/work", ""},
-		{"read pipeline", "kubectl get pods | grep api", core.ToolRequestTypeRead},
-		{"read aggregation pipeline", "kubectl get pods -A --no-headers -o custom-columns=NAMESPACE:.metadata.namespace | sort | uniq -c", core.ToolRequestTypeRead},
-		{"pipeline with executable tail falls through", "kubectl get pods | xargs kubectl delete pod", ""},
-		{"pipeline with redirect falls through", "kubectl get pods | sort > pods.txt", ""},
-		{"pipeline with sort output file falls through", "kubectl get pods | sort -o pods.txt", ""},
-		{"pipeline with uniq output file falls through", "kubectl get pods | uniq input.txt output.txt", ""},
-		{"pipeline with compound tail falls through", "kubectl get pods | grep api && rm -f marker", ""},
+		{"pipeline falls through", "kubectl get pods | grep api", ""},
 		{"compound read then delete falls through", "kubectl get pods && kubectl delete pod api", ""},
 		{"redirect falls through", "kubectl get pods > pods.txt", ""},
 		{"command substitution falls through", "kubectl get pods -l \"app=$(cat selector)\"", ""},
@@ -366,6 +362,8 @@ func TestValidateKubectlCommandAccess(t *testing.T) {
 		`kubectl get pods >/dev/null; printf '\163ecrets' | xargs kubectl get`,
 		`kubectl get pods | cat /var/run/secrets/kubernetes.io/serviceaccount/token`,
 		`kubectl get pods | grep -e. /var/run/./secrets/kubernetes.io/serviceaccount/token`,
+		`kubectl cp local.txt api:/tmp/local.txt`,
+		`kubectl --context k8s-dev cp api:/tmp/result.txt result.txt`,
 	}
 	for _, command := range blocked {
 		require.Error(t, validateKubectlCommandAccess(command), command)
@@ -446,6 +444,8 @@ func TestValidateKubectlCommandAccess_SecretExclusion(t *testing.T) {
 		`kubectl exec api -- cat /var/run/secrets/kubernetes.io/serviceaccount/token`,
 		`kubectl exec api -- sh -c "cat /run/secrets/token"`,
 		`kubectl cp api:/var/run/secrets/token /tmp/token`,
+		`kubectl cp local.txt api:/tmp/local.txt`,
+		`kubectl --context k8s-dev cp api:/tmp/result.txt result.txt`,
 		`kubectl attach api -- cat /var/lib/kubelet/pods/uuid/volumes/kubernetes.io~secret/token`,
 		// Path obfuscations
 		`kubectl exec api -- cat /var/run/./secrets/token`,
@@ -500,6 +500,17 @@ func TestValidateKubectlRelayCommand(t *testing.T) {
 	}
 	for _, command := range allowed {
 		require.NoError(t, ValidateKubectlRelayCommand(command), command)
+	}
+}
+
+func TestKubectlCopyIsBlockedAtToolAndRelayBoundaries(t *testing.T) {
+	commands := []string{
+		`kubectl cp local.txt api:/tmp/local.txt`,
+		`kubectl --context k8s-dev cp api:/tmp/result.txt result.txt`,
+	}
+	for _, command := range commands {
+		require.ErrorContains(t, validateKubectlCommandAccess(command), "local paths resolve", command)
+		require.ErrorContains(t, ValidateKubectlRelayCommand(command), "local paths resolve", command)
 	}
 }
 

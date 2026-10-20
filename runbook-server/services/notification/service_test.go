@@ -125,3 +125,82 @@ func TestJoinChannel_DefaultsBindAccountFalseAndGeneratesSessionId(t *testing.T)
 	_, parseErr := uuid.Parse(sessionID)
 	assert.NoError(t, parseErr, "generated session_id should be a UUID")
 }
+
+func TestSendNotification_StampsAutomationEventAndAccount(t *testing.T) {
+	var capturedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/messages/send", r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"platform": "slack", "status": "sent", "message_ts": "1.2"}})
+	}))
+	defer server.Close()
+	withTestNotificationServerUrl(t, server.URL)
+
+	ctx := newTestRequestContext(t)
+	resp, err := SendNotification(ctx, SendImNotificationRequest{
+		Platform:  "slack",
+		Channel:   "C123",
+		AccountID: "acc-1",
+		Body:      "run complete",
+		EventType: EventTaskCompleted,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, "1.2", resp.MessageTs)
+	assert.Equal(t, SourceAutomation, capturedBody["source"])
+	assert.Equal(t, EventTaskCompleted, capturedBody["event_type"])
+	params, _ := capturedBody["parameters"].(map[string]any)
+	assert.Equal(t, "acc-1", params["account_id"])
+	assert.Equal(t, "run complete", params["message"])
+	assert.NotNil(t, capturedBody["channels"])
+	assert.Nil(t, capturedBody["thread"])
+}
+
+func TestSendNotification_ThreadedBodyKeepsEventAndAccount(t *testing.T) {
+	var capturedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"platform": "system", "status": "suppressed", "reason": "rule"}})
+	}))
+	defer server.Close()
+	withTestNotificationServerUrl(t, server.URL)
+
+	ctx := newTestRequestContext(t)
+	resp, err := SendNotification(ctx, SendImNotificationRequest{
+		Platform:  "slack",
+		Channel:   "C123",
+		ThreadId:  "1.1",
+		AccountID: "acc-1",
+		Body:      "step done",
+		EventType: EventTaskProgress,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, StatusSuppressed, resp.Status)
+	assert.Equal(t, SourceAutomation, capturedBody["source"])
+	assert.Equal(t, EventTaskProgress, capturedBody["event_type"])
+	params, _ := capturedBody["parameters"].(map[string]any)
+	assert.Equal(t, "acc-1", params["account_id"])
+	thread, _ := capturedBody["thread"].(map[string]any)
+	assert.Equal(t, "1.1", thread["message_ts"])
+	assert.Nil(t, capturedBody["channels"])
+}
+
+func TestSendNotification_RejectsUnknownEventType(t *testing.T) {
+	ctx := newTestRequestContext(t)
+	for _, eventType := range []string{"", "automation.something.else"} {
+		_, err := SendNotification(ctx, SendImNotificationRequest{
+			Platform:  "slack",
+			Channel:   "C123",
+			AccountID: "acc-1",
+			EventType: eventType,
+		})
+		assert.Error(t, err, eventType)
+	}
+}

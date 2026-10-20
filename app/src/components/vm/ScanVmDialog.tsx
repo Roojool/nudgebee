@@ -63,8 +63,9 @@ const ScanVmDialog = ({ open, accountId, vm, onClose }: ScanVmDialogProps) => {
       .scanVm({ accountId, datasourceId: selectedTarget, cloudResourceId: vm.id })
       .then(() => {
         // The RPC only acknowledges the start — the pull, parse and CVE match
-        // run detached server-side, so don't promise results here.
-        snackbar.success(`Scan started for ${vm.name || vm.resourse_id}. Results appear once it finishes.`);
+        // run detached server-side, so don't promise results here. The VM
+        // row itself shows "Scanning…" and then the outcome (see #38466).
+        snackbar.success(`Scan started for ${vm.name || vm.resourse_id}. Its row will show progress until the scan finishes.`);
         onClose(true);
       })
       .catch((error) => {

@@ -42,7 +42,7 @@ function InfoRow({ icon, label, children }: { icon: React.ReactNode; label: stri
     <Box sx={{ minWidth: 0 }}>
       <Box sx={HEADING_ROW_SX}>
         <Box sx={{ color: ds.gray[400], display: 'flex' }}>{icon}</Box>
-        <Typography variant='caption' sx={{ fontWeight: 600, color: 'text.primary' }}>
+        <Typography variant='caption' sx={{ fontWeight: ds.weight.semibold, color: 'text.primary' }}>
           {label}
         </Typography>
       </Box>

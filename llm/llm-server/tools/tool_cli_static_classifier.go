@@ -87,13 +87,13 @@ var (
 	helmRepoUpdates   = wordSet("update")
 	helmRepoDeletes   = wordSet("remove")
 
-	githubReadActions   = wordSet("checks", "diff", "download", "list", "status", "view")
-	githubCreateActions = wordSet("clone", "create", "fork")
+	githubReadActions   = wordSet("checks", "clone", "diff", "download", "list", "status", "view")
+	githubCreateActions = wordSet("create", "fork")
 	githubUpdateActions = wordSet("cancel", "close", "comment", "disable", "edit", "enable", "merge", "reopen", "rerun", "run", "set")
 	githubDeleteActions = wordSet("delete")
 
-	gitlabReadActions   = wordSet("list", "status", "trace", "view")
-	gitlabCreateActions = wordSet("clone", "create", "fork")
+	gitlabReadActions   = wordSet("clone", "list", "status", "trace", "view")
+	gitlabCreateActions = wordSet("create", "fork")
 	gitlabUpdateActions = wordSet("cancel", "close", "merge", "note", "reopen", "retry", "run", "set", "update")
 	gitlabDeleteActions = wordSet("delete")
 

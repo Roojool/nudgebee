@@ -18,9 +18,11 @@ import { useConversationManager } from '@hooks/useConversationManager';
 import { useConversationSuggestions } from '@hooks/useConversationSuggestions';
 import { useLLMInvestigationControl } from '@hooks/useLLMInvestigationControl';
 import { useTokenUsage } from '@hooks/useTokenUsage';
+import { useFollowLatest } from '@hooks/useFollowLatest';
 import { getUserSession, hasReadAccess, hasPermission } from '@lib/auth';
 import { applyFiltersOnRouter } from '@lib/router';
-import { Avatar, Box, CircularProgress, Divider, Typography } from '@mui/material';
+import { Avatar, Box, CircularProgress, Typography } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import { useRouter } from 'next/router';
 import PropTypes from 'prop-types';
 import { useEffect, useRef, useReducer, useMemo, useCallback, useState } from 'react';
@@ -31,6 +33,7 @@ import { isFailedCachedConversation } from '@api1/ask-nudgebee';
 import { isCompleteWorkflowDefinition } from './utils/isCompleteWorkflowDefinition';
 import { isConversationActivelyExecuting } from './utils/conversationStatus';
 import { readNubiConversationPointer, writeNubiConversationPointer, clearNubiConversationPointer } from './utils/nubiConversationPointer';
+import { isPendingCrossAccountOpen } from './utils/crossAccountOpen';
 import ConversationShimmer from './common/ConversationShimmer';
 import { ConversationTokenUsage } from './common/TokenUsageDisplay';
 import ConversationList from './ConversationListV2';
@@ -139,7 +142,6 @@ const KubernetesLLMResponseGenerator = ({
   // Scopes a new investigation turn to an event, so a triggered automation
   // gets tagged back to it (see useLLMInvestigationControl).
   eventId = '',
-  showBorder = false,
   apiMode = 'investigate', // 'investigate' | 'workflow'
   workflowId = '',
   workflowDefinition = null,
@@ -161,6 +163,9 @@ const KubernetesLLMResponseGenerator = ({
   const reportWipActivity = nubiGlobalChat?.reportWipActivity ?? NOOP;
 
   const previousAccountIdRef = useRef(accountId);
+  // Set when the chat list opens a conversation from another account; consumed by the
+  // account-switch effect so that navigation keeps its session instead of resetting.
+  const pendingCrossAccountOpenRef = useRef(null);
   // Separate refs for separate IDs
   const previousSessionIdRef = useRef(router.query.session_id);
   const previousConversationIdRef = useRef(router.query.conversation_id);
@@ -169,6 +174,7 @@ const KubernetesLLMResponseGenerator = ({
   const textareaRef = useRef(null);
   const bottomRef = useRef(null);
   const scrollContainerRef = useRef(null);
+  const followingLatestRef = useFollowLatest(scrollContainerRef);
   const processedSessionIds = useRef(new Set());
   const prevSessionConvIdRef = useRef({ sessionId, conversationId });
   const isAlertOpen = useRef(false);
@@ -553,7 +559,7 @@ const KubernetesLLMResponseGenerator = ({
   }, [conversationIdAtDb, conversationStatus, stopInvestigation, clearSuggestions]);
 
   const executeInvestigation = useCallback(
-    async (text, images, preserveDraftOnFailure = false) => {
+    async (text, images, preserveDraftOnFailure = false, pendingSubmission = false) => {
       if (!text) {
         return false;
       }
@@ -576,7 +582,7 @@ const KubernetesLLMResponseGenerator = ({
 
       // Add optimistic question message immediately so user sees their question right away.
       const optimisticMessageId = `optimistic-${Date.now()}`;
-      if (apiMode !== 'workflow') {
+      if (apiMode !== 'workflow' && !pendingSubmission) {
         const optimisticQuestionMessage = {
           id: optimisticMessageId,
           text: processedText,
@@ -610,6 +616,8 @@ const KubernetesLLMResponseGenerator = ({
         popup,
         router,
         onSuccess: (llmSessionId) => {
+          // Conversation-id-only routes retain that identity, including pending follow-ups.
+          if (!llmSessionId) return;
           if (!popup) {
             // Standardize on session_id for new chats, clear conversation_id to avoid ambiguity
             applyFiltersOnRouter(router, { session_id: llmSessionId, conversation_id: null }, { shallow: true });
@@ -618,13 +626,13 @@ const KubernetesLLMResponseGenerator = ({
           }
           setSelectedSessionId(llmSessionId);
           setSelectedConversationId(''); // Reset conversationId as we have a fresh session
-          setGenerateQuestionText('');
+          // A late response must not overwrite the next draft.
           setConversationStatus('IN_PROGRESS');
         },
         onFailure: () => {
           setConversationStatus('FAILED');
           setMessages((previous) => previous.filter((message) => message.id !== optimisticMessageId));
-          if (preserveDraftOnFailure) setGenerateQuestionText(text);
+          if (preserveDraftOnFailure && !pendingSubmission) setGenerateQuestionText(text);
           if (!popup && !preserveDraftOnFailure) {
             applyFiltersOnRouter(router, { session_id: '', conversation_id: '' });
           }
@@ -717,13 +725,14 @@ const KubernetesLLMResponseGenerator = ({
     [editQueuedMessage]
   );
 
-  const canQueueMessages = apiMode === 'investigate' && queueSupport.enabled;
+  const canQueueMessages = apiMode === 'investigate' && queueSupport.enabled && Boolean(conversationIdAtDb);
 
   const optimisticQueue = useOptimisticQueue(queueScope, maxQueuedMessages, queuedMessages.length);
   const displayedQueue = [...queuedMessages, ...optimisticQueue.entries];
 
   const isMaxQueueReached =
-    isServerMaxQueueReached || queuedMessages.length + optimisticQueue.entries.filter((entry) => entry.saving).length >= maxQueuedMessages;
+    isServerMaxQueueReached ||
+    queuedMessages.length + optimisticQueue.entries.filter((entry) => entry.saving && !entry.isForeground).length >= maxQueuedMessages;
 
   const handleGenerateInvestigation = useCallback(
     async (text, images) => {
@@ -745,10 +754,21 @@ const KubernetesLLMResponseGenerator = ({
         return accepted;
       }
 
+      // Existing conversations can accept follow-ups while this HTTP response is
+      // outstanding. Keep the submitted draft in the pending list, not the composer.
+      // A new conversation still needs its server identity before it can queue.
+      if (canQueueMessages) {
+        if (accountId && !hasReadAccess(accountId)) {
+          snackbar.error('You do not have permission to perform this action');
+          return false;
+        }
+        return optimisticQueue.submit(text, images, () => executeInvestigation(text, images, true, true), true);
+      }
       return await executeInvestigation(text, images, true);
     },
     [
       optimisticQueue.submit,
+      accountId,
       isConversationInProgress,
       isMaxQueueReached,
       canQueueMessages,
@@ -763,19 +783,30 @@ const KubernetesLLMResponseGenerator = ({
   useEffect(() => {
     if (previousAccountIdRef.current !== accountId) {
       previousAccountIdRef.current = accountId; // Handle Account Switching
+      // Consumed on every switch, so a pending open that never landed can't
+      // suppress a later manual switch.
+      const pendingOpen = pendingCrossAccountOpenRef.current;
+      pendingCrossAccountOpenRef.current = null;
 
-      // Full Reset
-      uiDispatch({ type: 'NEW_CHAT' });
-      resetTokenMetrics();
-      clearSuggestions();
-      clearQueuedMessages();
-      resetInvestigationState();
-      previousConversationStatusRef.current = '';
+      if (isPendingCrossAccountOpen(pendingOpen, accountId, selectedSessionId)) {
+        // The list opened this chat on its own account: handleSelectConversation already
+        // cleared the previous chat's state, so only the per-account state is left to
+        // reset before falling through to load the conversation.
+        resetInvestigationState();
+      } else {
+        // Full Reset
+        uiDispatch({ type: 'NEW_CHAT' });
+        resetTokenMetrics();
+        clearSuggestions();
+        clearQueuedMessages();
+        resetInvestigationState();
+        previousConversationStatusRef.current = '';
 
-      if (!popup) {
-        applyFiltersOnRouter(router, { session_id: '', conversation_id: '' });
+        if (!popup) {
+          applyFiltersOnRouter(router, { session_id: '', conversation_id: '' });
+        }
+        return;
       }
-      return;
     }
 
     // Update Ref for Polling safety (Prefer session ID if available, else conversation ID)
@@ -964,7 +995,7 @@ const KubernetesLLMResponseGenerator = ({
   useEffect(() => {
     if (messages.length > 0) {
       const timeoutId = setTimeout(() => {
-        if (messages[messages.length - 1]?.type === 'response') {
+        if (messages[messages.length - 1]?.type === 'response' && followingLatestRef.current) {
           bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
         }
       }, 1000);
@@ -1300,13 +1331,23 @@ const KubernetesLLMResponseGenerator = ({
   );
 
   const handleSelectConversation = useCallback(
-    (index) => {
+    (index, _userName, conversationAccountId) => {
       if (index !== selectedSessionId) {
         uiDispatch({ type: 'SELECT_CONVERSATION', sessionId: index });
         setConversationStatus('');
         setCurrentlyProcessingQuestion(null);
         if (!popup) {
-          applyFiltersOnRouter(router, { session_id: index, conversation_id: null });
+          // The list spans accounts: a chat from another account opens on that account,
+          // so its agents, tools and follow-up questions run where it started.
+          const opensOtherAccount = Boolean(conversationAccountId) && conversationAccountId !== accountId;
+          if (opensOtherAccount) {
+            pendingCrossAccountOpenRef.current = { accountId: conversationAccountId, sessionId: index };
+          }
+          applyFiltersOnRouter(router, {
+            session_id: index,
+            conversation_id: null,
+            ...(opensOtherAccount && { accountId: conversationAccountId }),
+          });
         } else if (persistLastSession) {
           writeNubiConversationPointer(accountId, index);
         }
@@ -1381,11 +1422,43 @@ const KubernetesLLMResponseGenerator = ({
       noLabel
       onClusterDataLoaded={handleClusterData}
       clusterData={selectedCluster}
-      minWidth={ds.space.mul(0, 112)}
+      minWidth={ds.space.mul(0, 90)}
       groupByCloudProvider
       showPadding={true}
       showSmallTopPadding={false}
+      openDirection='up'
+      // A chat stays on the account it started on; switching happens from a new chat.
+      isDisabled={isChatScreen}
     />
+  );
+
+  // The account a chat runs on is chosen where the question is typed, next to the model.
+  const composerAccountChip = popup ? undefined : (
+    <Tooltip
+      title={isChatScreen ? 'This chat stays on its account. Start a new chat to ask about another account.' : 'Account this chat runs on'}
+      placement='top'
+    >
+      <Box
+        data-testid='nubi-composer-account'
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          flexShrink: 0,
+          border: `0.5px solid ${ds.gray[300]}`,
+          borderRadius: ds.radius.sm,
+          backgroundColor: isChatScreen ? ds.background[300] : ds.background[100],
+          '&:hover': { borderColor: isChatScreen ? ds.gray[300] : ds.blue[500] },
+          '.MuiAutocomplete-root': { minHeight: 'auto !important' },
+          '& .MuiFormControl-root': { margin: '0 !important' },
+          '& .MuiOutlinedInput-notchedOutline': { border: 'none !important' },
+          '& .MuiOutlinedInput-root': { padding: `0 ${ds.space.mul(1, 7)} 0 0 !important` },
+          '& .MuiAutocomplete-input': { padding: `${ds.space[1]} 0 !important`, fontSize: 'var(--ds-text-caption) !important' },
+          '& li': { paddingLeft: '0 !important' },
+        }}
+      >
+        {clusterDropdownContent}
+      </Box>
+    </Tooltip>
   );
 
   const content = (
@@ -1416,7 +1489,6 @@ const KubernetesLLMResponseGenerator = ({
           />
         ) : (
           <ConversationList
-            accountId={accountId}
             onSelectConversation={handleSelectConversation}
             selectedId={selectedSessionId || selectedConversationId}
             isConversationListVisible={isConversationListVisible}
@@ -1473,36 +1545,6 @@ const KubernetesLLMResponseGenerator = ({
                     {assistantName}
                   </Typography>
                 </Box>
-              </Box>
-              <Box
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  border: `1px solid var(--ds-gray-300)`,
-                  borderRadius: ds.radius.sm,
-                  position: 'relative',
-                  '&:hover': {
-                    borderColor: 'var(--ds-blue-500)',
-                  },
-                  '.MuiAutocomplete-root': {
-                    minHeight: `${ds.space[6]} !important`,
-                  },
-                  '& .MuiFormControl-root': {
-                    margin: '0 !important',
-                    fontSize: 'var(--ds-text-title) !important',
-                  },
-                  '& .MuiOutlinedInput-notchedOutline': {
-                    border: showBorder ? 'inherit' : 'none !important',
-                  },
-                  '& .MuiInputBase-sizeSmall': {
-                    padding: `${ds.space[1]} ${ds.space.mul(1, 10)} ${ds.space.mul(0, 3)} 0 !important`,
-                  },
-                  '& li': {
-                    paddingLeft: '0 !important',
-                  },
-                }}
-              >
-                {clusterDropdownContent}
               </Box>
             </Box>
           )}
@@ -1680,7 +1722,7 @@ const KubernetesLLMResponseGenerator = ({
                     />
                   </Box>
                 </Box>
-                <Divider orientation='vertical' variant='middle' flexItem sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5) }} />
+                <Divider orientation='vertical' sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5), my: ds.space[2] }} />
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
                   {selectedConversation?.id && (
                     <Button
@@ -1715,40 +1757,6 @@ const KubernetesLLMResponseGenerator = ({
                     icon={<SafeIcon src={ShareIconBlue} height={18} width={18} alt={'Share'} />}
                     onClick={handleShare}
                   />
-                </Box>
-                <Divider orientation='vertical' variant='middle' flexItem sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5) }} />
-                <Box
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    border: `1px solid var(--ds-gray-300)`,
-                    borderRadius: ds.radius.sm,
-                    position: 'relative',
-                    '&:hover': {
-                      borderColor: 'var(--ds-blue-500)',
-                    },
-                    '.MuiAutocomplete-root': {
-                      minHeight: `${ds.space[6]} !important`,
-                    },
-                    '& .MuiAutocomplete-input': {
-                      paddingTop: '0 !important',
-                    },
-                    '& .MuiFormControl-root': {
-                      margin: '0 !important',
-                      fontSize: 'var(--ds-text-title) !important',
-                    },
-                    '& .MuiOutlinedInput-notchedOutline': {
-                      border: showBorder ? 'inherit' : 'none !important',
-                    },
-                    '& .MuiOutlinedInput-root': {
-                      padding: `${ds.space[1]} ${ds.space.mul(1, 10)} ${ds.space[1]} 0 !important`,
-                    },
-                    '& li': {
-                      paddingLeft: '0 !important',
-                    },
-                  }}
-                >
-                  {clusterDropdownContent}
                 </Box>
               </Box>
             </Box>
@@ -1952,6 +1960,7 @@ const KubernetesLLMResponseGenerator = ({
                           onDraftSubmitted={(id) => setQueueImageDraft((current) => (current?.id === id ? undefined : current))}
                           isFollowUp={popup}
                           submitOnModEnter
+                          leadingControls={composerAccountChip}
                           buttonProperties={{
                             show: true,
                             enable: !isConversationLoading && (!isConversationInProgress || (canQueueMessages && !isMaxQueueReached)),
@@ -2064,6 +2073,7 @@ const KubernetesLLMResponseGenerator = ({
             <MessageStream
               messages={displayMessages}
               isProcessing={isConversationInProgress}
+              isBusy={isSystemBusy}
               collapsedObj={collapsedObj}
               setCollapsedObj={setCollapsedObj}
               showFullText={showFullText}
@@ -2365,6 +2375,7 @@ const KubernetesLLMResponseGenerator = ({
                     popupInitial={popup && !!queryPrefix && messages.length === 0}
                     submitOnModEnter
                     isFollowUp={true}
+                    leadingControls={composerAccountChip}
                     // Show Stop only when there's something genuinely actionable to stop:
                     // either the user has an in-flight question they initiated this session
                     // (currentlyProcessingQuestion), or the server-side conversation is
@@ -2439,7 +2450,6 @@ KubernetesLLMResponseGenerator.propTypes = {
   queryPrefix: PropTypes.string,
   querySuffix: PropTypes.string,
   popup: PropTypes.bool,
-  showBorder: PropTypes.bool,
   apiMode: PropTypes.oneOf(['investigate', 'workflow']),
   workflowId: PropTypes.string,
   workflowDefinition: PropTypes.object,

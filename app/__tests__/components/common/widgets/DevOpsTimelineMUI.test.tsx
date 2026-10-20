@@ -16,7 +16,6 @@ jest.mock('next/image', () => ({
   default: (props: React.ImgHTMLAttributes<HTMLImageElement>) => React.createElement('img', { ...props, alt: props.alt }),
 }));
 
-jest.mock('@ui/WidgetCard', () => ({ children }: { children: React.ReactNode }) => <div data-testid='widget-card'>{children}</div>);
 jest.mock('@shared/Loader', () => () => <div data-testid='loader'>Loading...</div>);
 jest.mock('@shared/buttons/CopyButton', () => () => <button data-testid='copy-button' />);
 jest.mock('@shared/icons/SafeIcon', () => () => <span data-testid='safe-icon' />);

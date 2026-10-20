@@ -229,12 +229,17 @@ func prepareCombinedHighlightQuery(tenant, startDate, endDate string, accountIds
 	}
 }
 
+// optimizationRuleNames are the cost-optimization rules the report covers. Each
+// entry must be the rule_name its producer actually writes: a name that matches
+// no row drops that rule's findings from both the summary and the
+// opportunity-lost total, with nothing to show that it happened.
+var optimizationRuleNames = []string{"pod_right_sizing", "unused_pvc", "pv_rightsize", "replica_right_sizing", "abandoned_resource", "eks_cluster_upgrade"}
+
 func prepareRecommendationQuery(tenant string, accountIds []string) query.QueryRequest {
 	whereClauses := []query.QueryWhereClause{
 		{Binary: query.BinaryWhereClause{"tenant_id": map[query.BinaryWhereClauseType]any{query.Eq: tenant}}},
 		{Binary: query.BinaryWhereClause{"status": map[query.BinaryWhereClauseType]any{query.In: []string{"Open", "InProgress"}}}},
-		{Binary: query.BinaryWhereClause{"rule_name": map[query.BinaryWhereClauseType]any{query.In: []string{"pod_right_sizing", "unused_pvc",
-			"pv_rightsize", "replica-rightsizing", "abandoned-resources", "eks_cluster_upgrade"}}}},
+		{Binary: query.BinaryWhereClause{"rule_name": map[query.BinaryWhereClauseType]any{query.In: optimizationRuleNames}}},
 	}
 
 	if len(accountIds) > 0 {
@@ -258,8 +263,6 @@ func prepareRecommendationQuery(tenant string, accountIds []string) query.QueryR
 		GroupBy: []string{"category", "rule_name"},
 	}
 }
-
-var optimizationRuleNames = []string{"pod_right_sizing", "unused_pvc", "pv_rightsize", "replica-rightsizing", "abandoned-resources", "eks_cluster_upgrade"}
 
 // calculateOpportunityLost calculates the total opportunity lost by not applying recommendations
 // over the last 30 days. Formula: sum(estimated_savings * min(days_open, 30) / 30)
@@ -1059,9 +1062,11 @@ func ProcessHourlyEventsBatchNotification(ctx *security.RequestContext) error {
 	}
 
 	const rulesQuery = `
-		SELECT id, name, account_id, cluster, frequency, severity, tenant_id
-		FROM notification_rules 
-		WHERE delivery_mode = 'batch' AND is_active = true AND is_suppressed = false
+		SELECT nr.id, nr.name, nra.account_id, ca.account_name, nr.frequency, nr.severity, nr.tenant_id
+		FROM notification_rules nr
+		JOIN notification_rule_accounts nra ON nra.rule_id = nr.id
+		JOIN cloud_accounts ca ON ca.id = nra.account_id
+		WHERE nr.delivery_mode = 'batch' AND nr.is_active = true AND nr.is_suppressed = false
 	`
 	rulesRows, err := dbManager.Query(rulesQuery)
 	defer func() {

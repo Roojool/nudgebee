@@ -14,9 +14,9 @@ type Limiter struct {
 	now    func() time.Time // injectable for tests
 }
 
-// LimitSource returns the limits applicable to a scope (tenant + optional user).
+// LimitSource returns the limits applicable to a scope (tenant + optional user, key, model).
 type LimitSource interface {
-	LimitsFor(tenant, user string) []Limit
+	LimitsFor(tenant, user, apiKey, model string) []Limit
 }
 
 // New builds a Limiter. A nil store disables enforcement (allow-all).
@@ -67,11 +67,16 @@ func (l *Limiter) Check(ctx context.Context, s Scope) *Exceeded {
 		return nil
 	}
 	now := l.now()
-	for _, lim := range l.limits.LimitsFor(s.TenantID, s.UserID) {
+	for _, lim := range l.limits.LimitsFor(s.TenantID, s.UserID, s.APIKeyID, s.Model) {
 		if !lim.Enabled {
 			continue
 		}
-		k := key(lim.TenantID, lim.UserID, lim.Metric, lim.Period, now)
+		// A model-scoped row only applies to that model. Guarding here (not only in the
+		// store) keeps the rule in one place and testable without the EE index.
+		if lim.Model != "" && lim.Model != s.Model {
+			continue
+		}
+		k := key(lim.TenantID, lim.UserID, lim.APIKeyID, lim.Model, lim.Metric, lim.Period, now)
 		switch lim.Metric {
 		case MetricRequests:
 			allowed, _, err := l.store.CheckAndIncr(ctx, k, 1, lim.intCap(), ttl(lim.Period))
@@ -104,8 +109,11 @@ func (l *Limiter) Reconcile(ctx context.Context, s Scope, tokens int, costUSD fl
 		return
 	}
 	now := l.now()
-	for _, lim := range l.limits.LimitsFor(s.TenantID, s.UserID) {
+	for _, lim := range l.limits.LimitsFor(s.TenantID, s.UserID, s.APIKeyID, s.Model) {
 		if !lim.Enabled {
+			continue
+		}
+		if lim.Model != "" && lim.Model != s.Model {
 			continue
 		}
 		var delta int64
@@ -120,7 +128,7 @@ func (l *Limiter) Reconcile(ctx context.Context, s Scope, tokens int, costUSD fl
 		if delta <= 0 {
 			continue
 		}
-		k := key(lim.TenantID, lim.UserID, lim.Metric, lim.Period, now)
+		k := key(lim.TenantID, lim.UserID, lim.APIKeyID, lim.Model, lim.Metric, lim.Period, now)
 		if err := l.store.Add(ctx, k, delta, ttl(lim.Period)); err != nil {
 			slog.Error("ratelimit: reconcile failed", "error", err, "key", k)
 		}
@@ -129,7 +137,12 @@ func (l *Limiter) Reconcile(ctx context.Context, s Scope, tokens int, costUSD fl
 
 func exceeded(l Limit) *Exceeded {
 	scope := "tenant"
-	if l.UserID != "" {
+	switch {
+	case l.APIKeyID != "" && l.Model != "":
+		scope = "key+model"
+	case l.APIKeyID != "":
+		scope = "key"
+	case l.UserID != "":
 		scope = "user"
 	}
 	return &Exceeded{Metric: l.Metric, Period: l.Period, Limit: l.Value, Scope: scope}

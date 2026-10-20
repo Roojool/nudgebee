@@ -120,13 +120,130 @@ func TestBuildActionEvidenceInsightSummarisesMetricSeries(t *testing.T) {
 	}
 }
 
+// metricMathAlarmDetail is a math alarm whose real value is an expression
+// (Remaining = sent - current - deleted) over three raw inputs that were
+// never themselves compared to the threshold — only the returnData:true
+// entry (e1, labeled "Remaining") was.
+const metricMathAlarmDetail = `{
+  "alarmName": "nb-demo-remaining",
+  "configuration": {
+    "metrics": [
+      {"id": "m1", "metricStat": {"stat": "Sum", "period": 60, "metric": {"namespace": "AWS/Custom", "name": "sent"}}, "returnData": false},
+      {"id": "m2", "metricStat": {"stat": "Sum", "period": 60, "metric": {"namespace": "AWS/Custom", "name": "current"}}, "returnData": false},
+      {"id": "m3", "metricStat": {"stat": "Sum", "period": 60, "metric": {"namespace": "AWS/Custom", "name": "deleted"}}, "returnData": false},
+      {"id": "e1", "expression": "m1 - m2 - m3", "label": "Remaining", "returnData": true}
+    ]
+  },
+  "state": {
+    "reason": "Threshold Crossed",
+    "reasonData": "{\"version\":\"1.0\",\"period\":60,\"threshold\":50.0}",
+    "value": "ALARM"
+  }
+}`
+
+// TestMetricSeriesInsightScopesThresholdToExpressionSeries pins the fix for a
+// metric-math alarm's evidence: with four returned series (three raw inputs
+// plus the expression's computed result), the threshold comparison line must
+// only follow "Remaining" — the series CloudWatch actually evaluated — not
+// the three unrelated raw inputs, which were never compared to it.
+func TestMetricSeriesInsightScopesThresholdToExpressionSeries(t *testing.T) {
+	base := time.Date(2026, 9, 16, 4, 30, 0, 0, time.UTC)
+	mkItem := func(name string, values ...float64) providers.MetricItem {
+		return providers.MetricItem{Name: name, Values: values, Timestamps: []time.Time{base, base.Add(time.Minute)}}
+	}
+	result := providers.QueryMetricsResponse{
+		Items: []providers.MetricItem{
+			mkItem("sent", 500, 480),
+			mkItem("current", 300, 290),
+			mkItem("deleted", 100, 90),
+			mkItem("Remaining", 100, 100),
+		},
+		StartDate: base.Add(-time.Hour),
+		EndDate:   base,
+	}
+
+	lines := buildActionEvidenceInsight(
+		EventBridgeEvent{Detail: []byte(metricMathAlarmDetail)},
+		ActionDefinition{Name: "get_cloudwatch_metric_data_on_alarm", Type: "aws_get_metric"},
+		result,
+	)
+
+	thresholdLines := 0
+	for i, line := range lines {
+		if !strings.Contains(line, "Alarm threshold") {
+			continue
+		}
+		thresholdLines++
+		if !strings.HasPrefix(lines[i-1], "Remaining ") {
+			t.Errorf("threshold line %q follows %q, want it to follow the Remaining series", line, lines[i-1])
+		}
+	}
+	if thresholdLines != 1 {
+		t.Fatalf("got %d threshold lines, want exactly 1 (attached only to Remaining): %#v", thresholdLines, lines)
+	}
+}
+
+// labeledSingleMetricAlarmDetail is a plain single-metric alarm whose
+// returnData:true entry carries BOTH a metricStat and a custom label — a
+// case AWS allows (Label isn't exclusive to expressions). Pins the fix for a
+// mismatch where extractAlarmValueName checked metricStat.metric.name before
+// label, while buildMetricDataQueriesFromMetricQueries names the fetched
+// series after label first — so the threshold line failed to match the
+// returned item.Name for any alarm like this one.
+const labeledSingleMetricAlarmDetail = `{
+  "alarmName": "nb-demo-labeled",
+  "configuration": {
+    "metrics": [
+      {"id": "m1", "metricStat": {"stat": "Average", "period": 60, "metric": {"namespace": "AWS/EC2", "name": "CPUUtilization"}}, "label": "Order Host CPU", "returnData": true}
+    ]
+  },
+  "state": {
+    "reason": "Threshold Crossed",
+    "reasonData": "{\"version\":\"1.0\",\"period\":60,\"threshold\":40.0}",
+    "value": "ALARM"
+  }
+}`
+
+// TestMetricSeriesInsightMatchesLabeledSingleMetricSeries pins the
+// extractAlarmValueName/buildMetricDataQueriesFromMetricQueries precedence
+// fix: the fetched series is named after the alarm's custom label (matching
+// what the query-builder does), so the threshold line must attach to that
+// same label, not the raw metric name underneath it.
+func TestMetricSeriesInsightMatchesLabeledSingleMetricSeries(t *testing.T) {
+	base := time.Date(2026, 9, 16, 4, 30, 0, 0, time.UTC)
+	result := providers.QueryMetricsResponse{
+		Items: []providers.MetricItem{
+			{Name: "Order Host CPU", Values: []float64{20, 45}, Timestamps: []time.Time{base, base.Add(time.Minute)}},
+		},
+		StartDate: base.Add(-time.Hour),
+		EndDate:   base,
+	}
+
+	lines := buildActionEvidenceInsight(
+		EventBridgeEvent{Detail: []byte(labeledSingleMetricAlarmDetail)},
+		ActionDefinition{Name: "get_cloudwatch_metric_data_on_alarm", Type: "aws_get_metric"},
+		result,
+	)
+
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "Alarm threshold") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no threshold line found — extractAlarmValueName likely returned %q (the raw metric name) instead of the label, so it never matched item.Name %q: %#v",
+			"CPUUtilization", "Order Host CPU", lines)
+	}
+}
+
 func TestMetricSeriesInsightEmptySeries(t *testing.T) {
 	result := providers.QueryMetricsResponse{
 		Items:     []providers.MetricItem{{Name: "CPUUtilization", Statistics: "Average"}},
 		StartDate: time.Date(2026, 9, 7, 5, 15, 2, 0, time.UTC),
 		EndDate:   time.Date(2026, 9, 7, 6, 20, 2, 0, time.UTC),
 	}
-	lines := metricSeriesInsight(result, alarmEvaluation{})
+	lines := metricSeriesInsight(result, alarmEvaluation{}, "")
 	if len(lines) != 1 || !strings.Contains(lines[0], "no datapoints") {
 		t.Errorf("lines = %#v, want a single no-datapoints line", lines)
 	}
@@ -194,7 +311,7 @@ func TestAlarmActionNarrowsPeriodToAlarmEvaluation(t *testing.T) {
 		},
 	}
 
-	if _, err := processor.executeAction(pCtx, providers.Account{}, ebEvent, actionDef, processor.prepareTemplateData(ebEvent)); err != nil {
+	if _, err := processor.executeAction(pCtx, providers.Account{}, ebEvent, actionDef, processor.prepareTemplateData(pCtx, ebEvent, providers.Account{})); err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
 	if api.got.Step != 60*time.Second {
@@ -233,7 +350,7 @@ func TestAlarmActionKeepsRulePeriodWhenAlarmIsCoarser(t *testing.T) {
 		},
 	}
 
-	if _, err := processor.executeAction(pCtx, providers.Account{}, ebEvent, actionDef, processor.prepareTemplateData(ebEvent)); err != nil {
+	if _, err := processor.executeAction(pCtx, providers.Account{}, ebEvent, actionDef, processor.prepareTemplateData(pCtx, ebEvent, providers.Account{})); err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
 	if api.got.Step != 60*time.Second {

@@ -30,11 +30,7 @@ func (t *VerticalRightsizeTask) GetDisplayName() string {
 }
 
 func (t *VerticalRightsizeTask) Execute(taskCtx types.TaskContext, params map[string]any) (any, error) {
-	taskCtx.GetLogger().Debug("Executing VerticalRightsizeTask", "params", params)
-
-	if paramsStr, err := common.MarshalJson(params); err == nil {
-		taskCtx.GetLogger().Info("params", "params", paramsStr)
-	}
+	taskCtx.GetLogger().Debug("Executing VerticalRightsizeTask")
 
 	// 1. Extract Parameters
 	accountId := taskCtx.GetAccountID()
@@ -863,10 +859,11 @@ func (t *VerticalRightsizeTask) OutputSchema() *types.Schema {
 
 func getWorkflowBaseLink(taskCtx types.TaskContext) string {
 	// Isolated "Run Task" executions have no real workflow run, so the id and
-	// run id are empty. Return "" rather than a malformed /workflow/?... link;
+	// run id are empty. Return "" rather than a malformed /automation/?... link;
 	// callers (e.g. pv_rightsize, common_actions) already treat "" as "no link".
-	if taskCtx.GetWorkflowID() == "" {
+	baseURL := strings.TrimRight(config.Config.BaseUrl, "/")
+	if taskCtx.GetWorkflowID() == "" || baseURL == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s/workflow/%s?accountId=%s&executionId=%s", config.Config.BaseUrl, taskCtx.GetWorkflowID(), taskCtx.GetAccountID(), taskCtx.GetWorkflowRunID())
+	return fmt.Sprintf("%s/automation/%s?accountId=%s&executionId=%s", baseURL, taskCtx.GetWorkflowID(), taskCtx.GetAccountID(), taskCtx.GetWorkflowRunID())
 }

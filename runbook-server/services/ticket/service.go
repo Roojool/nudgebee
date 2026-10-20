@@ -555,6 +555,8 @@ type UpdateTicketRequest struct {
 	AccountId     string   `json:"account_id"`
 	Status        string   `json:"status"`
 	Severity      string   `json:"severity"`
+	Impact        string   `json:"impact"`
+	Urgency       string   `json:"urgency"`
 	Assignee      string   `json:"assignee"`
 	Description   string   `json:"description"`
 	Labels        []string `json:"labels"`
@@ -581,6 +583,12 @@ func UpdateTicket(ctx *security.RequestContext, request UpdateTicketRequest) (Up
 	}
 	if request.Severity != "" {
 		additionalFields["severity"] = request.Severity
+	}
+	if request.Impact != "" {
+		additionalFields["impact"] = request.Impact
+	}
+	if request.Urgency != "" {
+		additionalFields["urgency"] = request.Urgency
 	}
 	if request.Assignee != "" {
 		additionalFields["assignee"] = request.Assignee

@@ -958,8 +958,9 @@ func ProcessOpenPRFollowup(ctx *security.RequestContext, prURL string) error {
 		return fmt.Errorf("failed to resurrect stale pr_followup for %s: %w", prURL, err)
 	}
 
-	// Webhook entry: debounce a burst of events on the same PR into one followup.
-	return dispatchPRFollowup(ctx, dbms, prURL, candidates, maxRedispatchChain, false, "webhook")
+	// Webhook entry: do not apply debounce cooldown to webhook events;
+	// comment idempotency is handled via addressed_comments in pr_followup.
+	return dispatchPRFollowup(ctx, dbms, prURL, candidates, maxRedispatchChain, true, "webhook")
 }
 
 // resurrectStalePRFollowupByURL returns a cron-retired ('stale') pr_followup

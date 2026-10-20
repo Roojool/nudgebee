@@ -106,6 +106,11 @@ func SetupRouter(cfg *config.Config, tracer *trace.Tracer, meter *metric.Meter, 
 	// there looking healthy.
 	healthTracker := health.NewTracker(connMgr)
 
+	// Tells llm-server replicas to drop their integration caches for an
+	// account after the relay registers agent datasources or changes their
+	// labels. No-op when the exchange is not configured.
+	cacheInvalidator := mq.NewLLMCacheInvalidator(connMgr, cfg.RabbitMQ.LLMCacheInvalidationExchange, logger)
+
 	// 3) Public health check
 	r.GET("/status", handlers.Status)
 	r.GET("/healthz/live", handlers.Liveness(healthTracker, cfg.Health.ConsumeFailureRestartAfter, logger))
@@ -113,7 +118,7 @@ func SetupRouter(cfg *config.Config, tracer *trace.Tracer, meter *metric.Meter, 
 	// 4) Agent registration (WebSocket), protected by Basic‐auth on agent keys
 	r.GET("/register",
 		middleware.AgentAuthMiddleware(store),
-		handlers.RegisterHandler(store, connMgr, topo, cfg, cfg.RabbitMQ.ExchangeName, signer, rpcClient, healthTracker, tracer, meter, logger),
+		handlers.RegisterHandler(store, connMgr, topo, cfg, cfg.RabbitMQ.ExchangeName, signer, rpcClient, healthTracker, cacheInvalidator, tracer, meter, logger),
 	)
 
 	// 5) Interactive shell over WS, protected by client secret
@@ -125,7 +130,7 @@ func SetupRouter(cfg *config.Config, tracer *trace.Tracer, meter *metric.Meter, 
 	// 6) Action request endpoint, protected by client secret
 	r.POST("/request",
 		middleware.ClientAuthMiddleware(cfg.Security.SecretKey),
-		handlers.NewRequestHandler(store, rpcClient, topo, cfg, signer, tracer, meter, logger),
+		handlers.NewRequestHandler(store, rpcClient, topo, topo, cfg, signer, tracer, meter, logger),
 	)
 
 	// 7) Grafana proxy, protected by client secret

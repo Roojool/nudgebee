@@ -141,6 +141,20 @@ func TestGetRevertRecommendationRequest_Rejects(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no recorded configuration change")
 	})
+	// An OOM alert with five correlated ConfigMap edits attached: with no change selected, the
+	// paths of every edit were merged and written onto the workload the alert is about.
+	t.Run("several correlated changes and none selected", func(t *testing.T) {
+		cm := func(ts string) map[string]any {
+			return map[string]any{"type": "diff", "data": map[string]any{
+				"resource_name":  "configmap/shop/rulefiles-0.yaml",
+				"updated_values": []any{map[string]any{"path": "data.rules", "old": ts, "new": "x"}},
+			}}
+		}
+		several := models.NewJsonArray([]any{cm("06:28"), cm("06:26")})
+		_, err := getRevertRecommendationRequest(deploymentResource, models.Event{Id: "evt-1", Evidences: &several}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "select the change to revert")
+	})
 }
 
 func TestExtractRevertPaths_SkipsMalformedEntries(t *testing.T) {
@@ -277,4 +291,92 @@ func TestHasManifestPayload(t *testing.T) {
 		"name": "services-server", "namespace": "shop", "kind": "Deployment",
 		"revert_paths": []any{}, "deployment": map[string]any{},
 	}))
+}
+
+// Recorded paths address list items by position, and the agent writes a revert at that position.
+// A later change conflicts when it touched the same field, a parent or child of it, or added or
+// removed an item at or before its position in the same list — then the position names a
+// different item, and the revert would overwrite the wrong entry.
+func TestLaterChangeConflict(t *testing.T) {
+	change := func(id string, values ...map[string]any) models.Event {
+		updated := make([]any, 0, len(values))
+		for _, v := range values {
+			updated = append(updated, v)
+		}
+		e := revertEvent(updated)
+		e.Id = id
+		return e
+	}
+	uv := func(path string, old, new any) map[string]any {
+		return map[string]any{"path": path, "old": old, "new": new}
+	}
+	envTwo := "spec.template.spec.containers[0].env[2]"
+	target := map[string]bool{envTwo: true}
+	chosen := change("chosen", uv(envTwo, nil, map[string]any{"name": "LLM_SERVER_URL", "value": "http://llm"}))
+
+	cases := []struct {
+		name     string
+		later    models.Event
+		conflict bool
+	}{
+		{"unrelated field", change("l", uv("spec.template.spec.containers[0].image", "v1", "v2")), false},
+		{"same path, new value", change("l", uv(envTwo, map[string]any{"name": "LLM_SERVER_URL"}, map[string]any{"name": "OTHER"})), true},
+		{"same change recorded twice", change("l", uv(envTwo, nil, map[string]any{"name": "LLM_SERVER_URL", "value": "http://llm"})), false},
+		{"child of the path", change("l", uv(envTwo+".value", "http://llm", "http://llm-2")), true},
+		{"parent of the path", change("l", uv("spec.template.spec.containers[0].env", []any{}, []any{map[string]any{"name": "A"}})), true},
+		{"item removed before it in the same list", change("l", uv("spec.template.spec.containers[0].env[1]", map[string]any{"name": "A"}, nil)), true},
+		{"item added at its position", change("l", uv("spec.template.spec.containers[0].env[2]", nil, map[string]any{"name": "B"})), true},
+		{"item added after it", change("l", uv("spec.template.spec.containers[0].env[3]", nil, map[string]any{"name": "B"})), false},
+		{"field inside an earlier item edited in place", change("l", uv("spec.template.spec.containers[0].env[1].value", "a", "b")), false},
+		{"container added before its container", change("l", uv("spec.template.spec.containers[0]", nil, map[string]any{"name": "sidecar"})), true},
+		{"container added after its container", change("l", uv("spec.template.spec.containers[1]", nil, map[string]any{"name": "sidecar"})), false},
+		{"same index in another container's list", change("l", uv("spec.template.spec.containers[1].env[0]", map[string]any{"name": "A"}, nil)), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := laterChangeConflict(chosen, target, []models.Event{tc.later})
+			if tc.conflict {
+				assert.NotEmpty(t, reason)
+			} else {
+				assert.Empty(t, reason)
+			}
+		})
+	}
+}
+
+func TestShiftsListPosition(t *testing.T) {
+	assert.True(t, shiftsListPosition("spec.containers[0].env[1]", "spec.containers[0].env[2].value"))
+	assert.True(t, shiftsListPosition("spec.containers[0]", "spec.containers[1].image"))
+	assert.False(t, shiftsListPosition("spec.containers[0].env[3]", "spec.containers[0].env[2]"))
+	assert.False(t, shiftsListPosition("spec.containers[0].env", "spec.containers[0].env[2]"), "a whole list is a parent, not an item")
+	assert.False(t, shiftsListPosition("spec.containers[1].env[0]", "spec.containers[0].env[2]"))
+}
+
+// cubeapm: the history carried a ConfigMap change filed under the StatefulSet's resource, so the
+// same-resource check passed and the revert would have written `data.config.properties` onto the
+// StatefulSet. A change to any object that is not the workload must be refused.
+func TestGetRevertRecommendationRequest_RefusesAnotherObjectsChange(t *testing.T) {
+	withResourceName := func(resourceName string, updated []any) models.Event {
+		j := models.NewJsonArray([]any{map[string]any{
+			"type": "diff",
+			"data": map[string]any{"resource_name": resourceName, "old": "a: 1\n", "new": "a: 2\n", "updated_values": updated},
+		}})
+		return models.Event{Id: "evt-1", SubjectNamespace: strPtr("shop"), Evidences: &j}
+	}
+	dataPath := []any{map[string]any{"path": "data.config.properties", "old": "x", "new": "y"}}
+	imagePath := []any{map[string]any{"path": "spec.template.spec.containers[0].image", "old": "v1", "new": "v2"}}
+
+	_, err := getRevertRecommendationRequest(deploymentResource, withResourceName("configmap/shop/services-server.yaml", dataPath), false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "configmap")
+
+	_, err = getRevertRecommendationRequest(deploymentResource, revertEvent(dataPath), false)
+	require.NoError(t, err, "revertEvent's diff names a deployment, so its kind decides, not the paths")
+
+	noName := models.NewJsonArray([]any{map[string]any{"type": "diff", "data": map[string]any{"updated_values": dataPath}}})
+	_, err = getRevertRecommendationRequest(deploymentResource, models.Event{Id: "evt-2", SubjectNamespace: strPtr("shop"), Evidences: &noName}, false)
+	require.Error(t, err, "without a resource_name, data-only paths identify a ConfigMap or Secret")
+
+	_, err = getRevertRecommendationRequest(deploymentResource, withResourceName("statefulset/shop/services-server.yaml", imagePath), false)
+	require.NoError(t, err)
 }

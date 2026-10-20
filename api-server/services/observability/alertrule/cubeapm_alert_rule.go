@@ -1,6 +1,7 @@
 package alertrule
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -212,6 +213,15 @@ func (s *CubeAPMAlertRuleSource) listRules(cfg cubeAPMConn) ([]cubeAPMRuleRespon
 // object and does not specify the collection wrapper either way; guessing one
 // and rejecting the rest would break listing on whichever build differs.
 func parseCubeAPMRulesResponse(body []byte) ([]cubeAPMRuleResponse, error) {
+	// An install with no rules answers 200 with an EMPTY BODY, not "[]" — observed
+	// against a live CubeAPM whose admin API returned zero bytes. No JSON shape
+	// below can decode that, so listing failed with a parse error on exactly the
+	// installs where nothing is wrong: a fresh CubeAPM, which is also the first
+	// thing anyone syncs. Treated as the empty listing it is.
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+
 	var asArray []cubeAPMRuleResponse
 	if err := json.Unmarshal(body, &asArray); err == nil {
 		return asArray, nil

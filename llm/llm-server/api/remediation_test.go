@@ -4,9 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"nudgebee/llm/workspace"
+	"strings"
 	"testing"
+	"time"
 
 	"nudgebee/llm/common"
+	"nudgebee/llm/events"
 	"nudgebee/llm/tools"
 
 	"github.com/stretchr/testify/assert"
@@ -230,7 +233,7 @@ func TestNormalizePlan_ClampsMitigationConfidence(t *testing.T) {
 		{Action: "Raise checkout memory limit", Kind: "fix", Confidence: 88},
 	}}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	// Looked up by name, not index: normalizePlan also reorders fixes ahead of mitigations.
 	assert.Equal(t, Confidence(maxMitigationConfidence), actionByName(t, plan, "Restart flagd deployment").Confidence,
@@ -260,7 +263,7 @@ func TestNormalizePlan_DefaultsUnknownKindToMitigation(t *testing.T) {
 		{Action: "padded fix", Kind: "  FIX  ", Confidence: 90},
 	}}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	assert.Equal(t, RemediationKindMitigation, actionByName(t, plan, "empty kind").Kind)
 	assert.Equal(t, Confidence(maxMitigationConfidence), actionByName(t, plan, "empty kind").Confidence)
@@ -305,7 +308,7 @@ func TestNormalizePlan_ClampsActionToHypothesisConfidence(t *testing.T) {
 		},
 	}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	assert.Equal(t, Confidence(95), actionByName(t, plan, "exact match").Confidence, "action is capped at its hypothesis")
 	assert.Equal(t, Confidence(80), actionByName(t, plan, "case and space insensitive match").Confidence, "an action below the ceiling is untouched")
@@ -321,7 +324,7 @@ func TestNormalizePlan_MitigationCapAndHypothesisCeilingCompose(t *testing.T) {
 		},
 	}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	assert.Equal(t, Confidence(30), plan.Actions[0].Confidence, "the 30% hypothesis binds harder than the 50% mitigation cap")
 }
@@ -339,16 +342,16 @@ func TestNormalizePlan_DropsCommandlessActionWithoutArtifact(t *testing.T) {
 	}
 
 	withoutArtifact := newPlan()
-	normalizePlan(&withoutArtifact, nil)
+	normalizePlan(&withoutArtifact, nil, nil)
 	assert.Len(t, withoutArtifact.Actions, 1, "the command-less action has nothing backing it")
 	assert.Equal(t, "Raise memory limit", withoutArtifact.Actions[0].Action)
 
 	withArtifact := newPlan()
-	normalizePlan(&withArtifact, []string{"code_fix"})
+	normalizePlan(&withArtifact, []string{"code_fix"}, nil)
 	assert.Len(t, withArtifact.Actions, 2, "with an artifact present the action is real and is kept")
 
 	blank := newPlan()
-	normalizePlan(&blank, []string{"", "   "})
+	normalizePlan(&blank, []string{"", "   "}, nil)
 	assert.Len(t, blank.Actions, 1, "blank entries do not count as artifacts")
 }
 
@@ -361,7 +364,7 @@ func TestNormalizePlan_StripsVerifyAndRollbackFromCommandlessAction(t *testing.T
 			VerifyCommand: "kubectl logs -l app=x -n ns --tail=100", RollbackCommand: "kubectl rollout undo deployment x -n ns"},
 	}}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	assert.Empty(t, plan.Actions[0].VerifyCommand)
 	assert.Empty(t, plan.Actions[0].RollbackCommand)
@@ -376,7 +379,7 @@ func TestNormalizePlan_OrdersFixesBeforeMitigations(t *testing.T) {
 		{Action: "high-confidence fix", Kind: "fix", Confidence: 90, ExecuteCommand: "kubectl set image deployment a c=i:2 -n ns"},
 	}}
 
-	normalizePlan(&plan, nil)
+	normalizePlan(&plan, nil, nil)
 
 	assert.Equal(t, []string{"high-confidence fix", "low-confidence fix", "restart"},
 		[]string{plan.Actions[0].Action, plan.Actions[1].Action, plan.Actions[2].Action},
@@ -676,4 +679,32 @@ func TestEventRegionOnlyForCloudAccounts(t *testing.T) {
 	assert.Equal(t, "", eventRegion("", acct, evt), "an unknown provider must not be treated as cloud")
 	assert.Equal(t, "", eventRegion("AWS", "", evt), "no account, no lookup")
 	assert.Equal(t, "", eventRegion("AWS", acct, ""), "no event, no lookup")
+}
+
+// A plan is stored per alert, so a new firing's lookup can land on the plan an earlier firing
+// generated. Only a plan saved for the requested event may be restored; anything else makes the
+// panel present another incident's root cause and commands as this one's.
+func TestPlanSavedForEvent_OnlyRestoresThisIncidentsPlan(t *testing.T) {
+	const thisEvent = "f6a775cf-cad9-4a56-a1d2-3559f5db955b"
+
+	assert.True(t, planSavedForEvent(&events.EventAnalysis{RelatedEventId: thisEvent}, thisEvent))
+	assert.True(t, planSavedForEvent(&events.EventAnalysis{RelatedEventId: strings.ToUpper(thisEvent)}, thisEvent),
+		"uuid case must not decide ownership")
+	assert.False(t, planSavedForEvent(&events.EventAnalysis{RelatedEventId: "a3adb998-a45c-44fe-8a20-246c2fd63e10"}, thisEvent),
+		"a plan generated for an earlier firing of the same alert")
+	assert.False(t, planSavedForEvent(&events.EventAnalysis{}, thisEvent),
+		"a row with no event id belongs to no incident")
+}
+
+// A plan restored after its investigation was re-run describes the previous analysis.
+func TestPlanOlderThanAnalysis(t *testing.T) {
+	saved := &events.EventAnalysis{UpdatedAt: time.Date(2026, 9, 19, 7, 7, 0, 0, time.UTC)}
+	completed := string(events.AnalysisStatusCompleted)
+	rerun := &events.EventAnalysis{Status: completed, UpdatedAt: time.Date(2026, 9, 19, 10, 20, 0, 0, time.UTC)}
+	earlier := &events.EventAnalysis{Status: completed, UpdatedAt: time.Date(2026, 9, 19, 7, 4, 0, 0, time.UTC)}
+	running := &events.EventAnalysis{Status: string(events.AnalysisStatusInProgress), UpdatedAt: rerun.UpdatedAt}
+
+	assert.True(t, planOlderThanAnalysis(saved, earlier, rerun), "investigation re-run after the plan")
+	assert.False(t, planOlderThanAnalysis(saved, earlier), "plan built from the current analysis")
+	assert.False(t, planOlderThanAnalysis(saved, running, nil), "a run still in progress keeps the plan until it completes")
 }

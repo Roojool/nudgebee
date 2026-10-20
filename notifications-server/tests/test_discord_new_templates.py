@@ -440,9 +440,7 @@ def test_discord_proactive_nudge_shape():
     assert account_embed["title"] == "prod"
     assert "Score" not in account_embed["description"]  # scores removed from all recommendation surfaces
     assert "Savings: $42/mo" in account_embed["description"]
-    # single-account bundle deep-links Nubi scoped to that account
-    assert "/ask-nudgebee" in account_embed["description"]
-    assert "accountId=acc-1" in account_embed["description"]
+    assert "/optimise" in account_embed["description"]
 
 
 # ------------------------------------------------------------------ resolution

@@ -57,6 +57,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Final stage
 FROM alpine:3.22
 
+
 WORKDIR /app
 
 # Install runtime dependencies
@@ -237,19 +238,27 @@ COPY --from=builder /app/code-analysis-agent .
 COPY --from=builder /app/shim /usr/local/bin/shim
 RUN chown appuser:appuser ./code-analysis-agent /usr/local/bin/shim
 
-# Create symlinks for shims
-RUN ln -s /usr/local/bin/shim /usr/local/bin/kubectl && \
-    ln -s /usr/local/bin/shim /usr/local/bin/helm && \
-    ln -s /usr/local/bin/shim /usr/local/bin/psql && \
-    ln -s /usr/local/bin/shim /usr/local/bin/mysql && \
-    ln -s /usr/local/bin/shim /usr/local/bin/redis-cli && \
-    ln -s /usr/local/bin/shim /usr/local/bin/argocd && \
-    ln -s /usr/local/bin/shim /usr/local/bin/clickhouse-client && \
-    ln -s /usr/local/bin/shim /usr/local/bin/rabbitmqadmin && \
-    ln -s /usr/local/bin/shim /usr/local/bin/rabbitmq-api && \
-    ln -s /usr/local/bin/shim /usr/local/bin/sqlcmd && \
-    ln -s /usr/local/bin/shim /usr/local/bin/sqlplus && \
-    ln -s /usr/local/bin/shim /usr/local/bin/ssh
+# Create symlinks for commands executed through an authenticated server-side
+# boundary. Long-lived cloud credentials never enter the shared workspace
+# process; a provider may still return a deliberately requested short-lived
+# access token as command output.
+RUN ln -sf /usr/local/bin/shim /usr/local/bin/kubectl && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/aws && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/gcloud && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/gsutil && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/bq && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/az && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/helm && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/psql && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/mysql && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/redis-cli && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/argocd && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/clickhouse-client && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/rabbitmqadmin && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/rabbitmq-api && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/sqlcmd && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/sqlplus && \
+    ln -sf /usr/local/bin/shim /usr/local/bin/ssh
 
 # Switch to non-root user
 USER appuser

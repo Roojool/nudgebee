@@ -114,6 +114,44 @@ func TestClaimCritiquePacketPreservesEvidenceWithoutThoughts(t *testing.T) {
 	require.Error(t, err, "oversize evidence must be skipped, never silently truncated")
 }
 
+func TestClaimCritiquePacketPreservesChildEvidence(t *testing.T) {
+	// The delegation summary alone does not establish why the query was empty.
+	evidence := buildSubAgentEvidence([]ToolInvocation{
+		step("fetch_logs_v3", `{"pod":"scraper-abc"}`, `{"logs":[],"suggestion":"pod label value was not found; verify the value or remove this filter"}`),
+	}, 2048)
+	steps := []NBAgentPlannerToolActionStep{
+		{Action: NBAgentPlannerToolAction{Tool: "update_notebook"}, SubAgentEvidence: "notes are not tool evidence"},
+		{Action: NBAgentPlannerToolAction{Tool: "logs"}, Observation: "Fetch scraper logs", SubAgentEvidence: evidence},
+		{Action: NBAgentPlannerToolAction{Tool: "shell_execute"}, Observation: "permission denied"},
+	}
+	packet, err := claimCritiquePacket("why", "logs expired", "", steps)
+	require.NoError(t, err)
+	var decoded struct {
+		Observations []map[string]any `json:"observations"`
+	}
+	require.NoError(t, json.Unmarshal(packet, &decoded))
+	require.Len(t, decoded.Observations, 2)
+	require.Equal(t, float64(1), decoded.Observations[0]["id"])
+	require.Equal(t, "logs", decoded.Observations[0]["tool"])
+	require.Equal(t, "Fetch scraper logs", decoded.Observations[0]["output"])
+	require.Equal(t, evidence, decoded.Observations[0]["sub_agent_evidence"])
+	require.NotContains(t, decoded.Observations[1], "sub_agent_evidence")
+	require.NotContains(t, string(packet), "notes are not tool evidence")
+
+	// A bounded manifest may already contain truncation markers. Keep them intact.
+	steps[1].SubAgentEvidence = buildSubAgentEvidence([]ToolInvocation{
+		step("fetch_logs_v3", "read logs", strings.Repeat("log line ", 1000)),
+	}, 2048)
+	packet, err = claimCritiquePacket("why", "answer", "", steps)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(packet, &decoded))
+	require.Equal(t, steps[1].SubAgentEvidence, decoded.Observations[0]["sub_agent_evidence"])
+
+	steps[1].SubAgentEvidence = strings.Repeat("x", claimCritiqueInputLimit)
+	_, err = claimCritiquePacket("why", "answer", "", steps)
+	require.Error(t, err, "child evidence must count towards the input limit")
+}
+
 func TestClaimShadowDisabledAndSubagentDoNotCallLLM(t *testing.T) {
 	previous := config.Config.ClaimCritiqueFeedbackEnabled
 	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })

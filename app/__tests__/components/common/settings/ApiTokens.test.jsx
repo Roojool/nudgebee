@@ -1,5 +1,6 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
 import ApiTokens from '@shared/settings/ApiTokens';
 
@@ -7,12 +8,22 @@ jest.mock('@utils/colors');
 
 jest.mock('@ui/Modal', () => ({
   __esModule: true,
-  Modal: ({ open, onClose: _onClose, title, children, actionButtons }) =>
+  Modal: ({ open, onClose, onConfirm, confirmText, title, children, actionButtons }) =>
     open ? (
       <div data-testid='modal'>
         <h2>{title}</h2>
         {children}
         {actionButtons}
+        {!actionButtons && confirmText && (
+          <>
+            <button onClick={onClose} data-testid='btn-Cancel'>
+              Cancel
+            </button>
+            <button onClick={onConfirm} data-testid={`btn-${confirmText}`}>
+              {confirmText}
+            </button>
+          </>
+        )}
       </div>
     ) : null,
 }));
@@ -37,6 +48,37 @@ jest.mock('@ui/Input', () => ({
       data-testid={`field-${label}`}
     />
   ),
+}));
+
+jest.mock('@ui/Select', () => ({
+  __esModule: true,
+  Select: ({ label, value, onChange, options }) => (
+    <select aria-label={label} value={value ?? ''} onChange={(e) => onChange(e.target.value)} data-testid={`select-${label}`}>
+      {options.map((o) => {
+        const opt = typeof o === 'string' ? { value: o, label: o } : o;
+        return (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        );
+      })}
+    </select>
+  ),
+}));
+
+jest.mock('@ui/Banner', () => ({
+  __esModule: true,
+  Banner: ({ tone, title, message }) => (
+    <div data-testid={`banner-${tone}`}>
+      {title}
+      {message}
+    </div>
+  ),
+}));
+
+jest.mock('@ui/EmptyState', () => ({
+  __esModule: true,
+  EmptyState: ({ title }) => <div data-testid='empty-state'>{title}</div>,
 }));
 
 jest.mock('@ui/Toast', () => ({
@@ -74,14 +116,29 @@ jest.mock('@lib/externalUrls', () => ({
   getAppBaseUrl: () => 'http://localhost:3000',
 }));
 
+const mockListUserTokens = jest.fn().mockResolvedValue({ data: [] });
+const mockCreateUserToken = jest.fn().mockResolvedValue({ data: { token: 'new-token-value-xyz' } });
+const mockDeleteUserToken = jest.fn().mockResolvedValue({ data: {} });
+
 jest.mock('@api1/user/', () => ({
   __esModule: true,
   default: {
-    listUserTokens: jest.fn().mockResolvedValue({ data: [] }),
-    createUserToken: jest.fn().mockResolvedValue({ data: { token: 'new-token-value-xyz' } }),
-    deleteUserToken: jest.fn().mockResolvedValue({ data: {} }),
+    listUserTokens: (...args) => mockListUserTokens(...args),
+    createUserToken: (...args) => mockCreateUserToken(...args),
+    deleteUserToken: (...args) => mockDeleteUserToken(...args),
   },
 }));
+
+const mockGetTokenScopeCatalog = jest.fn();
+jest.mock('@api1/roles', () => ({
+  getTokenScopeCatalog: (...args) => mockGetTokenScopeCatalog(...args),
+}));
+
+const SCOPE_CATALOG = [
+  { module: 'tickets', scope: 'account', classes: ['Read', 'Write'], actions: {} },
+  { module: 'workflows', scope: 'account', classes: ['Read', 'Write', 'Execute'], actions: {} },
+  { module: 'users', scope: 'tenant', classes: ['Read', 'Write'], actions: {} },
+];
 
 jest.mock('src/utils/common', () => ({
   parseHttpResponseBodyMessage: jest.fn().mockReturnValue('Error occurred'),
@@ -96,6 +153,10 @@ describe('ApiTokens', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'new-token-value-xyz' } });
+    mockDeleteUserToken.mockResolvedValue({ data: {} });
+    mockGetTokenScopeCatalog.mockResolvedValue(SCOPE_CATALOG);
   });
 
   it('renders modal when open is true', async () => {
@@ -104,6 +165,8 @@ describe('ApiTokens', () => {
       expect(screen.getByTestId('modal')).toBeInTheDocument();
     });
     expect(screen.getByRole('heading', { name: 'API Tokens' })).toBeInTheDocument();
+    // The modal header names the screen; the body does not repeat it.
+    expect(screen.getAllByText('API Tokens')).toHaveLength(1);
   });
 
   it('does not render modal when open is false', () => {
@@ -111,54 +174,275 @@ describe('ApiTokens', () => {
     expect(screen.queryByTestId('modal')).not.toBeInTheDocument();
   });
 
-  it('shows empty state message when no tokens', async () => {
+  it('shows empty state when no tokens', async () => {
     render(<ApiTokens {...defaultProps} />);
     await waitFor(() => {
-      expect(screen.getByText('No API tokens found. Create your first token to get started.')).toBeInTheDocument();
+      expect(screen.getByTestId('empty-state')).toBeInTheDocument();
+    });
+    expect(screen.getByText('No API tokens yet')).toBeInTheDocument();
+  });
+
+  it('shows Create Token button initially', async () => {
+    render(<ApiTokens {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /create token/i })).toBeInTheDocument();
     });
   });
 
-  it('shows Create New Token button initially', async () => {
+  it('lists every key in one table, labelled by its type', async () => {
+    const base = { status: 'active', created_at: '2026-09-01T00:00:00Z', accessed_at: null, expires_at: null, limits: [], scopes: null };
+    mockListUserTokens.mockResolvedValue({
+      data: [
+        { ...base, id: '1', name: 'nbctl', kind: 'platform' },
+        { ...base, id: '2', name: 'claude-code', kind: 'gateway', limits: [{ metric: 'cost', period: 'month', value: 20, model: '' }] },
+        { ...base, id: '3', name: 'shared', kind: 'all' },
+      ],
+    });
     render(<ApiTokens {...defaultProps} />);
+    const row = async (name) => (await screen.findByText(name)).closest('tr');
+    expect(within(await row('nbctl')).getByText('Platform')).toBeInTheDocument();
+    expect(within(await row('claude-code')).getByText('AI Gateway')).toBeInTheDocument();
+    expect(within(await row('shared')).getByText('All access')).toBeInTheDocument();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+    // Scopes are platform-only and limits meter gateway calls only, so each row shows its own.
+    expect(within(await row('nbctl')).getByText('Full access')).toBeInTheDocument();
+    expect(within(await row('claude-code')).getByText('20 cost/month')).toBeInTheDocument();
+    expect(within(await row('claude-code')).queryByText('Full access')).not.toBeInTheDocument();
+  });
+
+  it('the create form starts on the platform type, never all-access', async () => {
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    expect(screen.getByRole('radio', { name: /^platform$/i })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('radio', { name: /all access/i })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByRole('radio', { name: /restricted/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add limit/i })).not.toBeInTheDocument();
+  });
+
+  it('a cancelled all-access draft does not carry over to the next create', async () => {
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /all access/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /create token/i }));
+    expect(screen.getByRole('radio', { name: /^platform$/i })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('a failed create keeps the draft, type included, for a retry', async () => {
+    mockCreateUserToken.mockResolvedValue({ errors: [{ message: 'boom' }] });
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /all access/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'shared');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    await waitFor(() => expect(mockCreateUserToken).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('radio', { name: /all access/i })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByLabelText(/name/i)).toHaveValue('shared');
+  });
+
+  it('keeps Create disabled while the request is in flight', async () => {
+    let finish;
+    mockCreateUserToken.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeDisabled();
+    finish({ data: { token: 'sk-nb-xyz' } });
+    await waitFor(() => expect(screen.getByText('sk-nb-xyz')).toBeInTheDocument());
+  });
+
+  it('defaultKind picks the type the create form starts on', async () => {
+    render(<ApiTokens {...defaultProps} defaultKind='gateway' />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    expect(screen.getByRole('radio', { name: /ai gateway/i })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('button', { name: /add limit/i })).toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /restricted/i })).not.toBeInTheDocument();
+  });
+
+  it('an all-access key create sends kind=all and carries limits', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'shared', kind: 'all' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    // 'all' opens both doors, so it is only ever minted by picking it.
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /all access/i }));
+    expect(screen.getByText(/opens both the app api and the ai gateway/i)).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText(/name/i), 'shared');
+    await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
+    await userEvent.type(screen.getByLabelText(/value/i), '20');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
     await waitFor(() => {
-      expect(screen.getByTestId('btn-Create New Token')).toBeInTheDocument();
+      expect(mockCreateUserToken).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'shared',
+          kind: 'all',
+          limits: [expect.objectContaining({ metric: 'cost', period: 'month', value: 20 })],
+        })
+      );
     });
   });
 
-  it('shows create token form when Create New Token is clicked', async () => {
-    render(<ApiTokens {...defaultProps} />);
-    await waitFor(() => {
-      expect(screen.getByTestId('btn-Create New Token')).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByTestId('btn-Create New Token'));
-    expect(screen.getByTestId('field-Token Name')).toBeInTheDocument();
-    expect(screen.getByTestId('btn-Create Token')).toBeInTheDocument();
+  it('a platform key create sends no limits', async () => {
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'nbctl', kind: 'platform' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'nbctl');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ name: 'nbctl', kind: 'platform', limits: [] }));
   });
 
-  it('calls createUserToken and shows success on token creation', async () => {
-    const { toast } = require('@ui/Toast');
-    const apiUser = require('@api1/user/').default;
-    render(<ApiTokens {...defaultProps} />);
-    await waitFor(() => {
-      expect(screen.getByTestId('btn-Create New Token')).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByTestId('btn-Create New Token'));
-    fireEvent.change(screen.getByTestId('field-Token Name'), { target: { value: 'My Token' } });
-    fireEvent.click(screen.getByTestId('btn-Create Token'));
-    await waitFor(() => {
-      expect(apiUser.createUserToken).toHaveBeenCalledWith('My Token');
-      expect(toast.success).toHaveBeenCalledWith('API Token created successfully');
-    });
+  it('a full-access platform key sends no scopes', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'ci', kind: 'platform' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ kind: 'platform', scopes: null }));
+    expect(mockGetTokenScopeCatalog).not.toHaveBeenCalled();
   });
 
-  it('displays tokens in a table when tokens exist', async () => {
-    const apiUser = require('@api1/user/').default;
-    apiUser.listUserTokens.mockResolvedValue({
-      data: [{ id: 'tok-1', name: 'My Token', created_at: '2024-01-01T00:00:00Z', accessed_at: null }],
+  it('a restricted platform key sends the ticked scopes; unticking Read clears Write', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'ci', kind: 'platform' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('radio', { name: /restricted/i }));
+    expect(await screen.findByText(/started by this key use your full access/i)).toBeInTheDocument();
+    // Write stays disabled until Read is ticked, as in the role editor.
+    expect(await screen.findByRole('checkbox', { name: /tickets — write/i })).toBeDisabled();
+    await userEvent.click(screen.getByRole('checkbox', { name: /tickets — read/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /tickets — write/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /automations — read/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /automations — write/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /automations — read/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /automations — execute/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'platform', scopes: ['tickets:Read', 'tickets:Write', 'workflows:Execute'] })
+    );
+  });
+
+  it('keeps Create disabled for a restricted key with no scope ticked', async () => {
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('radio', { name: /restricted/i }));
+    await screen.findByRole('checkbox', { name: /tickets — read/i });
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeDisabled();
+  });
+
+  it('shows each platform key as full access or its scope count', async () => {
+    const base = { status: 'active', created_at: '2026-09-01T00:00:00Z', accessed_at: null, expires_at: null, limits: [], kind: 'platform' };
+    mockListUserTokens.mockResolvedValue({
+      data: [
+        { ...base, id: '1', name: 'open', scopes: null },
+        { ...base, id: '2', name: 'narrow', scopes: ['tickets:Read', 'tickets:Write'] },
+      ],
+    });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    expect(await screen.findByText('Full access')).toBeInTheDocument();
+    expect(screen.getByText('2 scopes')).toBeInTheDocument();
+  });
+
+  it('a custom expiry in hours sends an expires_at roughly that far ahead', async () => {
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'nbctl', kind: 'platform' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'nbctl');
+    await userEvent.selectOptions(screen.getByLabelText(/^expires$/i), 'custom');
+    await userEvent.selectOptions(screen.getByLabelText(/^unit$/i), 'hours');
+    await userEvent.type(screen.getByLabelText(/^duration$/i), '1');
+    const before = Date.now();
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    const after = Date.now();
+    expect(mockCreateUserToken).toHaveBeenCalledTimes(1);
+    const [payload] = mockCreateUserToken.mock.calls[0];
+    const expiresAtMs = new Date(payload.expiresAt).getTime();
+    const oneHourMs = 60 * 60 * 1000;
+    // Range, not an exact string — this test must not flake on clock drift between
+    // `before`/`after` and the component's own `Date.now()` call.
+    expect(expiresAtMs).toBeGreaterThanOrEqual(before + oneHourMs - 5000);
+    expect(expiresAtMs).toBeLessThanOrEqual(after + oneHourMs + 5000);
+  });
+
+  it('leaves Create disabled when the custom expiry is empty or zero', async () => {
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'nbctl');
+    await userEvent.selectOptions(screen.getByLabelText(/^expires$/i), 'custom');
+    // Empty custom value.
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeDisabled();
+    // Zero is just as invalid as empty.
+    await userEvent.type(screen.getByLabelText(/^duration$/i), '0');
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeDisabled();
+  });
+
+  it('a gateway key create filters out zero-value limit rows', async () => {
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-gw-xyz', name: 'claude-code', kind: 'gateway' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /ai gateway/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'claude-code');
+    await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
+    // Leave the value at '' (invalid, filtered out) and add a second, valid limit.
+    await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
+    const valueInputs = screen.getAllByLabelText(/value/i);
+    await userEvent.type(valueInputs[1], '20');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'claude-code',
+        kind: 'gateway',
+        limits: [expect.objectContaining({ value: 20 })],
+      })
+    );
+  });
+
+  it('switching to platform drops the limits a gateway draft had', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'ci', kind: 'platform' } });
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('radio', { name: /ai gateway/i }));
+    await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
+    await userEvent.type(screen.getByLabelText(/value/i), '20');
+    await userEvent.click(screen.getByRole('radio', { name: /^platform$/i }));
+    expect(screen.queryByRole('button', { name: /add limit/i })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ kind: 'platform', limits: [], scopes: null }));
+  });
+
+  it('switching to AI Gateway drops the scopes a platform draft had', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-gw-xyz', name: 'ci', kind: 'gateway' } });
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('radio', { name: /restricted/i }));
+    await userEvent.click(await screen.findByRole('checkbox', { name: /tickets — read/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /ai gateway/i }));
+    expect(screen.queryByRole('radio', { name: /restricted/i })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ kind: 'gateway', scopes: null }));
+  });
+
+  it('revokes a key by id', async () => {
+    mockListUserTokens.mockResolvedValue({
+      data: [
+        { id: 'tok-1', name: 'My Token', kind: 'platform', created_at: '2024-01-01T00:00:00Z', accessed_at: null, expires_at: null, limits: [] },
+      ],
     });
     render(<ApiTokens {...defaultProps} />);
     await waitFor(() => {
       expect(screen.getByText('My Token')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /revoke/i }));
+    fireEvent.click(screen.getByTestId('btn-Delete'));
+    await waitFor(() => {
+      expect(mockDeleteUserToken).toHaveBeenCalledWith({ id: 'tok-1' });
     });
   });
 

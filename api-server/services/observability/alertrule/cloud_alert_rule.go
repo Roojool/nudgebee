@@ -68,6 +68,12 @@ func (s *CloudAlertRuleSource) UpdateAlertRule(ctx *security.RequestContext, ext
 		"enabled":          alertConfig.Enabled,
 		"provider_config":  alertConfig.ProviderConfig,
 	}
+	if alertConfig.SetEnabled != nil {
+		payload["set_enabled"] = *alertConfig.SetEnabled
+	}
+	if len(alertConfig.Restore) > 0 {
+		payload["restore"] = alertConfig.Restore
+	}
 
 	resp, err := cloudCollectorPost("/v1/cloud/update_alert_rule", ctx, payload)
 	if err != nil {
@@ -88,7 +94,23 @@ func (s *CloudAlertRuleSource) UpdateAlertRule(ctx *security.RequestContext, ext
 		ExternalRuleId: externalRuleId,
 		Name:           alertConfig.Name,
 		Status:         "updated",
+		Previous:       parseCloudUpdatePrevious(respBody),
 	}, nil
+}
+
+// parseCloudUpdatePrevious reads the replaced values from a cloud-collector update
+// response ({"data": {"previous": {...}}}). A collector that predates them
+// returns none, and the caller then has nothing exact to revert to.
+func parseCloudUpdatePrevious(body []byte) map[string]any {
+	var envelope struct {
+		Data struct {
+			Previous map[string]any `json:"previous"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+	return envelope.Data.Previous
 }
 
 func (s *CloudAlertRuleSource) DeleteAlertRule(ctx *security.RequestContext, accountId string, externalRuleId string) error {

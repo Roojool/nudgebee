@@ -1,7 +1,8 @@
 import React, { useState, useRef, useCallback, useMemo, memo } from 'react';
-import { Box, TextField, Popper, Paper, List, ListItem, ListItemText, Typography, Chip } from '@mui/material';
-import { Code as CodeIcon, Close as CloseIcon } from '@mui/icons-material';
-import { colors } from 'src/utils/colors';
+import { Box, TextField, Popper, Paper, List, ListItem, ListItemText, Typography } from '@mui/material';
+import { Chip } from '@ui/Chip';
+import { Code as CodeIcon } from '@mui/icons-material';
+import { colors, ds } from '@utils/colors';
 
 interface PreviousTask {
   id: string;
@@ -118,30 +119,9 @@ const getTemplateLabel = (segment: ParsedSegment): string => {
 
 // Memoized template chip component
 const TemplateChip = memo(({ segment, disabled, onRemove }: { segment: ParsedSegment; disabled: boolean; onRemove: () => void }) => (
-  <Chip
-    label={getTemplateLabel(segment)}
-    size='small'
-    icon={<CodeIcon sx={{ fontSize: 'var(--ds-text-body-lg) !important' }} />}
-    onDelete={disabled ? undefined : onRemove}
-    deleteIcon={<CloseIcon sx={{ fontSize: 'var(--ds-text-body-lg) !important' }} />}
-    sx={{
-      height: 24,
-      fontSize: 'var(--ds-text-caption)',
-      fontFamily: 'monospace',
-      backgroundColor: 'var(--ds-blue-200)',
-      color: 'var(--ds-blue-700)',
-      border: '1px solid var(--ds-blue-300)',
-      '& .MuiChip-icon': {
-        color: 'var(--ds-blue-500)',
-      },
-      '& .MuiChip-deleteIcon': {
-        color: 'var(--ds-gray-600)',
-        '&:hover': {
-          color: 'var(--ds-red-600)',
-        },
-      },
-    }}
-  />
+  <Chip size='md' tone='info' icon={<CodeIcon />} onDismiss={disabled ? undefined : onRemove} sx={{ fontFamily: ds.font.mono }}>
+    {getTemplateLabel(segment)}
+  </Chip>
 ));
 
 TemplateChip.displayName = 'TemplateChip';
@@ -456,7 +436,7 @@ const HighlightedTemplateTextField: React.FC<HighlightedTemplateTextFieldProps> 
               >
                 <ListItemText
                   primary={
-                    <Typography sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-small)', color: 'var(--ds-blue-600)' }}>
+                    <Typography sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-small)', color: 'var(--ds-blue-600)' }}>
                       {suggestion.insertText}
                     </Typography>
                   }

@@ -19,6 +19,7 @@ export interface QueuedMessage {
   userId?: string;
   isServer?: boolean;
   saving?: boolean;
+  isForeground?: boolean;
   saveError?: string;
   notAdmitted?: boolean;
 }

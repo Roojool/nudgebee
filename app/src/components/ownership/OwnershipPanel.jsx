@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
-import { Box, Divider } from '@mui/material';
+import { Box } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import { Button as DsButton } from '@ui/Button';
 import { Chip } from '@ui/Chip';
 import Text from '@shared/format/Text';

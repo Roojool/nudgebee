@@ -1,7 +1,6 @@
 package recommendation
 
 import (
-	"encoding/json"
 	"nudgebee/services/account"
 	"nudgebee/services/common"
 	"nudgebee/services/config"
@@ -117,25 +116,8 @@ func ProcessProactiveNudges(ctx *security.RequestContext) error {
 		for _, rec := range recs {
 			totalSavings += rec.EstimatedSavings
 
-			ctaURL := config.Config.BaseUrl + "/optimise?id=" + rec.ID + "#cost"
-			recMap := map[string]any{
-				"id":                    rec.ID,
-				"rule_name":             rec.RuleName,
-				"resource_name":         rec.ResourceName,
-				"finops_score":          rec.FinOpsScore,
-				"finops_band":           rec.FinOpsBand,
-				"estimated_savings":     rec.EstimatedSavings,
-				"severity":              rec.Severity,
-				"category":              rec.Category,
-				"cta_url":               ctaURL,
-				"wasted_since_detected": WastedSinceDetected(rec.EstimatedSavings, rec.CreatedAt, time.Now().UTC()),
-			}
-			if len(rec.RecommendationRaw) > 0 {
-				recMap["recommendation"] = json.RawMessage(rec.RecommendationRaw)
-			}
-
 			accID := rec.CloudAccountID
-			recsByAccount[accID] = append(recsByAccount[accID], recMap)
+			recsByAccount[accID] = append(recsByAccount[accID], proactiveRecMap(rec))
 			if rec.AccountName != "" && rec.AccountName != accID {
 				accountNameMap[accID] = rec.AccountName
 			}
@@ -154,6 +136,14 @@ func ProcessProactiveNudges(ctx *security.RequestContext) error {
 			}
 		}
 
+		// Each account's own nudge, so notifications can send every channel only
+		// the accounts its rules allow.
+		accountRecs, err := queryProactiveAccountRecommendations(dbms.Db, t.Id)
+		if err != nil {
+			ctx.GetLogger().Error("proactive nudge: error querying per-account recommendations", "error", err, "tenant", t.Id)
+			continue
+		}
+
 		message := map[string]any{
 			"kind":      "notification",
 			"type":      "recommendation_proactive_nudge",
@@ -166,6 +156,7 @@ func ProcessProactiveNudges(ctx *security.RequestContext) error {
 				"total_recoverable_savings":  totalSavings,
 				"recommendations_by_account": recommendationsByAccount,
 				"base_url":                   config.Config.BaseUrl,
+				"accounts":                   buildProactiveAccountSections(accountRecs, accountNameMap),
 			},
 		}
 
@@ -175,11 +166,9 @@ func ProcessProactiveNudges(ctx *security.RequestContext) error {
 			continue
 		}
 
-		// Update last_nudged_at for all included recommendations
-		recIDs := make([]string, len(recs))
-		for i, rec := range recs {
-			recIDs[i] = rec.ID
-		}
+		// Update last_nudged_at for every recommendation in the tenant list or an
+		// account's list.
+		recIDs := proactiveRecIDs(recs, accountRecs)
 		_, err = dbms.Db.Exec(`UPDATE recommendation SET last_nudged_at = now() WHERE id = ANY($1::uuid[])`, pq.Array(recIDs))
 		if err != nil {
 			ctx.GetLogger().Error("proactive nudge: error updating last_nudged_at", "error", err, "tenant", t.Id)

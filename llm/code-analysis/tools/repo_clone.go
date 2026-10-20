@@ -274,8 +274,30 @@ func (t *RepoCloneTool) Execute(ctx context.Context, input map[string]any) core.
 		},
 	}
 
+	// A pinned checkout is detached at that commit, so "has this changed since?"
+	// must be asked against the default branch. Say so explicitly: an agent that
+	// diffs against HEAD gets an empty result and reads it as "unchanged".
+	if params.Commit != "" {
+		checkout := map[string]any{
+			"pinned_commit": cloneResult.CommitHash,
+			"head_detached": true,
+			"note":          pinnedCheckoutNote(cloneResult.CommitHash, cloneResult.DefaultBranch),
+		}
+		if cloneResult.DefaultBranch != "" {
+			checkout["compare_against"] = "origin/" + cloneResult.DefaultBranch
+		}
+		response["checkout"] = checkout
+	}
+
 	observation := fmt.Sprintf("Successfully cloned repository '%s' to '%s'. Repository has %d files and default branch '%s'.",
 		params.RepoURL, cloneResult.LocalPath, info.FileCount, info.DefaultBranch)
+
+	// The planner feeds Observation to the model and reads Data only for
+	// local_path, so the checkout warning has to be in the prose or the model
+	// never sees it.
+	if params.Commit != "" {
+		observation += "\n\n" + pinnedCheckoutNote(cloneResult.CommitHash, cloneResult.DefaultBranch)
+	}
 
 	// Append repository index if available
 	if idx, err := IndexRepository(cloneResult.LocalPath); err == nil {
@@ -287,6 +309,19 @@ func (t *RepoCloneTool) Execute(ctx context.Context, input map[string]any) core.
 		observation,
 		response,
 	)
+}
+
+// pinnedCheckoutNote tells the agent what it is actually looking at. A pinned
+// clone is detached at that commit, so `git diff <commit> HEAD` compares the
+// commit with itself and returns nothing — which reads as "unchanged on the
+// default branch" when nothing was compared. Name the ref that answers the
+// question instead.
+func pinnedCheckoutNote(commit, defaultBranch string) string {
+	note := fmt.Sprintf("HEAD is detached at the pinned commit %s — the code as deployed. Diffing against HEAD compares that commit with itself and is always empty.", commit)
+	if defaultBranch != "" {
+		note += fmt.Sprintf(" To check whether something has since changed on the default branch, compare against origin/%s (e.g. `git diff %s origin/%s -- <path>`).", defaultBranch, commit, defaultBranch)
+	}
+	return note
 }
 
 // handleLocalRepository processes a request to use an existing local repository

@@ -4,7 +4,7 @@ from typing import Dict, Any
 from uuid import UUID
 
 from sqlalchemy import Column, Integer, String, UniqueConstraint, JSON, Boolean, DateTime, ForeignKey, Text
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID as PG_UUID
 from sqlalchemy import inspect
 from sqlalchemy.orm import DeclarativeBase, declared_attr
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -232,6 +232,20 @@ class NotificationRules(Base):
     delivery_mode = Column(String, nullable=True)
     frequency = Column(String, nullable=True)
     severity = Column(String, nullable=True)
+    event_types = Column(JSON, nullable=True)
+    # "all" or "accounts". With "accounts", the rule's accounts are its
+    # notification_rule_accounts rows (loaded onto the instance as account_ids);
+    # account_id is only a compatibility mirror for older clients.
+    scope_mode = Column(String, nullable=True)
+    # Findings the rule leaves out: a list of groups, each mapping account_ids,
+    # namespaces, workloads or aggregation_keys to values. A finding is left out
+    # when every key of some group lists its value.
+    exceptions = Column(JSON, nullable=True)
+    # The notification types the rule covers: "all" (every type, including ones
+    # added later) or "list" (the types in sources). None is a rule saved before
+    # these columns existed or by an older pod: it covers [source].
+    source_mode = Column(String, nullable=True)
+    sources = Column(ARRAY(String).with_variant(JSON, "sqlite"), nullable=True)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -250,6 +264,13 @@ class NotificationRules(Base):
             "delivery_mode": self.delivery_mode,
             "frequency": self.frequency,
             "severity": self.severity,
+            "event_types": self.event_types,
+            "scope_mode": self.scope_mode,
+            "account_ids": getattr(self, "account_ids", None),
+            "exceptions": self.exceptions,
+            "source_mode": self.source_mode,
+            "sources": list(self.sources) if self.sources else self.sources,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
     @classmethod
@@ -266,7 +287,7 @@ class NotificationRules(Base):
                 return datetime.fromtimestamp(value, tz=timezone.utc).replace(tzinfo=None)
             return default
 
-        return cls(
+        rule = cls(
             id=data.get("id"),
             created_at=parse_datetime(data.get("created_at")),
             updated_at=parse_datetime(data.get("updated_at")),
@@ -287,7 +308,36 @@ class NotificationRules(Base):
             delivery_mode=data.get("delivery_mode"),
             frequency=data.get("frequency"),
             severity=data.get("severity"),
+            event_types=data.get("event_types"),
+            scope_mode=data.get("scope_mode"),
+            exceptions=data.get("exceptions"),
+            source_mode=data.get("source_mode"),
+            sources=data.get("sources"),
         )
+        rule.account_ids = data.get("account_ids")
+        return rule
+
+
+class NotificationDefaultPolicy(Base):
+    """What happens to a notification no rule decides, per tenant and source; no
+    row means every platform's default channel."""
+
+    __tablename__ = "notification_default_policies"
+
+    tenant_id = Column(PG_UUID(as_uuid=True), primary_key=True)
+    source = Column(String, primary_key=True)
+    action = Column(String, nullable=False)
+    mappings = Column(JSON, nullable=False, default=list)
+    updated_by = Column(PG_UUID(as_uuid=True), nullable=True)
+    updated_at = Column(DateTime, nullable=False)
+
+
+class NotificationRuleAccounts(Base):
+    __tablename__ = "notification_rule_accounts"
+
+    rule_id = Column(PG_UUID(as_uuid=True), primary_key=True)
+    account_id = Column(PG_UUID(as_uuid=True), primary_key=True)
+    tenant_id = Column(PG_UUID(as_uuid=True), nullable=False)
 
 
 class NotificationRuleMappings(Base):

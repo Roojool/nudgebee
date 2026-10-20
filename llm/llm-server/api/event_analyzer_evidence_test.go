@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"nudgebee/llm/events"
 )
@@ -198,5 +200,135 @@ func TestRenderLogPatternDigest(t *testing.T) {
 	}
 	if !strings.Contains(got, "10.0.0.1 GET /health 200 12ms") {
 		t.Errorf("expected example line, got %q", got)
+	}
+}
+
+// The investigation agent has no event-evidence tool, and the Collected Evidence
+// prompt section omits metric series and pod data, so the analyzer saves them to
+// the workspace itself. Logs are excluded: they are inline or in evidence_logs.
+func TestStructuredEvidenceForWorkspace(t *testing.T) {
+	t.Run("keeps structured sections uncut and drops logs", func(t *testing.T) {
+		series := `{"data":{"memory_usage":{"values":["` + strings.Repeat("2097152000\",\"", 400) + `0"]}}}`
+		ev := events.InvestigateData{
+			LogData:    strings.Repeat("log line\n", 2000),
+			PodMetrics: []events.InvestigateDataInsight{{Data: series}},
+		}
+
+		content, ok := structuredEvidenceForWorkspace(ev)
+		if !ok {
+			t.Fatal("expected large structured evidence to be saved")
+		}
+		var saved events.InvestigateData
+		if err := json.Unmarshal([]byte(content), &saved); err != nil {
+			t.Fatalf("saved content is not valid JSON: %v", err)
+		}
+		if saved.LogData != "" {
+			t.Error("LogData must not be duplicated into the structured evidence file")
+		}
+		if len(saved.PodMetrics) != 1 || saved.PodMetrics[0].Data != series {
+			t.Error("pod_metrics must be saved uncut")
+		}
+		if ev.LogData == "" {
+			t.Error("caller's evidence must not be mutated")
+		}
+	})
+
+	t.Run("small structured evidence is still saved", func(t *testing.T) {
+		ev := events.InvestigateData{PodData: events.InvestigateDataInsight{Data: `{"status":{"phase":"Running"}}`}}
+		content, ok := structuredEvidenceForWorkspace(ev)
+		if !ok || !strings.Contains(content, "Running") {
+			t.Errorf("small pod_data has no inline fallback and must be saved, got ok=%v content=%q", ok, content)
+		}
+	})
+
+	t.Run("evidence that is only logs is not saved", func(t *testing.T) {
+		if _, ok := structuredEvidenceForWorkspace(events.InvestigateData{LogData: strings.Repeat("x", 100000)}); ok {
+			t.Error("expected no structured file when only logs are present")
+		}
+	})
+
+	t.Run("note names the file", func(t *testing.T) {
+		note := structuredEvidenceNote("event_abc_evidence.json")
+		if !strings.Contains(note, "`event_abc_evidence.json`") {
+			t.Errorf("note must point at the file, got %q", note)
+		}
+	})
+}
+
+func TestResolveInvestigationWindow(t *testing.T) {
+	at := func(h, m int) *time.Time {
+		v := time.Date(2026, 9, 13, h, m, 0, 0, time.UTC)
+		return &v
+	}
+	tests := []struct {
+		name       string
+		event      events.Event
+		chainFirst *time.Time
+		chainLast  *time.Time
+		wantStart  time.Time
+		wantEnd    *time.Time // nil = ongoing
+	}{
+		{
+			name:      "closed point event is padded on both sides",
+			event:     events.Event{StartsAt: at(9, 39), EndsAt: at(9, 39), Status: "CLOSED"},
+			wantStart: *at(9, 24),
+			wantEnd:   at(9, 54),
+		},
+		{
+			name:      "firing alarm stamped ends_at=starts_at is open-ended",
+			event:     events.Event{StartsAt: at(8, 55), EndsAt: at(8, 55), Status: "FIRING"},
+			wantStart: *at(8, 40),
+			wantEnd:   nil,
+		},
+		{
+			name:      "real window is kept",
+			event:     events.Event{StartsAt: at(8, 0), EndsAt: at(8, 30), Status: "CLOSED"},
+			wantStart: *at(8, 0),
+			wantEnd:   at(8, 30),
+		},
+		{
+			name:       "earlier chain occurrence moves the start back (re-fire of an earlier episode)",
+			event:      events.Event{StartsAt: at(8, 55), EndsAt: at(8, 55), Status: "FIRING"},
+			chainFirst: at(7, 38),
+			wantStart:  *at(7, 23),
+			wantEnd:    nil,
+		},
+		{
+			name:      "later chain occurrence extends the end (termination after state change)",
+			event:     events.Event{StartsAt: at(9, 39), EndsAt: at(9, 39), Status: "CLOSED"},
+			chainLast: at(10, 5),
+			wantStart: *at(9, 24),
+			wantEnd:   at(10, 5),
+		},
+		{
+			name:      "missing end on a closed event is treated as zero width",
+			event:     events.Event{StartsAt: at(9, 0), Status: "CLOSED"},
+			wantStart: *at(8, 45),
+			wantEnd:   at(9, 15),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveInvestigationWindow(tc.event, tc.chainFirst, tc.chainLast)
+			if !ok {
+				t.Fatal("expected a window")
+			}
+			if !got.Start.Equal(tc.wantStart) {
+				t.Errorf("start = %v, want %v", got.Start, tc.wantStart)
+			}
+			switch {
+			case tc.wantEnd == nil && got.End != nil:
+				t.Errorf("end = %v, want ongoing", *got.End)
+			case tc.wantEnd != nil && (got.End == nil || !got.End.Equal(*tc.wantEnd)):
+				t.Errorf("end = %v, want %v", got.End, *tc.wantEnd)
+			}
+			if tc.wantEnd == nil && got.endString() != "ongoing" {
+				t.Errorf("endString = %q, want ongoing", got.endString())
+			}
+		})
+	}
+
+	if _, ok := resolveInvestigationWindow(events.Event{}, nil, nil); ok {
+		t.Error("an event without a start time has no window")
 	}
 }

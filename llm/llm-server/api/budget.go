@@ -3,7 +3,9 @@ package api
 import (
 	"log/slog"
 	"strings"
+	"time"
 
+	"nudgebee/llm/audit"
 	"nudgebee/llm/budget"
 	"nudgebee/llm/common"
 	"nudgebee/llm/security"
@@ -12,6 +14,74 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// budgetActionToEventType maps a budget.ChangeAction to its audit EventType.
+var budgetActionToEventType = map[string]audit.EventType{
+	budget.ChangeActionCreate:   audit.EventTypeBudgetConfigCreate,
+	budget.ChangeActionDelete:   audit.EventTypeBudgetConfigDelete,
+	budget.ChangeActionIncrease: audit.EventTypeBudgetConfigIncrease,
+	budget.ChangeActionDecrease: audit.EventTypeBudgetConfigDecrease,
+	budget.ChangeActionEnable:   audit.EventTypeBudgetConfigEnable,
+	budget.ChangeActionDisable:  audit.EventTypeBudgetConfigDisable,
+}
+
+// budgetActionToEventAction maps a budget.ChangeAction to the coarse
+// CRUD-style EventAction the existing Audit Log action filter understands.
+var budgetActionToEventAction = map[string]audit.EventAction{
+	budget.ChangeActionCreate:   audit.EventActionCreate,
+	budget.ChangeActionDelete:   audit.EventActionDelete,
+	budget.ChangeActionIncrease: audit.EventActionUpdate,
+	budget.ChangeActionDecrease: audit.EventActionUpdate,
+	budget.ChangeActionEnable:   audit.EventActionUpdate,
+	budget.ChangeActionDisable:  audit.EventActionUpdate,
+}
+
+// emitBudgetHistoryAudit diffs before/after budget config rows and batches one
+// audit entry per changed budget type into a single relay call. Audit failures
+// are logged, not returned — the config write already succeeded, so a history
+// recording hiccup must not surface to the caller as a failed save.
+func emitBudgetHistoryAudit(ctx *security.RequestContext, before, after *budget.BudgetConfig, entityType, entityID, tenantId, module, userId string, logger *slog.Logger) {
+	changes := budget.DiffBudgetConfig(before, after)
+	if len(changes) == 0 {
+		return
+	}
+
+	accountId := ""
+	if entityType == budget.EntityTypeAccount {
+		accountId = entityID
+	}
+
+	now := time.Now().UTC()
+	entries := make([]audit.Audit, 0, len(changes))
+	for _, change := range changes {
+		// EventState is required by the ingest endpoint; a Delete has no new
+		// value, so substitute the same placeholder used elsewhere for
+		// delete-type audits (e.g. chat conversation delete).
+		newValue := any(change.NewValue)
+		if change.NewValue == nil {
+			newValue = map[string]any{"deleted": true}
+		}
+		entries = append(entries, audit.Audit{
+			UserId:         userId,
+			TenantId:       tenantId,
+			AccountId:      accountId,
+			EventTime:      now,
+			EventCategory:  audit.EventCategoryBudget,
+			EventType:      budgetActionToEventType[change.Action],
+			EventPrevState: change.PrevValue,
+			EventState:     newValue,
+			EventActor:     audit.EventActorUiService,
+			EventTarget:    entityID,
+			EventAction:    budgetActionToEventAction[change.Action],
+			EventStatus:    audit.EventStatusSuccess,
+			EventAttr:      map[string]any{"budget_type": change.BudgetType, "module": module},
+		})
+	}
+
+	if err := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: entries}); err != nil {
+		logger.Error("api: failed to record budget change history", "error", err, "entity_type", entityType, "entity_id", entityID)
+	}
+}
 
 // actionError returns an error response in the format RPC action webhooks expect: { "message": "..." }
 func actionError(c *gin.Context, code int, msg string) {
@@ -302,6 +372,19 @@ func handleBudgetStatusApi(r *gin.Engine, tracer trace.Tracer, meter metric.Mete
 			return
 		}
 
+		// Snapshot the pre-write row for change history (nil when this call
+		// creates a new row). UpsertBudgetConfig does its own equivalent fetch
+		// internally to decide insert-vs-update; this is a second, harmless
+		// read kept local to the handler so UpsertBudgetConfig's signature and
+		// behavior stay unchanged. A fetch error here must not be treated as
+		// "row doesn't exist" — that would misrecord an update to an existing
+		// row as a Create with a blank previous value — so skip history for
+		// this save rather than guess.
+		before, beforeErr := budget.GetBudgetConfig(dbManager, request.EntityType, request.EntityID, request.Module)
+		if beforeErr != nil {
+			logger.Error("api: failed to fetch pre-write budget config; skipping change-history recording for this save", "error", beforeErr)
+		}
+
 		updatedBy := sc.GetUserId()
 		result, err := budget.UpsertBudgetConfig(dbManager, &request, updatedBy)
 		if err != nil {
@@ -312,6 +395,10 @@ func handleBudgetStatusApi(r *gin.Engine, tracer trace.Tracer, meter metric.Mete
 			}
 			actionError(c, statusCode, err.Error())
 			return
+		}
+
+		if beforeErr == nil {
+			emitBudgetHistoryAudit(agentContext, before, result, request.EntityType, request.EntityID, tenantId, request.Module, updatedBy, logger)
 		}
 
 		c.JSON(200, gin.H{"data": result})
@@ -395,6 +482,8 @@ func handleBudgetStatusApi(r *gin.Engine, tracer trace.Tracer, meter metric.Mete
 			actionError(c, 500, err.Error())
 			return
 		}
+
+		emitBudgetHistoryAudit(agentContext, cfg, nil, cfg.EntityType, cfg.EntityID, tenantId, cfg.Module, sc.GetUserId(), logger)
 
 		c.JSON(200, gin.H{"data": gin.H{"deleted": req.ID}})
 	})

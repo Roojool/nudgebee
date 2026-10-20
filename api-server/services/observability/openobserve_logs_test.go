@@ -81,7 +81,7 @@ func TestOpenObserveLogSource_QueryLogs(t *testing.T) {
 	sql, err := s.buildSQL(req, integrations.OpenObserveDefaultLogStream)
 	require.NoError(t, err)
 
-	expectedSQL := `SELECT * FROM "default" WHERE str_match_ignore_case(body, 'error') ORDER BY _timestamp DESC LIMIT 50`
+	expectedSQL := `SELECT * FROM "default" WHERE body ILIKE 'error' ORDER BY _timestamp DESC LIMIT 50`
 	assert.Equal(t, expectedSQL, sql)
 	assert.Equal(t, "body", s.GetLabelMapping()["message"])
 }
@@ -179,8 +179,68 @@ func TestConvertOpenObserveLogGroups_PrefersRecordedWorkloadOverPodDerivation(t 
 
 	require.Len(t, out.Groups, 2)
 	assert.Equal(t, "llm-gateway", out.Groups[0].Workload)
-	assert.Equal(t, "/k8s/nudgebee/llm-gateway/llm-gateway", out.Groups[0].ContainerID)
-	assert.Equal(t, "postgres-0", out.Groups[1].Workload)
+	assert.Equal(t, "/k8s/nudgebee/llm-gateway", out.Groups[0].ContainerID)
+	assert.Equal(t, "postgres", out.Groups[1].Workload)
+}
+
+// A pod with no recorded workload is named after the workload that owns it. Reporting the
+// pod name instead made every run of a Job its own "application", and its drill-down could
+// never match the workload filter.
+func TestOpenObserveWorkloadFromPod(t *testing.T) {
+	for pod, want := range map[string]string{
+		"services-server-9c576f5cd-8xs5v":                           "services-server", // Deployment
+		"nudgebee-doc-docs-6dc8c795f8-m4vrr":                        "nudgebee-doc-docs",
+		"trivy-scan-cleanup-29844520-jmk7h":                         "trivy-scan-cleanup", // CronJob
+		"runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64-45c8t": "runbook-script",     // Job named after its run
+		"node-exporter-x7k2p":                                       "node-exporter",      // DaemonSet
+		"db-backup-nightly-x7k2p":                                   "db-backup-nightly",
+		"nudgebee-qdrant-server-0":                                  "nudgebee-qdrant-server", // StatefulSet
+		"postgres-12":                                               "postgres",
+		"workspace-ff87fbfd-5729-4474-b9d6-96beb693e3fd":            "workspace-ff87fbfd-5729-4474-b9d6-96beb693e3fd", // bare pod: one per account, not per run
+		"ff87fbfd-5729-4474-b9d6-96beb693e3fd":                      "ff87fbfd-5729-4474-b9d6-96beb693e3fd",           // nothing but a run id: kept
+		"sync-job-x7k2p":                                            "sync-job",
+		"nginx-proxy":                                               "nginx-proxy",
+		"nginx":                                                     "nginx",
+		"":                                                          "",
+	} {
+		assert.Equal(t, want, openObserveWorkloadFromPod(pod), pod)
+	}
+}
+
+// OpenObserve reports the workload itself, so container_id must be the three-segment
+// /k8s/<namespace>/<workload> the other providers emit. A fourth segment makes the UI read
+// the third as a pod name and trim two more segments off it.
+func TestConvertOpenObserveLogGroups_ReportsOwningWorkloadOfJobPod(t *testing.T) {
+	out := convertOpenObserveLogGroups([]map[string]any{{
+		"group_sample":    "boom",
+		"group_namespace": "nudgebee",
+		"group_pod":       "runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64-45c8t",
+		"group_container": "script",
+		"group_count":     float64(1),
+	}}, 1699999000)
+
+	require.Len(t, out.Groups, 1)
+	g := out.Groups[0]
+	assert.Equal(t, "runbook-script", g.Workload)
+	assert.Equal(t, "script", g.Container)
+	assert.Equal(t, "/k8s/nudgebee/runbook-script", g.ContainerID)
+}
+
+// Each runbook execution is its own Job, so the same error from two runs must land on one
+// row rather than one row per run.
+func TestOpenObserveLogGroups_RunsOfOneJobShareARow(t *testing.T) {
+	hit := func(pod string, count float64) map[string]any {
+		return map[string]any{"group_sample": "boom", "group_namespace": "nudgebee", "group_pod": pod,
+			"group_container": "script", "group_count": count}
+	}
+	out := mergeLogGroupsByPattern(convertOpenObserveLogGroups([]map[string]any{
+		hit("runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64-45c8t", 2),
+		hit("runbook-script-21650ce2-2988-4228-9153-3ad216da784c-x9gvn", 3),
+	}, 1699999000))
+
+	require.Len(t, out.Groups, 1)
+	assert.Equal(t, "runbook-script", out.Groups[0].Workload)
+	assert.Equal(t, int64(5), out.Groups[0].Count)
 }
 
 // Label values are round-tripped straight back into a filter (`col = '<value>'`), so the
@@ -541,7 +601,7 @@ func TestConvertOpenObserveLogGroups(t *testing.T) {
 	assert.Equal(t, "checkout", g.Container)
 	assert.Equal(t, "ERROR", g.Level)
 	assert.Equal(t, int64(42), g.Count)
-	assert.Equal(t, "/k8s/prod/checkout-service/checkout", g.ContainerID)
+	assert.Equal(t, "/k8s/prod/checkout-service", g.ContainerID)
 	// _timestamp is microseconds; the LogGroup contract is epoch seconds.
 	assert.Equal(t, []int64{1700000000}, g.Timestamps)
 	assert.Equal(t, []float64{42}, g.Values)
@@ -659,7 +719,7 @@ func TestOpenObserveLogSource_QueryLogGroup_EndToEnd(t *testing.T) {
 				{
 					"group_sample":    "panic: nil map write",
 					"group_namespace": "prod",
-					"group_pod":       "checkout-worker-5c7d9f8b6c-a1b2c",
+					"group_pod":       "checkout-worker-5c7d9f8b6c-x2k9p",
 					"group_container": "worker",
 					"group_level":     "FATAL",
 					"group_count":     float64(3),
@@ -716,7 +776,7 @@ func TestOpenObserveLogSource_QueryLogGroup_EndToEnd(t *testing.T) {
 	assert.Equal(t, "prod", first.Namespace)
 	assert.Equal(t, "checkout-service", first.Workload)
 	assert.Equal(t, "checkout", first.Container)
-	assert.Equal(t, "/k8s/prod/checkout-service/checkout", first.ContainerID)
+	assert.Equal(t, "/k8s/prod/checkout-service", first.ContainerID)
 	assert.Equal(t, "ERROR", first.Level)
 	assert.Equal(t, int64(128), first.Count)
 	assert.Equal(t, []int64{1700000000}, first.Timestamps)
@@ -765,7 +825,7 @@ func TestOpenObserveLogSource_QueryLogGroup_NumericSeverityStream(t *testing.T) 
 				{
 					"group_sample":    "db connection pool exhausted",
 					"group_namespace": "prod",
-					"group_pod":       "orders-api-6b8d7c9f4d-k3m2n",
+					"group_pod":       "orders-api-6b8d7c9f4d-k8m2n",
 					"group_container": "orders",
 					"group_level_num": float64(21), // OTel FATAL
 					"group_count":     float64(9),
@@ -904,4 +964,89 @@ func TestFetchOpenObserveStreamFields_StreamNotFoundIsDistinguishable(t *testing
 	_, err = fetchOpenObserveStreamFields(bad.URL, "test-org", "user", "pass", "up", "metrics")
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errOpenObserveStreamNotFound)
+}
+
+// OpenObserve answers a time window it holds no data for with "stream not found" — the
+// same body it returns for a stream that never existed. Treating that as a failure made
+// an idle fifteen minutes surface to the user as a disconnected log backend, so every
+// read path has to collapse it to an empty result the way the metric search already did.
+func TestOpenObserveLogs_EmptyWindowIsNotAnError(t *testing.T) {
+	const streamNotFound = `{"code":404,"message":"stream not found"}`
+
+	newSource := func(t *testing.T) (*OpenObserveLogSource, func()) {
+		t.Helper()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(streamNotFound))
+		}))
+		patches := gomonkey.NewPatches()
+		patches.ApplyFunc(integrations.GetOpenObserveConfigs,
+			func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+				return integrations.OpenObserveConfig{
+					URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass",
+					LogStream: integrations.OpenObserveDefaultLogStream,
+				}, nil
+			})
+		return &OpenObserveLogSource{}, func() { patches.Reset(); server.Close() }
+	}
+
+	t.Run("QueryLogs returns no lines rather than failing", func(t *testing.T) {
+		s, done := newSource(t)
+		defer done()
+		out, err := s.QueryLogs(mockRequestContext(), FetchLogRequest{
+			AccountId: "acct-1", LogProvider: "openobserve",
+			StartTime: 1699999000000, EndTime: 1700000600000,
+		})
+		require.NoError(t, err, "an empty window must not read as a broken log backend")
+		assert.Empty(t, out)
+	})
+
+	t.Run("QueryLabelValues returns no values rather than failing", func(t *testing.T) {
+		s, done := newSource(t)
+		defer done()
+		out, err := s.QueryLabelValues(mockRequestContext(), FetchLogLabelValuesRequest{
+			AccountId: "acct-1", LogProvider: "openobserve", LabelName: "namespace",
+			StartTime: 1699999000000, EndTime: 1700000600000,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, out)
+	})
+
+	t.Run("QueryLogGroup returns no groups rather than failing", func(t *testing.T) {
+		s, done := newSource(t)
+		defer done()
+		out, err := s.QueryLogGroup(mockRequestContext(), FetchLogGroupRequest{
+			AccountId: "acct-1", LogProvider: "openobserve",
+			StartTime: 1699999000000, EndTime: 1700000600000,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, out.Groups)
+	})
+}
+
+// A genuine backend failure must still surface — collapsing every non-200 to "empty"
+// would hide auth and query errors behind a silent no-data answer.
+func TestOpenObserveLogs_RealFailureStillSurfaces(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":401,"message":"Unauthorized"}`))
+	}))
+	defer server.Close()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs,
+		func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+			return integrations.OpenObserveConfig{
+				URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass",
+				LogStream: integrations.OpenObserveDefaultLogStream,
+			}, nil
+		})
+
+	_, err := (&OpenObserveLogSource{}).QueryLogs(mockRequestContext(), FetchLogRequest{
+		AccountId: "acct-1", LogProvider: "openobserve",
+		StartTime: 1699999000000, EndTime: 1700000600000,
+	})
+	require.Error(t, err, "401 is a real failure and must not be swallowed as empty")
+	assert.Contains(t, err.Error(), "401")
 }

@@ -23,7 +23,7 @@ func TestManualKnowledgePostgresChunks(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`CREATE TEMP TABLE llm_knowledgebases (id text, account_id text, name text, kb_type text, integration_id text, data text NOT NULL, status text, enabled boolean)`)
+	_, err = db.Exec(`CREATE TEMP TABLE llm_knowledgebases (id text, account_id text, name text, kb_type text, integration_id text, data text NOT NULL, status text, enabled boolean, note_category text, data_format text)`)
 	require.NoError(t, err)
 	old := knowledgeDatabase
 	knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {

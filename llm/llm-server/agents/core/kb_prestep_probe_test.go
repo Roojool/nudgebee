@@ -6,6 +6,16 @@ import (
 	toolcore "nudgebee/llm/tools/core"
 )
 
+// allJudged is the judge-disabled case: every retrieved document survived, so
+// any drop reported must come from attribution.
+func allJudged(docs toolcore.RAGSearchResults) map[string]struct{} {
+	keys := make(map[string]struct{}, len(docs))
+	for _, doc := range docs {
+		keys[ragDocDedupKey(doc)] = struct{}{}
+	}
+	return keys
+}
+
 func probeDoc(url, title, text string, score float32) toolcore.RAGSearchResult {
 	return toolcore.RAGSearchResult{
 		Document:        text,
@@ -29,7 +39,7 @@ func TestBuildProbeDocumentsClassifiesInjectedAndDropped(t *testing.T) {
 		Metadata:    map[string]any{"name": "SRE Runbooks", "kb_id": "kb-123"},
 	}}
 
-	docs, matched := buildProbeDocuments(kept, refs, attributed)
+	docs, matched := buildProbeDocuments(kept, refs, attributed, allJudged(kept))
 
 	if len(docs) != 2 {
 		t.Fatalf("expected 2 documents, got %d", len(docs))
@@ -78,7 +88,7 @@ func TestBuildProbeDocumentsUnownedDocumentHasNoKBId(t *testing.T) {
 		Metadata:    map[string]any{"name": "Product documentation"},
 	}}
 
-	docs, matched := buildProbeDocuments(toolcore.RAGSearchResults{doc}, refs, toolcore.RAGSearchResults{doc})
+	docs, matched := buildProbeDocuments(toolcore.RAGSearchResults{doc}, refs, toolcore.RAGSearchResults{doc}, allJudged(toolcore.RAGSearchResults{doc}))
 
 	if !docs[0].Injected {
 		t.Fatalf("un-owned document is still injected")
@@ -96,7 +106,7 @@ func TestBuildProbeDocumentsSurvivesRefAttributedDrift(t *testing.T) {
 	doc := probeDoc("https://kb/a", "A", "body a", 0.8)
 	// attributed claims the doc, but refs is empty (defensive: production keeps
 	// them in lockstep).
-	docs, _ := buildProbeDocuments(toolcore.RAGSearchResults{doc}, nil, toolcore.RAGSearchResults{doc})
+	docs, _ := buildProbeDocuments(toolcore.RAGSearchResults{doc}, nil, toolcore.RAGSearchResults{doc}, allJudged(toolcore.RAGSearchResults{doc}))
 	if len(docs) != 1 {
 		t.Fatalf("expected 1 document, got %d", len(docs))
 	}
@@ -222,5 +232,43 @@ func TestFilterDocsToCollectionDropsForeignCollections(t *testing.T) {
 	// search layer, so dropping them would discard content if it stops stamping.
 	if got[1].Document != "untagged" {
 		t.Errorf("untagged documents must be kept, got %q", got[1].Document)
+	}
+}
+
+// A document the judge rejected must be reported as judged out, not as
+// unattributable. The two reasons send an operator to different places: one is
+// "the question has no answer here", the other is "this knowledge base is not
+// wired to this agent".
+func TestBuildProbeDocumentsSeparatesJudgeDropsFromAttributionDrops(t *testing.T) {
+	winner := probeDoc("https://kb/a", "Restart procedure for the auth service", "body a", 0.85)
+	rejected := probeDoc("https://kb/b", "Change freeze during peak hours", "body b", 0.84)
+	orphan := probeDoc("https://kb/c", "Unowned page", "body c", 0.83)
+
+	kept := toolcore.RAGSearchResults{winner, rejected, orphan}
+	// The judge kept the winner and the orphan; attribution then dropped the
+	// orphan because no candidate KB owns it.
+	judgedKeys := allJudged(toolcore.RAGSearchResults{winner, orphan})
+	attributed := toolcore.RAGSearchResults{winner}
+	refs := []AgentReference{{
+		Type:        AgentReferenceTypeKB,
+		ReferenceID: "kb-123:deadbeef",
+		Metadata:    map[string]any{"name": "SRE Runbooks", "kb_id": "kb-123"},
+	}}
+
+	docs, _ := buildProbeDocuments(kept, refs, attributed, judgedKeys)
+	if len(docs) != 3 {
+		t.Fatalf("every retrieved document must still be reported, got %d", len(docs))
+	}
+	if !docs[0].Injected || docs[0].DropReason != "" {
+		t.Errorf("the judged winner must be injected with no drop reason, got %+v", docs[0])
+	}
+	if docs[1].Injected || docs[1].DropReason != dropReasonJudgeRejected {
+		t.Errorf("want the judge drop reason on the rejected document, got %+v", docs[1])
+	}
+	if docs[2].Injected || docs[2].DropReason != dropReasonUnattributable {
+		t.Errorf("want the fail-closed reason on the unowned document, got %+v", docs[2])
+	}
+	if docs[1].Score != 0.84 {
+		t.Errorf("the real retrieval score must still be reported, got %v", docs[1].Score)
 	}
 }

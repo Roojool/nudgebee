@@ -174,7 +174,7 @@ const Tile = ({ label, value, secondary, tone = 'default', sample, valueFontSize
           </Label>
         )}
       </Box>
-      <Box sx={{ display: 'flex', alignItems: 'baseline', gap: ds.space[1], mt: '2px', minWidth: 0 }}>
+      <Box sx={{ display: 'flex', alignItems: 'baseline', gap: ds.space[1], mt: ds.space[0], minWidth: 0 }}>
         {tooltip ? <Tooltip title={tooltip}>{valueNode}</Tooltip> : valueNode}
         {secondary && (
           <Typography

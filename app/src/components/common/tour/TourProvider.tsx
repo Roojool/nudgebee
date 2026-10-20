@@ -16,6 +16,7 @@
  */
 import * as React from 'react';
 import { driver } from 'driver.js';
+import { useSetupGate } from '@context/SetupGateContext';
 import { TOURS, brandText, type TourStepDef } from './tours';
 
 type DriverInstance = ReturnType<typeof driver>;
@@ -365,6 +366,20 @@ export function TourProvider({ children }: { children: React.ReactNode }): React
       driverRef.current?.destroy();
     };
   }, []);
+
+  // A tour that started just before the Setup gate re-locks (e.g. a K8s wizard
+  // step briefly reading the tenant as done, before its agent-health check
+  // resolves and corrects it — see SetupGateContext's own doc comment) must not
+  // keep stepping through rail items while the user is redirected back to
+  // Setup Center. The auto-trigger components stop offering a *new* tour once
+  // `locked` (layout/index.jsx's `navLocked`), but nothing previously tore down
+  // one already in flight.
+  const { locked } = useSetupGate();
+  React.useEffect(() => {
+    if (locked) {
+      stop();
+    }
+  }, [locked, stop]);
 
   const value = React.useMemo<TourContextValue>(() => ({ start, stop, isActive: activeTourId !== null, activeTourId }), [start, stop, activeTourId]);
 

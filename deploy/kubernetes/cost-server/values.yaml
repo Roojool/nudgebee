@@ -45,13 +45,25 @@ useObservabilityMetrics: false
 # Per cluster, the engine caches one upstream costmodel.Accesses and holds the
 # PromQL allocation result (~1.5k pod rows) in memory; memory grows with the number
 # of clusters served. Tune limits.memory after the multi-cluster memory check.
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Flat and cheap on every measured deployment: 33-64Mi average, 154Mi peak, CPU
+# under 3m average, so the old 512Mi request reserved ~10x the need.
+# The 2Gi limit is retained even though measurement would justify far less: a
+# ceiling is not reserved capacity, so an over-generous one costs nothing at
+# steady state, while a tight one is an OOMKill. See the "never lower a memory
+# limit" rule in docs/sizing-and-tiers.md.
+# Memory request is set from p95 (120Mi on the leanest Small install), not from
+# the 36-47Mi average. A 100Mi request sat *below* measured p95, which puts the
+# pod above its own request more than 5% of the time — first in line for eviction
+# under node pressure and the preferred node-OOM victim, on a service already
+# seen OOMKilling at a customer.
 resources:
   limits:
-    cpu: '1'
+    cpu: 500m
     memory: 2Gi
   requests:
-    cpu: 200m
-    memory: 512Mi
+    cpu: 50m
+    memory: 250Mi
 
 autoscaling:
   enabled: false

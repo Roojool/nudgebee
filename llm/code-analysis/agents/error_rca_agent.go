@@ -172,9 +172,20 @@ func (a *ErrorRCAAgent) Execute(ctx context.Context, sessionCtx *session.Session
 				// No valid implementation_instructions → ALWAYS override requires_fix to false
 				originalValue := data["requires_fix"]
 				data["requires_fix"] = false
+				// Why we ended up with no fix decides what the user is told. The
+				// specialist saying so is a finding; us forcing it because there
+				// was nothing to act on is the absence of one, and must never be
+				// reported as "the change is already there".
+				stated, _ := data["requires_fix_stated"].(bool)
+				if stated && originalValue == false {
+					data[NoOpBasisKey] = NoOpBasisSpecialistVerdict
+				} else {
+					data[NoOpBasisKey] = NoOpBasisNoInstructions
+				}
 				if a.logger != nil {
 					a.logger.Log(common.EventStepComplete, "Overrode requires_fix=false - no valid implementation_instructions", map[string]any{
 						"original_value": originalValue,
+						"no_op_basis":    data[NoOpBasisKey],
 						"reason":         "implementation_instructions nil or empty - CodeFixer would run blind",
 					})
 				}

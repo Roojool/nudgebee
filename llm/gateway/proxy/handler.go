@@ -503,6 +503,7 @@ func (h *handler) meter(ctx context.Context, rm *reqMeta, status int, headers ma
 		AccountID:  rm.identity.AccountID,
 		UserID:     rm.identity.UserID,
 		TokenID:    rm.identity.TokenID,
+		APIKeyID:   rm.identity.APIKeyID,
 
 		RequestedProvider: rm.decision.RequestedProvider,
 		RequestedModel:    rm.decision.RequestedModel,
@@ -528,7 +529,12 @@ func (h *handler) meter(ctx context.Context, rm *reqMeta, status int, headers ma
 
 	// Reconcile token/cost usage against quotas (requests were counted pre-call).
 	if h.limiter.Enabled() && ev.TotalTokens > 0 {
-		h.limiter.Reconcile(ctx, ratelimit.Scope{TenantID: rm.identity.TenantID, UserID: rm.identity.UserID}, ev.TotalTokens, ev.CostUsd)
+		h.limiter.Reconcile(ctx, ratelimit.Scope{
+			TenantID: rm.identity.TenantID,
+			UserID:   rm.identity.UserID,
+			APIKeyID: rm.identity.APIKeyID,
+			Model:    ev.RequestedModel,
+		}, ev.TotalTokens, ev.CostUsd)
 	}
 
 	// Full-body logging (off by default). Linked to the usage row via reqID.
@@ -564,6 +570,7 @@ func (h *handler) recordReject(id auth.Identity, provider schemas.ModelProvider,
 		RequestedProvider: string(provider), RequestedModel: model,
 		Attributes: &metering.Attributes{Derived: map[string]any{"reject_reason": reason}},
 		TenantID:   id.TenantID, AccountID: id.AccountID, UserID: id.UserID, TokenID: id.TokenID,
+		APIKeyID: id.APIKeyID,
 	}))
 }
 
@@ -584,6 +591,7 @@ func (h *handler) recordRejectPipeline(rc *RequestContext, status int, start tim
 		Attributes: &metering.Attributes{Derived: derived},
 		TenantID:   rc.Identity.TenantID, AccountID: rc.Identity.AccountID,
 		UserID: rc.Identity.UserID, TokenID: rc.Identity.TokenID,
+		APIKeyID: rc.Identity.APIKeyID,
 	}))
 }
 

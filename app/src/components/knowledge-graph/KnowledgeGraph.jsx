@@ -33,7 +33,7 @@ import 'reactflow/dist/style.css';
 import { ds } from 'src/utils/colors';
 import FilterDropdown from '@ui/FilterDropdown';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import Loader from '@shared/Loader';
 import apiKubernetes1 from '@api1/kubernetes1';
 import LangTypeIcon from '@shared/icons/LangTypeIcon';
@@ -69,7 +69,7 @@ const REACT_FLOW_PRO_OPTIONS = { hideAttribution: true };
 // filter state that the existing Apply flow already consumes.
 const KgFilterSectionHeader = ({ heading, count, onClear, info }) => (
   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-2)', minHeight: ds.space[5] }}>
-    <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 500, color: 'var(--ds-gray-600)' }}>{heading} filter</Typography>
+    <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.medium, color: 'var(--ds-gray-600)' }}>{heading} filter</Typography>
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
       {count > 1 && (
         <>
@@ -581,7 +581,7 @@ const BreadcrumbTooltipContent = memo(({ node }) => {
             fontSize: 'var(--ds-text-caption)',
             color: 'var(--ds-gray-300)',
             wordBreak: 'break-all',
-            fontFamily: 'monospace',
+            fontFamily: ds.font.mono,
           }}
         >
           {node.uniqueKey || node.label}
@@ -875,7 +875,7 @@ FilterWithInfo.propTypes = {
   children: PropTypes.node.isRequired,
 };
 
-const ServiceMapContent = () => {
+const ServiceMapContent = ({ cardElevation }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const { fitView, getNodes, getEdges } = useReactFlow();
@@ -2247,9 +2247,9 @@ const ServiceMapContent = () => {
       >
         {/* Collapsed rail — a slim strip with an expand control so the canvas can be broadened */}
         {isFilterCollapsed && (
-          <WidgetCard
+          <Card
+            elevation={cardElevation}
             sx={{
-              mt: 0,
               p: 'var(--ds-space-2)',
               display: 'flex',
               flexDirection: 'column',
@@ -2281,15 +2281,15 @@ const ServiceMapContent = () => {
             >
               Filters
             </Typography>
-          </WidgetCard>
+          </Card>
         )}
 
         {/* Left Sidebar - Filters */}
         {!isFilterCollapsed && (
-          <WidgetCard
+          <Card
             id='kg-filter-panel'
+            elevation={cardElevation}
             sx={{
-              mt: 0,
               p: 'var(--ds-space-4)',
               display: 'flex',
               flexDirection: 'column',
@@ -2395,7 +2395,7 @@ const ServiceMapContent = () => {
                     chosen Level.
                     <Box
                       component='ul'
-                      sx={{ m: 'var(--ds-space-2) 0 0', pl: 'var(--ds-space-4)', display: 'flex', flexDirection: 'column', gap: '2px' }}
+                      sx={{ m: 'var(--ds-space-2) 0 0', pl: 'var(--ds-space-4)', display: 'flex', flexDirection: 'column', gap: ds.space[0] }}
                     >
                       <li>
                         <b>Leading icon</b> — the source it came from (AWS / GCP / Azure / K8s / GitHub / …)
@@ -2524,7 +2524,7 @@ const ServiceMapContent = () => {
                 Clear All
               </Button>
             </Box>
-          </WidgetCard>
+          </Card>
         )}
 
         {/* Right Side - Graph */}
@@ -2946,10 +2946,16 @@ const ServiceMapContent = () => {
   );
 };
 
-export default function KnowledgeGraphServiceMapWrapper() {
+export default function KnowledgeGraphServiceMapWrapper({ cardElevation = 'raised' }) {
   return (
     <ReactFlowProvider>
-      <ServiceMapContent />
+      <ServiceMapContent cardElevation={cardElevation} />
     </ReactFlowProvider>
   );
 }
+
+KnowledgeGraphServiceMapWrapper.propTypes = {
+  // Card elevation for the filter panel: 'flat' when mounted inside a modal (b-Cortex),
+  // where a raised shadow would stack on the modal surface; 'raised' on a page (Troubleshoot).
+  cardElevation: PropTypes.oneOf(['raised', 'flat']),
+};

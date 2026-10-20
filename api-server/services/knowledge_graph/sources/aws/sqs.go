@@ -119,3 +119,51 @@ func (s *AWSSource) createSQSEdges(_ *security.RequestContext, nodes []*core.DbN
 
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	mSKRows := resourceKind{
+		Service:      "AmazonMSK",
+		NodeType:     core.NodeTypeMessageQueue,
+		SpecificType: "MSKCluster",
+		Subtype:      "MSK",
+		Extract:      (*AWSSource).extractQueueMetadata,
+	}
+	queueServiceRows := resourceKind{
+		Service:      "AWSQueueService",
+		NodeType:     core.NodeTypeMessageQueue,
+		SpecificType: "SQSQueue",
+		Subtype:      "SQS",
+		Props:        map[string]interface{}{"queue_type": "sqs"},
+		Extract:      (*AWSSource).extractQueueMetadata,
+	}
+	registerKind(mSKRows)
+	registerKind(mSKRows.withTypes("cluster"))
+	registerKind(queueServiceRows)
+	registerKind(queueServiceRows.withTypes("queue"))
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// SQS queues can have dead-letter queue relationships.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeMessageQueue, Name: "sqs",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createSQSEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Queues own their dead-letter edge and
+// can be created from their row. SNS subscriptions, S3 notifications and Lambda
+// event-source mappings point at a queue from other resources and arrive with
+// the next account build.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"SQSQueue", "MSKCluster"},
+		Creatable:     true,
+		Context:       []core.NodeType{core.NodeTypeMessageQueue},
+		Signature:     signature(edgeKind(core.RelationshipRoutesTo, "dead_letter_queue")),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createSQSEdges(nil, []*core.DbNode{node}, lookup, req), nil
+	})
+}

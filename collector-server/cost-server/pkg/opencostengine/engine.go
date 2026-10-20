@@ -21,8 +21,10 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/julienschmidt/httprouter"
+	"github.com/opencost/opencost/core/pkg/log"
 	promenv "github.com/opencost/opencost/modules/prometheus-source/pkg/env"
 	"github.com/opencost/opencost/modules/prometheus-source/pkg/prom"
 	occonfig "github.com/opencost/opencost/pkg/config"
@@ -36,8 +38,88 @@ var (
 	sharedDB *DB
 
 	accessMu sync.RWMutex
-	accesses = map[string]*costmodel.Accesses{}
+	accesses = map[string]*accessEntry{}
 )
+
+// How long a cluster's engine is kept after its last allocation request, and how
+// often we look for expired ones. Rebuilding an entry costs a handful of DB reads
+// plus DownloadPricingData, so this is long enough that a person clicking around
+// a cost view never pays that twice, and short enough that a cluster nobody is
+// looking at stops costing anything.
+const (
+	accessIdleTTL   = time.Hour
+	accessSweepTick = 5 * time.Minute
+)
+
+// accessEntry tracks when a cluster's engine was last wanted, so an idle one can
+// be torn down. inFlight keeps the sweeper off an engine that a request is still
+// using -- eviction stops the cluster map's refresh loop, and doing that under a
+// running ComputeAllocationHandler would leave it reading a map that has quietly
+// stopped updating.
+type accessEntry struct {
+	access   *costmodel.Accesses
+	lastUsed time.Time
+	inFlight int
+}
+
+// clusterMapStopper is upstream's *prom.PrometheusClusterMap, which owns a
+// goroutine refreshing the map every 5 minutes. The clusters.ClusterMap
+// interface does not expose StopRefresh, so reaching it needs this assertion.
+type clusterMapStopper interface {
+	StopRefresh()
+}
+
+func init() {
+	go sweepIdleAccesses()
+}
+
+// sweepIdleAccesses tears down engines nobody has asked about for accessIdleTTL.
+//
+// Without this, every cluster the pod has ever served keeps a goroutine polling
+// that customer's Prometheus through the relay every 5 minutes, for the life of
+// the pod, whether or not anyone looks at cost again.
+func sweepIdleAccesses() {
+	ticker := time.NewTicker(accessSweepTick)
+	defer ticker.Stop()
+	for range ticker.C {
+		evictIdleAccesses(time.Now())
+	}
+}
+
+func evictIdleAccesses(now time.Time) int {
+	accessMu.Lock()
+	defer accessMu.Unlock()
+
+	evicted := 0
+	for clusterID, entry := range accesses {
+		if entry.inFlight > 0 || now.Sub(entry.lastUsed) < accessIdleTTL {
+			continue
+		}
+		// Order matters: stop the refresh loop before dropping the last
+		// reference, or the goroutine keeps the whole engine -- provider, DB
+		// handle, cluster cache -- reachable and nothing is actually freed.
+		if stopper, ok := entry.access.ClusterMap.(clusterMapStopper); ok {
+			stopper.StopRefresh()
+		}
+		delete(accesses, clusterID)
+		evicted++
+		log.Infof("opencostengine: released idle engine for cluster %s", clusterID)
+	}
+	return evicted
+}
+
+// releaseAccess marks a request finished. Paired with the acquire inside
+// getOrCreateAccess; the sweeper will not touch an entry between the two.
+func releaseAccess(clusterID string) {
+	accessMu.Lock()
+	defer accessMu.Unlock()
+	if entry, ok := accesses[clusterID]; ok {
+		if entry.inFlight > 0 {
+			entry.inFlight--
+		}
+		entry.lastUsed = time.Now()
+	}
+}
 
 // Init configures the engine once. The ported nudgebee components read config
 // straight from process env: NUDGEBEE_DB (the metastore holding cloud_accounts /
@@ -60,6 +142,16 @@ func Init() error {
 				initErr = fmt.Errorf("opencostengine: setenv %s: %w", kv[0], err)
 				return
 			}
+		}
+		// The shim address is a per-process constant, so this belongs here rather
+		// than in getOrCreateAccess, which used to re-set the same value on every
+		// cluster build. os.Setenv writes process-global state: doing it per
+		// build is safe today only because the engine map's write lock happens to
+		// serialize builds, which is a nasty thing for a future change to have to
+		// know. Setting it once removes that coupling.
+		if err := os.Setenv(promenv.PrometheusServerEndpointEnvVar, "http://"+GetPrometheusShimAddr()); err != nil {
+			initErr = fmt.Errorf("opencostengine: setenv %s: %w", promenv.PrometheusServerEndpointEnvVar, err)
+			return
 		}
 		db, err := NewDB(GetNudgebeeDbConnectionString())
 		if err != nil {
@@ -91,27 +183,29 @@ func AllocationHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("cluster %s: %v", orgID, err), http.StatusInternalServerError)
 		return
 	}
+	defer releaseAccess(orgID)
 	access.ComputeAllocationHandler(w, r, httprouter.Params{})
 }
 
 // getOrCreateAccess builds (and caches) the per-cluster upstream cost engine.
 // Mirrors the fork's multitenant getOrCreateAccess, except the data source is our
 // kube-state-metrics-backed wrapper. clusterID == cloud_accounts.id.
+//
+// The caller MUST call releaseAccess(clusterID) when it is done: the returned
+// engine is held against eviction until it does.
 func getOrCreateAccess(clusterID string) (*costmodel.Accesses, error) {
 	if clusterID == "" {
 		return nil, fmt.Errorf("clusterID cannot be empty")
 	}
-	accessMu.RLock()
-	if a, ok := accesses[clusterID]; ok {
-		accessMu.RUnlock()
-		return a, nil
-	}
-	accessMu.RUnlock()
-
+	// No RLock fast path any more: a hit now has to bump inFlight, which is a
+	// write. Nothing is lost — building an entry already held the write lock,
+	// and this server handles one allocation query at a time per cluster.
 	accessMu.Lock()
 	defer accessMu.Unlock()
-	if a, ok := accesses[clusterID]; ok {
-		return a, nil
+	if entry, ok := accesses[clusterID]; ok {
+		entry.inFlight++
+		entry.lastUsed = time.Now()
+		return entry.access, nil
 	}
 
 	clusterInfoProvider := NewNudgebeeClusterInfoProvider(sharedDB, clusterID)
@@ -125,9 +219,9 @@ func getOrCreateAccess(clusterID string) (*costmodel.Accesses, error) {
 	// between the two relay facades and their two auth schemes (see promshim.go).
 	// By default it proxies straight through to each cluster's Prometheus; with
 	// observability-backed metrics enabled it answers queries from
-	// services-server instead.
+	// services-server instead. The matching env var is set once in Init, which is
+	// what NewOpenCostPrometheusConfigFromEnv reads.
 	promEndpoint := "http://" + GetPrometheusShimAddr()
-	_ = os.Setenv(promenv.PrometheusServerEndpointEnvVar, promEndpoint)
 	prometheusConfig, err := prom.NewOpenCostPrometheusConfigFromEnv()
 	if err != nil {
 		return nil, fmt.Errorf("prometheus config: %w", err)
@@ -173,9 +267,22 @@ func getOrCreateAccess(clusterID string) (*costmodel.Accesses, error) {
 		MetricsEmitter:      metricsEmitter,
 		SettingsCache:       settingsCache,
 	}
-	a.InitializeSettingsPubSub()
+	// Deliberately NOT calling a.InitializeSettingsPubSub().
+	//
+	// It starts two goroutines per cluster with no way to stop them, and the
+	// first spins on a 500ms sleep calling customPricingHasChanged() /
+	// discountHasChanged() forever. Both go through CloudProvider.GetConfig(),
+	// which for NudgebeeProvider returns provider.DefaultPricing() — a
+	// constant. The change it polls twice a second for cannot happen.
+	//
+	// It is also what made this map impossible to bound: those goroutines close
+	// over `a`, so evicting the map entry would free nothing while they ran.
+	// Nothing here subscribes (SubscribeToCustomPricingChanges has no callers),
+	// settingsSubscribers is touched nowhere outside upstream's settings.go, and
+	// ComputeAllocationHandler does not read it — so skipping this leaves the
+	// nil map untouched rather than written to.
 
-	accesses[clusterID] = a
+	accesses[clusterID] = &accessEntry{access: a, lastUsed: time.Now(), inFlight: 1}
 	return a, nil
 }
 

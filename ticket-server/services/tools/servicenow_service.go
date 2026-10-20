@@ -14,6 +14,7 @@ import (
 	"nudgebee/tickets-server/services/ticket"
 	"nudgebee/tickets-server/utils"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,12 +22,17 @@ import (
 	servicenowsdkgo "github.com/michaeldcanady/servicenow-sdk-go"
 	"github.com/michaeldcanady/servicenow-sdk-go/credentials"
 	tableapi "github.com/michaeldcanady/servicenow-sdk-go/table-api"
+	nethttplibrary "github.com/microsoft/kiota-http-go"
 )
 
 const (
 	servicenowGetTimeout = 10 * time.Second
 	servicenowGetMaxBody = 4 << 20 // 4 MiB — incident records can be large with full enrichment
 )
+
+// servicenowRequestTimeout bounds every SDK-backed ServiceNow HTTP request, so an
+// unresponsive instance cannot hold a ticket-service slot open. A var so tests can shorten it.
+var servicenowRequestTimeout = 60 * time.Second
 
 type ServiceNowService struct{}
 
@@ -45,7 +51,7 @@ func (s *ServiceNowService) GetCreateMeta(ctx *gin.Context, config models.Ticket
 }
 
 // FetchServiceNowIncidentCreateMeta builds the create-meta template for a ServiceNow
-// incident: a static urgency list (tagged as the severity source), a live list of
+// incident: static impact and urgency lists, a live list of
 // assignable users from the sys_user table, and summary/description. ServiceNow has
 // no labels concept. Matches the shared {"data": [Template, ...]} shape.
 func FetchServiceNowIncidentCreateMeta(ctx *gin.Context, config models.TicketConfigurations, _ string) (any, error) {
@@ -59,19 +65,24 @@ func FetchServiceNowIncidentCreateMeta(ctx *gin.Context, config models.TicketCon
 				Required:      false,
 				Type:          "select",
 			},
-			// Urgency is the severity source. Values are the names getServiceNowPriority
-			// maps to ServiceNow's 1/2/3 at create time.
+			// Impact and Urgency are ServiceNow's own inputs; it derives Priority from
+			// them, so Priority itself is never asked for, and neither field is tagged as a
+			// severity source. Both are optional: the create modal pre-selects the defaults
+			// and create falls back to Impact Medium / Urgency Low for callers that omit them.
+			// Ids are the raw 1/2/3 codes.
+			"impact": {
+				AllowedValues: serviceNowLevelOptions(),
+				Key:           "impact",
+				Name:          "Impact",
+				Required:      false,
+				Type:          "select",
+			},
 			"urgency": {
-				AllowedValues: []interface{}{
-					map[string]interface{}{"id": "1", "name": "High", "value": "High"},
-					map[string]interface{}{"id": "2", "name": "Medium", "value": "Medium"},
-					map[string]interface{}{"id": "3", "name": "Low", "value": "Low"},
-				},
-				Key:      "urgency",
-				Name:     "Urgency",
-				Required: false,
-				Type:     "select",
-				Group:    FieldGroupSeverity,
+				AllowedValues: serviceNowLevelOptions(),
+				Key:           "urgency",
+				Name:          "Urgency",
+				Required:      false,
+				Type:          "select",
 			},
 			"summary": {
 				AllowedValues: nil,
@@ -93,6 +104,14 @@ func FetchServiceNowIncidentCreateMeta(ctx *gin.Context, config models.TicketCon
 	}
 
 	return map[string]interface{}{"data": []Template{template}}, nil
+}
+
+func serviceNowLevelOptions() []interface{} {
+	return []interface{}{
+		map[string]interface{}{"id": "1", "name": "High", "value": "High"},
+		map[string]interface{}{"id": "2", "name": "Medium", "value": "Medium"},
+		map[string]interface{}{"id": "3", "name": "Low", "value": "Low"},
+	}
 }
 
 // ServiceNow assignee metadata is paged to avoid silently truncating the
@@ -175,7 +194,77 @@ func (s *ServiceNowService) AddComment(ctx *gin.Context, config models.TicketCon
 }
 
 func (s *ServiceNowService) GetComments(ctx *gin.Context, config models.TicketConfigurations, ticketID string) ([]models.Comments, error) {
-	return nil, ticket.ErrNotSupported
+	if err := utils.ValidateServiceNowTicketID(ticketID); err != nil {
+		return nil, fmt.Errorf("invalid incident ID: %w", err)
+	}
+	return fetchServiceNowIncidentComments(ctx, config, ticketID)
+}
+
+// fetchServiceNowIncidentComments reads the incident's customer-visible comments
+// and internal work notes from sys_journal_field, oldest first.
+func fetchServiceNowIncidentComments(ctx context.Context, config models.TicketConfigurations, ticketID string) ([]models.Comments, error) {
+	record, err := getServiceNowIncidentRecord(ctx, config, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	sysID := refValue(record["sys_id"])
+	if sysID == "" {
+		return nil, fmt.Errorf("incident %s has no sys_id", ticketID)
+	}
+
+	base := strings.TrimRight(config.URL, "/")
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "https://" + base
+	}
+	q := url.Values{}
+	q.Set("sysparm_query", "element_id="+sysID+"^elementINcomments,work_notes^ORDERBYsys_created_on")
+	q.Set("sysparm_fields", "value,sys_created_by,sys_created_on")
+	endpoint := fmt.Sprintf("%s/api/now/table/sys_journal_field?%s", base, q.Encode())
+
+	httpCtx, cancel := context.WithTimeout(ctx, servicenowGetTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(httpCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("snow comments: build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.SetBasicAuth(config.Username, config.Password)
+
+	resp, err := common.HttpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("snow comments: request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, servicenowGetMaxBody))
+	if err != nil {
+		return nil, fmt.Errorf("snow comments: read body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("snow comments: returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var envelope struct {
+		Result []struct {
+			Value     string `json:"value"`
+			CreatedBy string `json:"sys_created_by"`
+			CreatedOn string `json:"sys_created_on"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("snow comments: unmarshal: %w", err)
+	}
+
+	comments := make([]models.Comments, 0, len(envelope.Result))
+	for _, r := range envelope.Result {
+		comments = append(comments, models.Comments{
+			Author:  r.CreatedBy,
+			Comment: r.Value,
+			Created: r.CreatedOn,
+			Updated: r.CreatedOn,
+		})
+	}
+	return comments, nil
 }
 
 // getRecordStringValue extracts a string value from a TableRecord field.
@@ -202,9 +291,14 @@ func getRecordStringValue(record *tableapi.TableRecord, key string) (string, err
 func newServiceNowTableBuilder(config models.TicketConfigurations, tableName string) (*tableapi.TableRequestBuilder2[*tableapi.TableRecord], error) {
 	cred := credentials.NewBasicProvider(config.Username, config.Password)
 	baseURL := "https://" + strings.TrimPrefix(config.URL, "https://")
+	// Start from kiota's default client so its retry and redirect middleware stay; a bare
+	// http.Client would drop them. Only the per-request timeout is set.
+	httpClient := nethttplibrary.GetDefaultClient()
+	httpClient.Timeout = servicenowRequestTimeout
 	client, err := servicenowsdkgo.NewServiceNowServiceClient(
 		servicenowsdkgo.WithAuthenticationProvider(cred),
 		servicenowsdkgo.WithURL(baseURL),
+		servicenowsdkgo.WithHTTPClient(httpClient),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ServiceNow client: %w", err)
@@ -230,8 +324,8 @@ func (s *ServiceNowService) Get(ctx *gin.Context, config models.TicketConfigurat
 	number := refOrString(record["number"])
 	shortDesc := refOrString(record["short_description"])
 	description := refOrString(record["description"])
-	state := refValue(record["state"])     // raw value preferred for state-code mapping
-	urgency := refValue(record["urgency"]) // raw value preferred for priority mapping
+	state := refValue(record["state"])       // raw value preferred for state-code mapping
+	priority := refValue(record["priority"]) // derived from impact x urgency; what users see in ServiceNow
 	sysID := refValue(record["sys_id"])
 	createdOnStr := refValue(record["sys_created_on"])
 	updatedOnStr := refValue(record["sys_updated_on"])
@@ -267,7 +361,7 @@ func (s *ServiceNowService) Get(ctx *gin.Context, config models.TicketConfigurat
 		Title:       shortDesc,
 		Description: description,
 		Status:      mapServiceNowState(state),
-		Severity:    getNudgebeePriority(urgency),
+		Severity:    getNudgebeeSeverity(priority),
 		Assignee:    assignedTo,
 		Assignees:   assignees,
 		Reporter:    openedBy,
@@ -435,7 +529,7 @@ func (s *ServiceNowService) Resolve(ctx *gin.Context, config models.TicketConfig
 	}
 	response, err := tableBuilder.Get(ctx, getConfig)
 	if err != nil {
-		return fmt.Errorf("incident not found: %s", incidentID)
+		return fmt.Errorf("failed to look up incident %s: %w", incidentID, err)
 	}
 	results, _ := response.GetResult()
 	if len(results) == 0 {
@@ -467,6 +561,11 @@ func updateServiceNowIncidentState(ctx context.Context, config models.TicketConf
 
 // updateServiceNowIncidentField updates a field on a ServiceNow incident.
 func updateServiceNowIncidentField(ctx context.Context, config models.TicketConfigurations, incidentID string, field string, value string) error {
+	return updateServiceNowIncidentFields(ctx, config, incidentID, map[string]string{field: value})
+}
+
+// updateServiceNowIncidentFields updates several fields on an incident with one lookup and one PUT.
+func updateServiceNowIncidentFields(ctx context.Context, config models.TicketConfigurations, incidentID string, fields map[string]string) error {
 	tableBuilder, err := newServiceNowTableBuilder(config, "incident")
 	if err != nil {
 		return err
@@ -480,7 +579,7 @@ func updateServiceNowIncidentField(ctx context.Context, config models.TicketConf
 	}
 	response, err := tableBuilder.Get(ctx, getConfig)
 	if err != nil {
-		return fmt.Errorf("incident not found: %s", incidentID)
+		return fmt.Errorf("failed to look up incident %s: %w", incidentID, err)
 	}
 	results, _ := response.GetResult()
 	if len(results) == 0 {
@@ -491,7 +590,9 @@ func updateServiceNowIncidentField(ctx context.Context, config models.TicketConf
 	itemBuilder := tableBuilder.ById(sysID)
 
 	record := tableapi.NewTableRecord()
-	_ = record.SetValue(field, value)
+	for field, value := range fields {
+		_ = record.SetValue(field, value)
+	}
 
 	_, err = itemBuilder.Put(ctx, record, nil)
 	return err
@@ -537,7 +638,11 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 		queryParts = append(queryParts, "state="+state)
 	}
 	if params.Priority != "" {
-		queryParts = append(queryParts, "urgency="+getServiceNowPriority(params.Priority))
+		level := getServiceNowPriorityLevel(params.Priority)
+		if level == "" {
+			return nil, fmt.Errorf("unsupported priority filter: %s", params.Priority)
+		}
+		queryParts = append(queryParts, "priority="+level)
 	}
 	if params.Assignee != "" {
 		sanitized, err := sanitizeServiceNowQueryValue(params.Assignee)
@@ -583,8 +688,9 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 	getConfig := &tableapi.TableRequestBuilder2GetRequestConfiguration{
 		QueryParameters: &tableapi.TableRequestBuilder2GetQueryParameters{
 			Query:  query,
-			Fields: []string{"sys_id", "number", "short_description", "state", "urgency", "assigned_to", "sys_created_on"},
-			Limit:  params.Limit,
+			Fields: []string{"sys_id", "number", "short_description", "state", "priority", "assigned_to", "sys_created_on"},
+			// One extra row tells us whether another page exists; it is trimmed below.
+			Limit:  params.Limit + 1,
 			Offset: params.Offset,
 		},
 	}
@@ -599,8 +705,16 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 		return nil, fmt.Errorf("failed to get ServiceNow results: %w", err)
 	}
 
-	// Estimate total from results (Count() is no longer available in v2 API)
-	total := params.Offset + len(results)
+	hasMore := len(results) > params.Limit
+	if hasMore {
+		results = results[:params.Limit]
+	}
+	// The Table API has no cheap count, so the total is only known once the last
+	// page is reached; HasMore is the paging signal (see models.ListResult).
+	total := 0
+	if !hasMore {
+		total = params.Offset + len(results)
+	}
 
 	tickets := make([]models.Ticket, 0, len(results))
 	host := strings.TrimPrefix(config.URL, "https://")
@@ -608,7 +722,7 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 		number, _ := getRecordStringValue(record, "number")
 		shortDesc, _ := getRecordStringValue(record, "short_description")
 		state, _ := getRecordStringValue(record, "state")
-		urgency, _ := getRecordStringValue(record, "urgency")
+		priority, _ := getRecordStringValue(record, "priority")
 		sysID, _ := getRecordStringValue(record, "sys_id")
 		createdOnStr, _ := getRecordStringValue(record, "sys_created_on")
 
@@ -623,7 +737,7 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 			TicketID:  number,
 			Title:     shortDesc,
 			Status:    mapServiceNowState(state),
-			Severity:  getNudgebeePriority(urgency),
+			Severity:  getNudgebeeSeverity(priority),
 			Platform:  "servicenow",
 			URL:       fmt.Sprintf("https://%s/incident.do?sys_id=%s", host, sysID),
 			CreatedAt: createdAt,
@@ -635,26 +749,97 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 		Total:   total,
 		Limit:   params.Limit,
 		Offset:  params.Offset,
+		HasMore: hasMore,
 	}, nil
 }
 
-func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfigurations, ticket models.Ticket) (models.Ticket, error) {
-	if ticket.Severity == "" {
-		ticket.Severity = "Low"
+// serviceNowLevelCode maps an Impact/Urgency choice to ServiceNow's 1/2/3 code. The
+// create modal sends the code, the workflow builder sends the option name, and the
+// Nubi ticket tool sends a select as {"id": "<code>"}; a JSON number is accepted too. An
+// empty value returns "" with no error; anything else is an error rather than a silent default.
+func serviceNowLevelCode(name string, v interface{}) (string, error) {
+	if m, ok := v.(map[string]interface{}); ok {
+		v = m["id"]
 	}
+	var str string
+	switch val := v.(type) {
+	case nil:
+		return "", nil
+	case string:
+		str = strings.TrimSpace(val)
+	case float64:
+		str = strconv.FormatFloat(val, 'f', -1, 64)
+	default:
+		return "", fmt.Errorf("invalid %s: expected a string or number, got %T", name, v)
+	}
+	if str == "" {
+		return "", nil
+	}
+	switch strings.ToLower(str) {
+	case "1", "high":
+		return "1", nil
+	case "2", "medium":
+		return "2", nil
+	case "3", "low":
+		return "3", nil
+	default:
+		return "", fmt.Errorf("invalid %s %q: use High, Medium or Low", name, str)
+	}
+}
 
-	host := strings.TrimPrefix(configuration.URL, "https://")
-	apiURL := "https://" + host + "/api/now/v1/table/incident"
+// Impact and Urgency used when the caller supplies none (Medium impact, Low urgency).
+const (
+	serviceNowDefaultImpact  = "2"
+	serviceNowDefaultUrgency = "3"
+)
 
+// serviceNowSeverityFromLevels derives the Nudgebee severity from an Impact/Urgency
+// pair using ServiceNow's default priority matrix (priority = impact + urgency - 1).
+func serviceNowSeverityFromLevels(impact, urgency string) string {
+	i, errI := strconv.Atoi(impact)
+	u, errU := strconv.Atoi(urgency)
+	if errI != nil || errU != nil {
+		return getNudgebeeSeverity("")
+	}
+	return getNudgebeeSeverity(strconv.Itoa(i + u - 1))
+}
+
+// serviceNowCreateBody builds the incident fields for a create call.
+func serviceNowCreateBody(ticket models.Ticket) (map[string]string, error) {
 	body := map[string]string{
 		"short_description": ticket.Title,
-		"description":       ticket.Description,
-		"urgency":           getServiceNowPriority(ticket.Severity),
+		"description":       markdownToPlainText(ticket.Description),
+		"urgency":           serviceNowDefaultUrgency,
+		"impact":            serviceNowDefaultImpact,
+	}
+	// Severity is never read: the incident is driven by Impact and Urgency alone.
+	if fields, ok := ticket.AdditionalFields.(map[string]interface{}); ok {
+		for _, key := range []string{"impact", "urgency"} {
+			code, err := serviceNowLevelCode(key, fields[key])
+			if err != nil {
+				return nil, err
+			}
+			if code != "" {
+				body[key] = code
+			}
+		}
 	}
 	// Assignee flows in via the basic assignee field as a sys_user sys_id (the
 	// create-meta option value); assigned_to accepts that reference directly.
 	if ticket.Assignee != "" {
 		body["assigned_to"] = ticket.Assignee
+	}
+
+	return body, nil
+}
+
+func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfigurations, ticket models.Ticket) (models.Ticket, error) {
+	host := strings.TrimPrefix(configuration.URL, "https://")
+	apiURL := "https://" + host + "/api/now/v1/table/incident"
+
+	body, err := serviceNowCreateBody(ticket)
+	if err != nil {
+		return models.Ticket{}, err
 	}
 
 	jsonBody, err := json.Marshal(body)
@@ -689,9 +874,9 @@ func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfi
 
 	var result struct {
 		Result struct {
-			SysID   string `json:"sys_id"`
-			Number  string `json:"number"`
-			Urgency string `json:"urgency"`
+			SysID    string `json:"sys_id"`
+			Number   string `json:"number"`
+			Priority string `json:"priority"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
@@ -700,7 +885,12 @@ func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfi
 
 	ticket.TicketID = result.Result.Number
 	ticket.Status = "open"
-	ticket.Severity = getNudgebeePriority(result.Result.Urgency)
+	// ServiceNow's own Priority is authoritative; the matrix-derived value covers a
+	// response that omits it.
+	ticket.Severity = serviceNowSeverityFromLevels(body["impact"], body["urgency"])
+	if result.Result.Priority != "" {
+		ticket.Severity = getNudgebeeSeverity(result.Result.Priority)
+	}
 	ticket.URL = fmt.Sprintf("https://%s/incident.do?sys_id=%s", host, result.Result.SysID)
 	ticket.Platform = "servicenow"
 	now := time.Now()
@@ -709,27 +899,40 @@ func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfi
 	return ticket, nil
 }
 
-func getServiceNowPriority(priority string) string {
-	switch priority {
-	case "High":
+// getServiceNowPriorityLevel maps a Nudgebee severity to the ServiceNow Priority
+// value it is displayed from, the inverse of getNudgebeeSeverity. Unknown returns "".
+func getServiceNowPriorityLevel(severity string) string {
+	switch strings.ToLower(severity) {
+	case "highest", "critical":
 		return "1"
-	case "Medium":
+	case "high":
 		return "2"
-	case "Low":
+	case "medium":
 		return "3"
+	case "low":
+		return "4"
+	case "lowest":
+		return "5"
 	default:
-		return "3"
+		return ""
 	}
 }
 
-func getNudgebeePriority(priority string) string {
+// getNudgebeeSeverity maps ServiceNow's 1-5 Priority (Critical, High, Moderate,
+// Low, Planning) one-to-one onto Nudgebee's five severity tiers. Unknown or
+// missing values fall back to "Low", as before.
+func getNudgebeeSeverity(priority string) string {
 	switch priority {
 	case "1":
-		return "High"
+		return "Highest"
 	case "2":
-		return "Medium"
+		return "High"
 	case "3":
+		return "Medium"
+	case "4":
 		return "Low"
+	case "5":
+		return "Lowest"
 	default:
 		return "Low"
 	}
@@ -769,6 +972,10 @@ func markdownToPlainText(s string) string {
 }
 
 func AddServiceNowIncidentComment(ctx *gin.Context, configuration models.TicketConfigurations, ticket models.Ticket) error {
+	if err := utils.ValidateServiceNowTicketID(ticket.TicketID); err != nil {
+		return fmt.Errorf("invalid incident ID: %w", err)
+	}
+
 	tableBuilder, err := newServiceNowTableBuilder(configuration, "incident")
 	if err != nil {
 		slog.Error("Failed to create ServiceNow client", "error", slog.AnyValue(err))
@@ -839,36 +1046,44 @@ func (s *ServiceNowService) Update(ctx *gin.Context, config models.TicketConfigu
 		return fmt.Errorf("invalid ticket ID: %w", err)
 	}
 
-	if updateFields.Severity != "" {
-		if err := updateServiceNowIncidentField(ctx, config, ticketID, "urgency", getServiceNowPriority(updateFields.Severity)); err != nil {
+	fields := map[string]string{}
+	// Only Impact and Urgency drive severity in ServiceNow; a severity value is never
+	// read. Each one is written only when supplied, so the other keeps its value.
+	for name, raw := range map[string]string{"impact": updateFields.Impact, "urgency": updateFields.Urgency} {
+		code, err := serviceNowLevelCode(name, raw)
+		if err != nil {
 			return err
 		}
+		if code != "" {
+			fields[name] = code
+		}
 	}
-
+	if updateFields.Severity != "" {
+		slog.Warn("ServiceNow: ignoring severity on update; set Impact and Urgency instead", "ticket_id", ticketID, "severity", updateFields.Severity)
+	}
 	if assignees := updateFields.AssigneeList(); len(assignees) > 0 {
 		if len(assignees) > 1 {
 			return fmt.Errorf("only a single assignee is supported for ServiceNow; %d were provided", len(assignees))
 		}
-		if err := updateServiceNowIncidentField(ctx, config, ticketID, "assigned_to", assignees[0]); err != nil {
-			return err
-		}
+		fields["assigned_to"] = assignees[0]
 	}
-
 	if updateFields.Description != "" {
-		if err := updateServiceNowIncidentField(ctx, config, ticketID, "description", updateFields.Description); err != nil {
-			return err
-		}
+		fields["description"] = markdownToPlainText(updateFields.Description)
 	}
-
 	// ServiceNow does not have a native labels concept; labels are ignored for this platform.
-
 	if updateFields.Status != "" {
-		if err := s.Transition(ctx, config, ticketID, updateFields.Status); err != nil {
-			return err
+		fields["state"] = serviceNowStateCode(updateFields.Status)
+	}
+	if len(fields) == 0 {
+		if updateFields.Severity != "" {
+			return fmt.Errorf("ServiceNow does not accept a severity; set Impact and Urgency instead")
 		}
+		return nil
 	}
 
-	return nil
+	// One PUT, so a failure leaves the incident untouched and NudgeBee's row (synced only
+	// on success) still matches it. Field-by-field writes left it half-changed.
+	return updateServiceNowIncidentFields(ctx, config, ticketID, fields)
 }
 
 // Transition changes the state of a ServiceNow incident
@@ -877,25 +1092,26 @@ func (s *ServiceNowService) Transition(ctx *gin.Context, config models.TicketCon
 		return fmt.Errorf("invalid ticket ID: %w", err)
 	}
 
-	// Map common status names to ServiceNow states
-	state := ""
+	return updateServiceNowIncidentState(ctx, config, ticketID, serviceNowStateCode(status))
+}
+
+// serviceNowStateCode maps a common status name to a ServiceNow incident state code;
+// anything else is passed through, so a numeric state code works directly.
+func serviceNowStateCode(status string) string {
 	switch strings.ToLower(status) {
 	case "new", "open":
-		state = "1"
+		return "1"
 	case "in progress", "in_progress", "acknowledged":
-		state = "2"
+		return "2"
 	case "on hold", "on_hold":
-		state = "3"
+		return "3"
 	case "resolved":
-		state = "6"
+		return "6"
 	case "closed":
-		state = "7"
+		return "7"
 	case "canceled", "cancelled":
-		state = "8"
+		return "8"
 	default:
-		// If it's a number, use it directly
-		state = status
+		return status
 	}
-
-	return updateServiceNowIncidentState(ctx, config, ticketID, state)
 }

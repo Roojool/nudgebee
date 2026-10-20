@@ -4,6 +4,7 @@ import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
 	"nudgebee/services/knowledge_graph/sources/model"
+	"nudgebee/services/security"
 )
 
 // databaseSchemaProps are the concrete properties written by extractDatabaseMetadata
@@ -490,4 +491,128 @@ func (s *AWSSource) createRDSTopologyEdges(nodes []*core.DbNode, lookup *sources
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	dynamoDBRows := resourceKind{
+		Service:      "AmazonDynamoDB",
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "DynamoDBTable",
+		Extract:      (*AWSSource).extractDatabaseMetadata,
+	}
+	rDSRows := resourceKind{
+		Service:      "AmazonRDS",
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "RDSInstance",
+		Extract:      (*AWSSource).extractDatabaseMetadata,
+	}
+	redshiftRows := resourceKind{
+		Service:      "AmazonRedshift",
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "RedshiftCluster",
+		Extract:      (*AWSSource).extractDatabaseMetadata,
+	}
+	registerKind(dynamoDBRows)
+	registerKind(dynamoDBRows.withTypes("table"))
+	registerKind(resourceKind{
+		Service:      "AmazonES",
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "OpenSearchDomain",
+		Extract:      (*AWSSource).extractDatabaseMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonRDS",
+		Types:        []string{"cluster"},
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "RDSCluster",
+		Extract:      (*AWSSource).extractDatabaseMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonRDS",
+		Types:        []string{"cluster-snapshot"},
+		NodeType:     core.NodeTypeCloudResource,
+		SpecificType: "RDSClusterSnapshot",
+	})
+	registerKind(rDSRows)
+	registerKind(rDSRows.withTypes("db"))
+	registerKind(redshiftRows)
+	registerKind(redshiftRows.withTypes("cluster"))
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// RDS and Redshift attachment + topology edges. DynamoDB shares the
+	// Database node type but has no VPC or subnet to attach to.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeDatabase, Name: "rds",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			rdsNodes := make([]*core.DbNode, 0, len(nodes))
+			for _, node := range nodes {
+				if serviceName, ok := node.Properties["service_name"].(string); ok {
+					if serviceName != "AmazonDynamoDB" {
+						rdsNodes = append(rdsNodes, node)
+					}
+				}
+			}
+			if len(rdsNodes) == 0 {
+				return nil, nil
+			}
+			// Declarative-engine path (RDS vertical slice). Emits byte-identical
+			// edges to createRDSEdges; see the fidelity test.
+			edges := s.createRDSEdgesViaEngine(rdsNodes, lookup, req)
+			// Aurora cluster-membership + read-replica topology (identifier-matched,
+			// so orthogonal to the fidelity-tested attachment edges above).
+			return append(edges, s.createRDSTopologyEdges(rdsNodes, lookup, req)...), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Relational and warehouse databases have
+// their attachment and topology edges rebuilt on update; a new one rebuilds the
+// account because ENIs, log groups and replicas point at it. DynamoDB tables
+// have no edges of their own and can be created from their row.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"RDSInstance", "RDSCluster", "RedshiftCluster", "OpenSearchDomain"},
+		Context:       []core.NodeType{core.NodeTypeVPC, core.NodeTypeSubnet, core.NodeTypeSecurityGroup, core.NodeTypeDatabase},
+		Signature: signature(
+			edgeKind(core.RelationshipHostedOn, "vpc"),
+			edgeKind(core.RelationshipHostedOn, "subnet"),
+			edgeKind(core.RelationshipHostedOn, "security_group"),
+			edgeKind(core.RelationshipBelongsTo, "rds_cluster_member"),
+			edgeKind(core.RelationshipAssociatedWith, "read_replica"),
+		),
+	}, buildDatabasePatchEdges)
+
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"DynamoDBTable"},
+		Creatable:     true,
+	}, nil)
+
+	registerPatchSpec(defaultVPCEdgeSpec(sources.PatchSpec{
+		SpecificTypes: []string{"RDSClusterSnapshot"},
+		Creatable:     true,
+	}))
+}
+
+// buildDatabasePatchEdges is the Database dispatch of convertResourcesToGraph
+// for one node: the attachment engine plus the cluster/replica topology, which
+// needs the account's other databases (loaded as context).
+func buildDatabasePatchEdges(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+	// Same filter as the dispatch: DynamoDB and rows without a service name are skipped.
+	if serviceName, ok := node.Properties["service_name"].(string); !ok || serviceName == "AmazonDynamoDB" {
+		return nil, nil
+	}
+	databases := []*core.DbNode{node}
+	for _, other := range lookup.ByNodeType[core.NodeTypeDatabase] {
+		if other.ID == node.ID {
+			continue
+		}
+		if serviceName, ok := other.Properties["service_name"].(string); ok && serviceName != "AmazonDynamoDB" {
+			databases = append(databases, other)
+		}
+	}
+	edges := s.createRDSEdgesViaEngine([]*core.DbNode{node}, lookup, req)
+	edges = append(edges, edgesFrom(node, s.createRDSTopologyEdges(databases, lookup, req))...)
+	return edges, nil
 }

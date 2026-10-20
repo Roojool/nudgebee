@@ -237,6 +237,7 @@ func (a *awsSecretsManager) GetServiceMap(ctx providers.CloudProviderContext, ac
 		ctx.GetLogger().Error("failed to create aws session", "error", err, "accountNumber", account.AccountNumber)
 		return providers.ServiceMapApplication{}, err
 	}
+	cfg.Region = region
 	app := providers.ServiceMapApplication{
 		Id: providers.ServiceApplicationId{
 			Name:      resourceId,

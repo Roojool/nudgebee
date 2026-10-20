@@ -1,0 +1,42 @@
+# OpenTelemetry Collector config for local development.
+#
+# Receives the k8s-collector's pushed metrics over OTLP and does two things:
+#   - `debug` prints them to the container log, so `docker logs otel-collector`
+#     shows what actually arrived over the wire.
+#   - `prometheus` re-exposes them on :8889 in Prometheus text format, so the
+#     migrated metrics can be diffed against the pre-migration `/metrics` output.
+#
+# Not used in any deployed environment -- see deploy/kubernetes/k8s-collector
+# values (`otel.endpoint`) for how the chart points at a real collector.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: detailed
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Keep the metric names byte-identical to the prometheus_client ones so the
+    # old/new diff is meaningful; without this the exporter appends its own
+    # _total suffix to counters that already carry one.
+    add_metric_suffixes: false
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, prometheus]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

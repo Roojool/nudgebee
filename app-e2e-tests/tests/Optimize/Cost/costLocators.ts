@@ -34,8 +34,8 @@ export class CostLocators extends OptimizeModuleLocators {
   constructor(page: Page) {
     super(page);
 
-    // WidgetCard forwards an id and no data-testid for the savings card, and the card
-    // itself carries no role — so the id leads, and the fallback is its own label text
+    // The savings card is a ds/Card given an id and no data-testid, and as a non-interactive
+    // card it carries no role — so the id leads, and the fallback is its own label text
     // scoped to the page root rather than a page-wide match.
     this.summaryCardSavings = page
       .locator("#optimize-card-savings")

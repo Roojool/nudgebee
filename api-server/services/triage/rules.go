@@ -461,6 +461,12 @@ func ApplyTriageRuleActions(ctx context.Context, db *sqlx.DB, event *models.Even
 
 			// Create classification record for suppression (so drilldown works)
 			if event.CloudAccountId != nil && event.Tenant != nil {
+				// A muted firing was silenced on purpose, not judged to be noise:
+				// alert-quality and analytics tell the two apart by reason code.
+				reasonCode := "known_noise"
+				if result.Suppression.Muted {
+					reasonCode = ReasonCodeMuted
+				}
 				classificationID := uuid.New().String()
 				systemUserID := "00000000-0000-0000-0000-000000000000" // System UUID for auto-suppression
 				classification := EventClassification{
@@ -469,7 +475,7 @@ func ApplyTriageRuleActions(ctx context.Context, db *sqlx.DB, event *models.Even
 					CloudAccountID: *event.CloudAccountId,
 					TenantID:       *event.Tenant,
 					Classification: ClassificationFalsePositive,
-					ReasonCode:     "known_noise", // Suppressed events are treated as known noise
+					ReasonCode:     reasonCode,
 					ApplyScope:     ApplyScopeThisEvent,
 					ClassifiedBy:   systemUserID,
 					ClassifiedAt:   time.Now().UTC(),
@@ -535,6 +541,7 @@ func applySuppressionRule(rule *TriageRule) *SuppressionResult {
 	return &SuppressionResult{
 		Action:    rule.Action,
 		NewStatus: newStatus,
+		Muted:     isMuteRule(rule),
 	}
 }
 
@@ -808,6 +815,74 @@ func insertRuleMatches(ctx context.Context, db *sqlx.DB, eventID, cloudAccountID
 
 	_, err := db.ExecContext(ctx, sb.String(), args...)
 	return err
+}
+
+// retroMatchBatchSize caps how many match rows go into one INSERT during a retroactive apply.
+// A rule applied to a large backlog can touch tens of thousands of events; 500 rows is 3000
+// placeholders, comfortably under Postgres' 65535 parameter limit.
+const retroMatchBatchSize = 500
+
+// updatedEvent is an event touched by a retroactive "apply to existing" pass.
+type updatedEvent struct {
+	ID     string `db:"id"`
+	Tenant string `db:"tenant"`
+}
+
+// recordRetroactiveRuleMatches records match rows for events a retroactive apply just updated and
+// bumps the rule's match_count by the number of rows newly inserted.
+//
+// The rule's Matches column reads match_count and its Matched Events tab reads
+// event_triage_rule_matches; neither looks at events.nb_status. Without this the rule reports zero
+// matches for a backlog it actually suppressed, pinned, or rescored (#38740). Failures are logged,
+// not returned: the events were already updated, and losing the drilldown must not fail the apply.
+func recordRetroactiveRuleMatches(ctx context.Context, db *sqlx.DB, rule *TriageRule, cloudAccountID string, events []updatedEvent) {
+	if len(events) == 0 {
+		return
+	}
+
+	inserted := 0
+
+	for start := 0; start < len(events); start += retroMatchBatchSize {
+		end := start + retroMatchBatchSize
+		if end > len(events) {
+			end = len(events)
+		}
+		batch := events[start:end]
+
+		// strings.Builder avoids O(n²) concatenation from repeated += in the loop.
+		var sb strings.Builder
+		sb.Grow(120 + len(batch)*36)
+		sb.WriteString(`INSERT INTO event_triage_rule_matches (event_id, rule_id, cloud_account_id, tenant_id, rule_type, action) VALUES `)
+		args := make([]interface{}, 0, len(batch)*6)
+
+		for i, e := range batch {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			base := i * 6
+			fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5, base+6)
+			args = append(args, e.ID, rule.ID, cloudAccountID, e.Tenant, rule.RuleType, rule.Action)
+		}
+		sb.WriteString(" ON CONFLICT (event_id, rule_id, cloud_account_id) DO NOTHING")
+
+		result, err := db.ExecContext(ctx, sb.String(), args...)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to record retroactive rule matches",
+				"error", err,
+				"rule_id", rule.ID,
+				"batch_size", len(batch),
+			)
+			continue
+		}
+		affected, _ := result.RowsAffected()
+		inserted += int(affected)
+	}
+
+	// Count only rows actually inserted: events the live path already matched hit ON CONFLICT
+	// DO NOTHING, and counting them again would double-count them in match_count.
+	if inserted > 0 {
+		updateRuleMatchCountBy(ctx, db, rule.ID, inserted)
+	}
 }
 
 // -------------------- Helper Functions --------------------
@@ -1279,21 +1354,25 @@ func ApplyRuleToExistingEvents(ctx context.Context, db *sqlx.DB, rule *TriageRul
 		args = append(args, *rule.MatchLabels)
 	}
 
+	// RETURNING feeds recordRetroactiveRuleMatches below; the rule's Matches count and Matched
+	// Events tab are driven by the match rows, not by events.nb_status.
+	query += " RETURNING id, tenant"
+
 	// Execute the update
-	result, err := db.ExecContext(ctx, query, args...)
-	if err != nil {
+	var updated []updatedEvent
+	if err := db.SelectContext(ctx, &updated, query, args...); err != nil {
 		return 0, fmt.Errorf("failed to apply rule to existing events: %w", err)
 	}
 
-	rowsAffected, _ := result.RowsAffected()
+	recordRetroactiveRuleMatches(ctx, db, rule, cloudAccountID, updated)
 
 	slog.InfoContext(ctx, "Applied rule to existing events",
 		"rule_id", rule.ID,
-		"events_updated", rowsAffected,
+		"events_updated", len(updated),
 		"new_status", targetStatus,
 	)
 
-	return int(rowsAffected), nil
+	return len(updated), nil
 }
 
 // applyScoreAdjustmentToExistingEvents adjusts computed_score and computed_priority
@@ -1401,23 +1480,24 @@ func applyScoreAdjustmentToExistingEvents(ctx context.Context, db *sqlx.DB, rule
 		    updated_at = NOW()
 		FROM new_scores ns
 		WHERE e.id = ns.id
+		RETURNING e.id, e.tenant
 	`, conditions)
 
 	// Execute the update
-	result, err := db.ExecContext(ctx, query, args...)
-	if err != nil {
+	var updated []updatedEvent
+	if err := db.SelectContext(ctx, &updated, query, args...); err != nil {
 		return 0, fmt.Errorf("failed to apply score adjustment to existing events: %w", err)
 	}
 
-	rowsAffected, _ := result.RowsAffected()
+	recordRetroactiveRuleMatches(ctx, db, rule, cloudAccountID, updated)
 
 	slog.InfoContext(ctx, "Applied scoring rule to existing events",
 		"rule_id", rule.ID,
-		"events_updated", rowsAffected,
+		"events_updated", len(updated),
 		"adjustment", adjustment,
 	)
 
-	return int(rowsAffected), nil
+	return len(updated), nil
 }
 
 // applyPriorityPinToExistingEvents sets computed_priority/computed_score ABSOLUTELY for existing
@@ -1514,20 +1594,22 @@ func applyPriorityPinToExistingEvents(ctx context.Context, db *sqlx.DB, rule *Tr
 		WHERE cloud_account_id = $3
 		  AND nb_status IN ('OPEN', 'ACKNOWLEDGED', 'INVESTIGATING')
 		  %s
+		RETURNING id, tenant
 	`, ruleIDIndex, conditions)
 
-	result, err := db.ExecContext(ctx, query, args...)
-	if err != nil {
+	var updated []updatedEvent
+	if err := db.SelectContext(ctx, &updated, query, args...); err != nil {
 		return 0, fmt.Errorf("failed to apply priority pin to existing events: %w", err)
 	}
-	rowsAffected, _ := result.RowsAffected()
+
+	recordRetroactiveRuleMatches(ctx, db, rule, cloudAccountID, updated)
 
 	slog.InfoContext(ctx, "Applied priority_pin rule to existing events",
 		"rule_id", rule.ID,
-		"events_updated", rowsAffected,
+		"events_updated", len(updated),
 		"pinned_priority", pinned,
 	)
-	return int(rowsAffected), nil
+	return len(updated), nil
 }
 
 // UpdateTriageRule updates an existing triage rule

@@ -133,6 +133,19 @@ func (p TracesDefaultAgent) GetSupportedTools(ctx *security.RequestContext) []to
 	return toolList
 }
 
+// GetCacheScope declares Account scope so the system prompt is cached across
+// conversations rather than rebuilt per conversation.
+//
+// Account rather than Global: the prompt carries this account's provider label
+// mappings and its live-discovered span attributes, so it is stable within an
+// account but differs between them. Without this the agent fell back to the
+// default Conversation scope, whose key includes the conversation id — a cache
+// that can only ever be reused by a later call in the same conversation, and
+// expires 30 minutes later. TracesDefaultAgentV2 embeds this type and inherits it.
+func (l TracesDefaultAgent) GetCacheScope() core.CacheScope {
+	return core.CacheScopeAccount
+}
+
 func (l TracesDefaultAgent) GetPlannerType() core.AgentPlannerType {
 	return core.AgentPlannerTypeReAct
 }

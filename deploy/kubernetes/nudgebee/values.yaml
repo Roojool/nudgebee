@@ -117,6 +117,32 @@ postgresql:
   primary:
     persistence:
       size: 50Gi
+    # The bundled database ran BestEffort-ish: a 256Mi request and NO limit,
+    # against 934Mi-2.4Gi measured average and a 4.5Gi peak on a small install.
+    # An under-requested database is the worst thing on the node to get wrong —
+    # the scheduler packs work on top of it and then the whole install stalls.
+    #
+    # The limit is set well above the measured peak on purpose. Postgres does not
+    # degrade gracefully when it hits a cgroup ceiling; it gets OOM-killed
+    # mid-transaction. Treat this ceiling as a backstop against runaway queries,
+    # not as a budget to tune down. See docs/sizing-and-tiers.md.
+    #
+    # Installs using an external managed database (RDS, CloudSQL) set
+    # postgresql.enabled=false and none of this applies.
+    #
+    # The limit covers the 5.7Gi peak measured on a small install (a re-measure
+    # moved this up from 4.5Gi, which 6Gi would have cleared by only 6%). The request is
+    # deliberately NOT set from the 2.4Gi observed average: Postgres working-set
+    # includes page cache attributed to the cgroup, so it expands to fill whatever
+    # it is given and its "average" is not a requirement the way a Go service's is.
+    # 1.5Gi clears the 934Mi floor measured on the leanest install with margin.
+    resources:
+      limits:
+        cpu: 2000m
+        memory: 8Gi
+      requests:
+        cpu: 250m
+        memory: 1.5Gi
   # Pin to the GHCR mirror of bitnami/postgresql:16.1.0-debian-11-r16.
   # Same tag the bitnami chart 13.2.25 already defaults to, but the original
   # docker.io/bitnami/postgresql path was deprecated in Bitnami's mid-2025
@@ -128,6 +154,15 @@ postgresql:
     tag: '16.1.0-debian-11-r16-nb1'
   metrics:
     enabled: true
+    # postgres-exporter sidecar: measured 16Mi. Bounded so a scrape storm cannot
+    # compete for memory with the database it is scraping.
+    resources:
+      limits:
+        cpu: 100m
+        memory: 100Mi
+      requests:
+        cpu: 25m
+        memory: 50Mi
     # Upstream prometheus-community postgres_exporter (distroless), mirrored to
     # ghcr. Replaces the frozen bitnamilegacy build whose stale Go binary +
     # debian-11 base carried 2 CRITICAL / 35 HIGH fixable that apt-upgrade could
@@ -205,6 +240,42 @@ postgresql:
                     summary: 'Long-running query'
                     description: 'A query has been running > 5 minutes on {{ $labels.instance }}'
 
+                # Disk exhaustion is the one Postgres failure mode with no warning
+                # and no self-recovery: the instance stops accepting writes and the
+                # whole install goes down. Nothing else in this ruleset covered it,
+                # which on an unattended on-prem install is the gap that matters most.
+                #
+                # Sourced from kubelet, not the postgres exporter -- the exporter
+                # publishes no filesystem metric. So this covers the BUNDLED
+                # in-cluster Postgres only; an install pointed at an external or
+                # managed Postgres has no kubelet_volume_stats series for it and
+                # these alerts are simply inert there.
+                #
+                # The PVC name follows postgresql.fullnameOverride above
+                # (`postgresql` -> `data-postgresql-0`). Prometheus regexes are fully
+                # anchored, so this does not match other releases' volumes.
+                - alert: PostgresDiskSpaceLow
+                  expr: |
+                    kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"data-postgresql.*"}
+                      / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"data-postgresql.*"} < 0.15
+                  for: 10m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: 'PostgreSQL volume is running low on space'
+                    description: 'PVC {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} is over 85% full. Note that VACUUM alone does not return space to the filesystem.'
+
+                - alert: PostgresDiskSpaceCritical
+                  expr: |
+                    kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"data-postgresql.*"}
+                      / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"data-postgresql.*"} < 0.05
+                  for: 5m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: 'PostgreSQL volume is nearly full'
+                    description: 'PVC {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} is over 95% full. Postgres stops accepting writes when the volume fills; expand the PVC or reclaim space now.'
+
 clickhouse:
   enabled: false
   fullnameOverride: clickhouse
@@ -230,17 +301,61 @@ redis:
     password: 'password'
     existingSecret: 'redis'
     existingSecretPasswordKey: 'redis-password'
+  # Used for locks and caches, not as a data store: measured 7-21Mi across every
+  # deployment. Shipped with no requests or limits, which made it BestEffort and
+  # therefore an eviction candidate — and losing the lock store wedges the
+  # schedulers that depend on it. See docs/sizing-and-tiers.md.
   replica:
     replicaCount: 0
+    resources:
+      limits:
+        cpu: 200m
+        memory: 250Mi
+      requests:
+        cpu: 25m
+        memory: 50Mi
+  master:
+    resources:
+      limits:
+        cpu: 200m
+        memory: 250Mi
+      requests:
+        cpu: 25m
+        memory: 50Mi
 rabbitmq:
   enabled: true
   fullnameOverride: rabbitmq
+  # Measured 163-165Mi average, 346-354Mi peak, at roughly 3 messages per stored
+  # event. Flat across deployments — queue depth stays near zero, so this does not
+  # grow with the estate. Shipped with no requests or limits until now.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 750Mi
+    requests:
+      cpu: 50m
+      memory: 250Mi
   image:
     registry: 'ghcr.io/nudgebee'
     repository: rabbitmq
     tag: 3.13.7-debian-12-r5-nb1
   extraConfiguration: |-
     consumer_timeout = 3600000
+  # Ready = the AMQP listener accepts connections (the check the RabbitMQ
+  # cluster operator uses), not the chart's default "no resource alarms". A
+  # disk or memory alarm is flow control: RabbitMQ blocks publishers until
+  # consumers drain it. Failing readiness on an alarm took the broker out of
+  # its Service, so consumers could not reconnect to drain, the alarm could
+  # never clear on its own, and every client got ECONNREFUSED until someone
+  # freed the disk by hand -- which is how a customer install went down.
+  customReadinessProbe:
+    tcpSocket:
+      port: amqp
+    initialDelaySeconds: 10
+    timeoutSeconds: 20
+    periodSeconds: 30
+    failureThreshold: 3
+    successThreshold: 1
   auth:
     password: 'password'
     securePassword: false
@@ -335,6 +450,24 @@ rabbitmq:
           annotations:
             summary: RabbitMQ unroutable messages
             description: 'A queue has unroutable messages'
+
+        - alert: RabbitmqDiskSpaceLow
+          expr: 'rabbitmq_disk_space_available_bytes{namespace="{{ .Release.Namespace }}"} < 1073741824'
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: RabbitMQ disk space low
+            description: 'Under 1GiB free on the RabbitMQ volume; publishers are blocked once it reaches the disk_free_limit'
+
+        - alert: RabbitmqMessagesDropped
+          expr: 'increase(rabbitmq_global_messages_dead_lettered_maxlen_total{namespace="{{ .Release.Namespace }}",dead_letter_strategy="disabled"}[15m]) > 0'
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: RabbitMQ is dropping messages at a queue length cap
+            description: 'A capped queue (k8s_agent_*, policy nb-collector-agent-queues) is full and dropping its oldest messages: its consumers are not keeping up. Dropped discovery batches leave inventory stale until a whole snapshot gets through.'
 # ---------------------------------------------------------------------------
 # Install-time setup. The two parts are independent: an install can
 # pre-provision its admin without bundling an agent, or bundle an agent and let
@@ -411,9 +544,25 @@ ticket-server:
 ml-k8s-server:
   enabled: true
   fullnameOverride: ml-server
+  # #37330 pinned this to request = limit = 4Gi for Guaranteed QoS after a live
+  # OOM in PRODUCTION. Two things have since made that pin the wrong shape here:
+  #
+  # 1. It no longer applies where the incident happened. values-medium/large.yaml
+  #    override both request and limit (1.5Gi/5Gi and 2Gi/6Gi), and a tier overlay
+  #    beats this block — so Medium and Large are already Burstable. The pin only
+  #    ever survived at Small, which is the one tier that never had the outage.
+  # 2. At Small it was the single largest reservation in the whole chart — 4Gi of
+  #    a 15.5GiB total, 26%, and 2.7x what a Medium install reserves for the same
+  #    service. On a 16GiB node that is the difference between scheduling and not.
+  #
+  # Measured on the two real Small installs over 15 days: 497-611Mi average,
+  # p95 1049Mi, peak 1221Mi, and zero OOMKills and zero restarts. The request now
+  # comes from p95 like every other spiky service. The 4Gi LIMIT is untouched, so
+  # the OOMKill ceiling that actually stopped the incident is still there; what
+  # changes is that the pod no longer reserves 4x its p95.
   resources:
     requests:
-      memory: 4Gi
+      memory: 1.5Gi
     limits:
       memory: 4Gi
 postgres_migrations:
@@ -510,9 +659,35 @@ temporal:
       tag: '1.31.2'
     enabled: true
     replicaCount: 1
-    # Upstream ships no resources for any temporal role, so all four pods ran
-    # BestEffort and history OOMKilled. GOMEMLIMIT is 90% of each memory limit
-    # (Go does not read the cgroup cap); change one, change the other.
+    # Small-tier resources. Upstream ships no resources for any temporal role, so
+    # all four pods ran BestEffort — first to be evicted under node pressure, able
+    # to grow without bound — and history OOMKilled. Losing temporal-history
+    # mid-workflow is one of the worst failure modes we have.
+    # See docs/sizing-and-tiers.md for tier overrides.
+    #
+    # GOMEMLIMIT is 90% of each memory limit (Go does not read the cgroup cap);
+    # change one, change the other. The tier overlays in values-medium/large.yaml
+    # carry their own GOMEMLIMIT for the same reason.
+    #
+    # history's request is 1.5Gi, not 1Gi: a small install (oss) averages 1199Mi,
+    # which a 1Gi request does not cover.
+    #
+    # frontend / matching / worker are flat and cheap on every measured
+    # deployment: 55-94Mi average, 65-203Mi peak, CPU p95 under 20m.
+    #
+    # history is the second-largest memory consumer in the platform. It grew
+    # monotonically within a pod's lifetime — 2139Mi -> 2533Mi over 7 days on the
+    # largest deployment, with no reclaim — because its caches had no byte ceiling.
+    # The dynamicConfig block below now sets one (cacheSizeBasedLimit plus the
+    # host-level budgets), so that growth should flatten.
+    #
+    # The limit is 3Gi rather than 2Gi anyway, for two reasons. A live
+    # single-cluster install was measured at 1718Mi average / 2043Mi peak — 99.8%
+    # of a 2Gi ceiling — and it was measured WITHOUT the cache bounds below, so we
+    # do not yet have a live reading of the bounded behaviour. Until we do, 3Gi is
+    # the headroom that keeps a shard owner from being OOM-killed mid-workflow on
+    # the strength of a projection. Re-measure once the bounded config has been
+    # running and bring it back down if the flattening holds.
     frontend:
       resources:
         limits: { cpu: 500m, memory: 500Mi }
@@ -536,11 +711,12 @@ temporal:
           value: '450MiB'
     history:
       resources:
-        limits: { cpu: 1000m, memory: 2Gi }
-        requests: { cpu: 100m, memory: 1Gi }
+        limits: { cpu: 1000m, memory: 3Gi }
+        requests: { cpu: 100m, memory: 1.5Gi }
       additionalEnv:
+        # 90% of the 3Gi limit above.
         - name: GOMEMLIMIT
-          value: '1843MiB'
+          value: '2765MiB'
     dynamicConfig:
       limit.customSearchAttributes.keyword:
         - value: 100

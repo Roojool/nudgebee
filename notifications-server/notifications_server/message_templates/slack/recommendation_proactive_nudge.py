@@ -41,22 +41,6 @@ def get_recommendation_proactive_nudge_message_params(
     return ProactiveNudgeParams(**params)
 
 
-def build_ask_nubi_url(params: ProactiveNudgeParams, base_url: str, utm: str) -> str:
-    """Deep-link to the Nubi assistant page (``/ask-nudgebee``).
-
-    Shared by the Slack/Teams/Google-Chat proactive-nudge templates so the
-    destination can't drift between channels. When the bundle covers exactly
-    one account we pass ``accountId`` so Nubi opens scoped to that account's
-    context; with multiple accounts there's no single one to pick, so we link
-    to the generic assistant page.
-    """
-    url = f"{base_url}/ask-nudgebee?utm={utm}"
-    if len(params.recommendations_by_account) == 1:
-        account_id = next(iter(params.recommendations_by_account))
-        url += f"&accountId={account_id}"
-    return url
-
-
 def get_recommendation_proactive_nudge_message_template(
     params: ProactiveNudgeParams,
 ) -> Dict[str, Any]:
@@ -88,7 +72,6 @@ def get_recommendation_proactive_nudge_message_template(
             text=f"_+{remaining} more in the dashboard_" if remaining > 0 else "",
             actions=[
                 link_button("View All Recommendations", f"{base_url}/optimise?utm=slack#cost", "primary"),
-                link_button("Ask Nubi", build_ask_nubi_url(params, base_url, "slack")),
             ],
             fallback="View all recommendations",
         )

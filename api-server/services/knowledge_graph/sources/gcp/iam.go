@@ -278,3 +278,18 @@ func (s *GCPSource) createServiceIdentityFromGCPSA(resource *sources.CloudResour
 		"gcp",
 	)
 }
+
+// The inventory rows this file's resources claim (see kinds.go). GCP IAM
+// service accounts are first-class identities, not generic CloudResource
+// catch-all rows: they are the GCP analog of AWS IAM roles and users, and the
+// target of the Workload Identity chain the k8s_serviceaccount_to_gcp_iam_sa_wi
+// rule wires (#31101 gap #2).
+func init() {
+	registerKind(resourceKind{
+		Service:      "IAM",
+		Types:        []string{"iam.googleapis.com/serviceaccount"},
+		NodeType:     core.NodeTypeServiceIdentity,
+		SpecificType: "GCPServiceAccount",
+		Node:         (*GCPSource).createServiceIdentityFromGCPSA,
+	})
+}

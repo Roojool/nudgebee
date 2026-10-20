@@ -100,18 +100,92 @@ func TestRegexPredicate_EmptyObservation(t *testing.T) {
 	assert.False(t, r.Met)
 }
 
+// TestRegexPredicate_MultilineAndAnchors pins the DELIBERATE REVERSAL of the
+// original "never enable multiline under the user" rule.
+//
+// The old contract made every anchored predicate unsatisfiable against real
+// observations, because command output is newline-terminated and usually
+// multi-line: a dev-cluster watch polling `gh run list ... | wc -l` with
+// predicate "^0$" observed exactly "0\n" and ran 45 polls to EXPIRED with
+// zero failures. The agent-facing prompt (prompts/.../async_completion_rules)
+// explicitly instructs the model to write "^0$"-shaped predicates, so
+// line-anchored intent is the norm, not an edge case.
+//
+// Accepted trade-off: "^done$" now matches a "done" line anywhere in a
+// multi-line observation, not just a whole-observation "done".
 func TestRegexPredicate_MultilineAndAnchors(t *testing.T) {
-	// Confirms we don't accidentally enable multiline mode under the user.
 	p, _ := CompilePredicate(PredicateKindRegex, "^done$")
 	r, _ := p.Eval(nil, Watch{}, Observation{Data: "first line\ndone\nthird line"})
-	// Default Go regex: ^/$ are start/end of input — should NOT match.
-	assert.False(t, r.Met)
+	assert.True(t, r.Met, "anchors must be line-oriented; this is what agents mean by ^done$")
 
-	// Explicit (?m) flag still works for callers that want it.
+	// An explicit (?m) from the caller is still accepted (double flag is legal Go).
 	p2, err := CompilePredicate(PredicateKindRegex, "(?m)^done$")
 	require.NoError(t, err)
 	r2, _ := p2.Eval(nil, Watch{}, Observation{Data: "first line\ndone\nthird line"})
 	assert.True(t, r2.Met)
+
+	// Anchors must still discriminate: "done" as a substring of a longer line
+	// does not satisfy "^done$".
+	p3, _ := CompilePredicate(PredicateKindRegex, "^done$")
+	r3, _ := p3.Eval(nil, Watch{}, Observation{Data: "not done yet\nalmost done now"})
+	assert.False(t, r3.Met, "line anchors must not degrade into substring matching")
+}
+
+// TestRegexPredicate_RealObservationShapes replays the exact observation
+// payloads that dev-cluster watches expired on, per tool. Each of these
+// returned Met=false before the (?m) + source-normalization fixes.
+func TestRegexPredicate_RealObservationShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		expr string
+		obs  string
+		want bool
+	}{
+		// github_execute returns raw stdout with a trailing newline.
+		{"trailing newline", "^0$", "0\n", true},
+		// Raw CRLF is normalized by normalizeToolObservation before the
+		// predicate ever sees it — see TestNormalizeToolObservation. At this
+		// layer "\r" is ordinary content and correctly defeats "^0$".
+		{"raw crlf is not the predicate's job", "^0$", "0\r\n", false},
+		{"trailing spaces", "^0$", "0   \n", false}, // trailing spaces are content, not line end
+		// After normalizeToolObservation unwraps the shell/kubectl envelope.
+		{"unwrapped multiline stdout", "^0$", "No resources found in some-namespace namespace.\n0", true},
+		{"count still nonzero", "^0$", "13", false},
+		{"status line", "completed", "in_progress", false},
+		{"status line met", "completed", "completed", true},
+		// Whole-observation anchoring still works for single-line output.
+		{"single line exact", "^Running$", "Running", true},
+		{"single line no match", "^Running$", "CrashLoopBackOff", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := CompilePredicate(PredicateKindRegex, tc.expr)
+			require.NoError(t, err)
+			r, err := p.Eval(nil, Watch{}, Observation{Data: tc.obs})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, r.Met, "expr=%q obs=%q", tc.expr, tc.obs)
+		})
+	}
+}
+
+// TestRegexPredicate_EmptyMatchIsAMatch pins the second half of the fix:
+// match is decided by a *located* match, not by the matched text being
+// non-empty. "^$" against empty output is the canonical "wait until this
+// command stops printing anything" predicate and was permanently
+// unsatisfiable under the old rule.
+func TestRegexPredicate_EmptyMatchIsAMatch(t *testing.T) {
+	p, err := CompilePredicate(PredicateKindRegex, "^$")
+	require.NoError(t, err)
+
+	r, err := p.Eval(nil, Watch{}, Observation{Data: ""})
+	require.NoError(t, err)
+	assert.True(t, r.Met, "empty observation must satisfy ^$")
+	assert.Contains(t, r.Summary, "empty match")
+
+	// Non-empty single-line output must NOT satisfy it.
+	r2, err := p.Eval(nil, Watch{}, Observation{Data: "still here"})
+	require.NoError(t, err)
+	assert.False(t, r2.Met)
 }
 
 // ---------------------------------------------------------------------------

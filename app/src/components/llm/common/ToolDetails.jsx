@@ -85,6 +85,9 @@ const getStatusIcon = (status) => {
   if (s === 'fail' || s === 'error' || s === 'failed') {
     return { icon: AskNudgebeeErrorIcon, label: 'Error' };
   }
+  if (s === 'completed_with_errors') {
+    return { icon: AskNudgebeeSuccessIcon, label: 'Completed with errors' };
+  }
   if (s === 'skipped') {
     return { icon: AskNudgebeeSkipIcon, label: 'Skipped' };
   }

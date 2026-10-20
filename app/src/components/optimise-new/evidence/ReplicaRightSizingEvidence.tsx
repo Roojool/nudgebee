@@ -131,7 +131,7 @@ const ReplicaRightSizingEvidence = ({ recommendation, estimatedSavings }: Replic
                   : `—`;
                 return (
                   <Box key={item.timestamp || `ts-${idx}`} sx={{ display: 'contents' }}>
-                    <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], fontFamily: 'monospace' }}>{time}</Typography>
+                    <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], fontFamily: ds.font.mono }}>{time}</Typography>
                     <Typography sx={{ fontSize: ds.text.caption, color: ds.red[600], textAlign: 'center', fontWeight: ds.weight.medium }}>
                       {item.replicas}
                     </Typography>
@@ -181,7 +181,7 @@ const MetricBox = ({ label, value, color }: { label: string; value: string; colo
     }}
   >
     <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], mb: ds.space[0] }}>{label}</Typography>
-    <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], fontFamily: 'monospace' }}>{value}</Typography>
+    <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], fontFamily: ds.font.mono }}>{value}</Typography>
   </Box>
 );
 

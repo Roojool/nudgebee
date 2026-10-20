@@ -1,23 +1,25 @@
 import { Box, Typography, CircularProgress } from '@mui/material';
-import { useState, useEffect, useMemo } from 'react';
+import { useMemo } from 'react';
 import { ds } from 'src/utils/colors';
 import { formatMemory } from '@lib/formatter';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import DragHandleIcon from '@mui/icons-material/DragHandle';
 import Chart from '@ui/Chart';
 import { Card } from '@ui/Card';
-import k8sApi from '@api1/kubernetes';
 import { SavingsFooter } from './evidencePrimitives';
 import { safeParseJSON } from '@components/optimise-new/utils';
 import MetricQueryInfo, { K8S_METRIC_QUERY_LABELS } from '@shared/MetricQueryInfo';
 import CustomTable from '@shared/tables/CustomTable';
-import { replicaWindowOf } from '../rightSizingData';
-import { perPodCaption, toPerPodTrend } from './perPodTrend';
+import { perPodCaption } from './perPodTrend';
+import { buildTrendSeries } from './trendSeries';
+import type { RightSizingTrend } from '@hooks/useRightSizingTrend';
 
 interface RightSizingEvidenceProps {
   recommendation: any;
   estimatedSavings?: number;
   fullRecommendation?: any;
+  /** The usage trend, fetched once by the drawer and shared with the Details tab. */
+  trend: RightSizingTrend;
 }
 
 // Extract notifications from either format:
@@ -118,170 +120,25 @@ const PerPodCaption = ({ text }: { text: string }) => (
   <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], mb: ds.space[2] }}>{text}</Typography>
 );
 
-const RightSizingEvidence = ({ recommendation, estimatedSavings, fullRecommendation }: RightSizingEvidenceProps) => {
+const RightSizingEvidence = ({ recommendation, estimatedSavings, fullRecommendation, trend }: RightSizingEvidenceProps) => {
   const rec = useMemo(() => safeParseJSON(recommendation), [recommendation]);
   const containers = useMemo(() => extractContainerData(rec), [rec]);
 
-  // Fetch CPU/Memory trend data
-  const [trendData, setTrendData] = useState<any[]>([]);
-  const [trendLoading, setTrendLoading] = useState(false);
-  // Executed metric queries that produced the trend (only the prometheus datasource returns them).
-  const [cpuQueries, setCpuQueries] = useState<Record<string, string>>({});
-  const [memoryQueries, setMemoryQueries] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    if (!fullRecommendation) return;
-    const accountId = fullRecommendation.account_id;
-    const meta = fullRecommendation.cloud_resourse?.meta || {};
-    const resourceType = fullRecommendation.cloud_resourse?.type || fullRecommendation.resource_type || '';
-    const namespaceName = fullRecommendation.resource_k8s_namespace || meta?.config?.namespace || meta?.namespace || meta?.namespaceName || '';
-    const isPod = resourceType === 'Pod';
-    const workloadName = isPod
-      ? meta?.controller || meta?.config?.controller || fullRecommendation.resource_name
-      : fullRecommendation.cloud_resourse?.name || fullRecommendation.resource_name;
-    const workloadType = isPod ? meta?.controllerKind || meta?.config?.controllerKind || 'Deployment' : resourceType || 'Deployment';
-    // For Pod-level: only pass podName if different from workloadName (matches existing page behavior)
-    const podName = isPod ? fullRecommendation.cloud_resourse?.name || fullRecommendation.resource_name : undefined;
-    const effectivePodName = podName && podName !== workloadName ? podName : undefined;
-
-    if (!accountId || !namespaceName || !workloadName) return;
-
-    let cancelled = false;
-
-    setTrendLoading(true);
-    setCpuQueries({});
-    setMemoryQueries({});
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - 7);
-
-    // Match the existing KubernetesUtilization page: use 'prometheus' datasource with explicit metrics list
-    // The recommendation line is the first container's target, so usage is
-    // scoped to that container and asked for per pod: the running pod count
-    // and the busiest pod ride along with the workload totals.
-    const query: any = {
-      accountId,
-      namespaceName,
-      workloadName,
-      workloadType: workloadType?.toLowerCase(),
-      startDate,
-      endDate: new Date(),
-      metrics: [
-        'cpu_usage',
-        'memory_usage',
-        'cpu_limit',
-        'cpu_request',
-        'memory_limit',
-        'memory_request',
-        'pod_count',
-        'cpu_usage_max_pod',
-        'memory_usage_max_pod',
-      ],
-    };
-    if (effectivePodName) query.podName = effectivePodName;
-    // The legacy {notifications: [...]} shape names no container; its 'default'
-    // placeholder must not become a PromQL filter that matches nothing.
-    const containerName = containers[0]?.containerName;
-    if (containerName && containerName !== 'default') query.containerName = containerName;
-
-    const groupBy = ['tenant_id', 'account_id', 'timestamp'];
-    if (namespaceName) groupBy.push('namespace_name');
-    if (workloadName) groupBy.push('workload_name');
-    if (effectivePodName) groupBy.push('pod_name');
-
-    // Split the executed queries (keyed by metric, e.g. cpu_usage / memory_limit) into CPU and memory groups.
-    const applyQueries = (res: any) => {
-      const promQueries: Record<string, string> = res?.data?.promQueries || {};
-      const cpuQ: Record<string, string> = {};
-      const memQ: Record<string, string> = {};
-      Object.entries(promQueries).forEach(([key, q]) => {
-        if (key.startsWith('cpu_')) {
-          cpuQ[key] = q;
-        } else if (key.startsWith('memory_')) {
-          memQ[key] = q;
-        } else if (key === 'pod_count') {
-          // The divisor behind both charts.
-          cpuQ[key] = q;
-          memQ[key] = q;
-        }
-      });
-      setCpuQueries(cpuQ);
-      setMemoryQueries(memQ);
-    };
-
-    k8sApi
-      .getK8sPodGroupings2(500, query, groupBy, 'prometheus')
-      .then((res: any) => {
-        if (cancelled) return undefined;
-        const rows = res?.data?.k8s_pod_groupings || [];
-        if (rows.length > 0) {
-          setTrendData(rows);
-          applyQueries(res);
-          return undefined;
-        }
-        // Fallback: try 'nb' (RPC) datasource for historical data
-        return k8sApi.getK8sPodGroupings2(500, query, groupBy, 'nb').then((res2: any) => {
-          if (cancelled) return;
-          setTrendData(res2?.data?.k8s_pod_groupings || []);
-        });
-      })
-      .catch((err: any) => {
-        if (cancelled) return;
-        console.error('[RightSizingEvidence] Failed to fetch pod trend data:', err);
-      })
-      .finally(() => {
-        if (!cancelled) setTrendLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fullRecommendation, containers[0]?.containerName]);
-
-  // Per pod, like the recommendation line: totals are divided by the running
-  // pod count, or by the replica average the producers stamped on the row.
-  const livePods = fullRecommendation?.cloud_resourse?.meta?.total_pods;
-  const perPod = useMemo(
-    () => toPerPodTrend(trendData, replicaWindowOf(containers[0] ? [containers[0].cpu, containers[0].memory] : [])?.avg, livePods),
-    [trendData, containers, livePods]
-  );
+  // The drawer owns the fetch (useRightSizingTrend); this tab draws it in full.
+  const { perPod, loading: trendLoading, hasData: hasTrendData, cpuQueries, memoryQueries } = trend;
   const perPodCaptionText = perPodCaption(perPod);
 
-  // Prepare trend chart data — match existing KubernetesRecommendationCharts format
-  // Shows: Usage, Request, Limit, Recommendation as separate lines
-  const { trendLabels, cpuUsage, cpuRequest, cpuLimit, memUsage, memRequest, memLimit, hasCpuLimit, hasMemLimit, cpuBusiest, memBusiest } =
-    useMemo(() => {
-      const rows = perPod.rows;
-      const limitsCpu = rows.map((r: any) => r.avg_cpu_limit);
-      const limitsMem = rows.map((r: any) => (r.avg_memory_limit != null ? r.avg_memory_limit / (1024 * 1024) : null));
-      return {
-        trendLabels: rows.map((r: any) =>
-          new Date(r.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-        ),
-        cpuUsage: rows.map((r: any) => r.avg_cpu_used),
-        cpuRequest: rows.map((r: any) => r.avg_cpu_request),
-        cpuLimit: limitsCpu,
-        memUsage: rows.map((r: any) => (r.avg_memory_used != null ? r.avg_memory_used / (1024 * 1024) : null)),
-        memRequest: rows.map((r: any) => (r.avg_memory_request != null ? r.avg_memory_request / (1024 * 1024) : null)),
-        memLimit: limitsMem,
-        hasCpuLimit: limitsCpu.some((v: any) => v != null),
-        hasMemLimit: limitsMem.some((v: any) => v != null),
-        cpuBusiest: perPod.hasBusiestPod ? rows.map((r: any) => r.max_pod_cpu_used ?? null) : null,
-        memBusiest: perPod.hasBusiestPod
-          ? rows.map((r: any) => (r.max_pod_memory_used != null ? r.max_pod_memory_used / (1024 * 1024) : null))
-          : null,
-      };
-    }, [perPod]);
-
-  // Get recommended values from recommendation JSONB to draw horizontal recommendation line
+  // The recommended values from the recommendation JSONB draw the flat
+  // recommendation line, and the same builder feeds the compact Details chart,
+  // so both tabs plot identical numbers.
   const firstContainer = containers[0];
-  const cpuReccValue = firstContainer?.cpu?.recommended?.request;
-  const memReccValue = firstContainer?.memory?.recommended?.request;
-  const cpuReccLine = useMemo(() => (cpuReccValue != null ? perPod.rows.map(() => cpuReccValue) : null), [perPod.rows, cpuReccValue]);
-  // Plain division, not the display formatter: its thousands separator made
-  // every recommendation of 1,000 MB or more parse to NaN and vanish.
-  const memReccMb = memReccValue != null && Number.isFinite(Number(memReccValue)) ? Number(memReccValue) / (1024 * 1024) : null;
-  const memReccLine = useMemo(() => (memReccMb != null ? perPod.rows.map(() => memReccMb) : null), [perPod.rows, memReccMb]);
+  const series = useMemo(
+    () => buildTrendSeries(perPod, firstContainer?.cpu?.recommended?.request, firstContainer?.memory?.recommended?.request),
+    [perPod, firstContainer]
+  );
+  const { labels: trendLabels, cpu, memory } = series;
+  const { usage: cpuUsage, request: cpuRequest, limit: cpuLimit, hasLimit: hasCpuLimit, busiest: cpuBusiest, recommended: cpuReccLine } = cpu;
+  const { usage: memUsage, request: memRequest, limit: memLimit, hasLimit: hasMemLimit, busiest: memBusiest, recommended: memReccLine } = memory;
   const basis = perPod.source ? 'per pod' : 'all replicas';
 
   if (containers.length === 0) {
@@ -292,8 +149,6 @@ const RightSizingEvidence = ({ recommendation, estimatedSavings, fullRecommendat
       </Box>
     );
   }
-
-  const hasTrendData = trendData.length > 0;
 
   return (
     <Box sx={{ p: ds.space.mul(0, 7) }}>
@@ -528,7 +383,7 @@ const RightSizingEvidence = ({ recommendation, estimatedSavings, fullRecommendat
 const PercentileItem = ({ label, value }: { label: string; value: string }) => (
   <Box sx={{ display: 'flex', justifyContent: 'space-between', py: ds.space[1] }}>
     <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500] }}>{label}</Typography>
-    <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[700], fontWeight: ds.weight.medium, fontFamily: 'monospace' }}>{value}</Typography>
+    <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[700], fontWeight: ds.weight.medium, fontFamily: ds.font.mono }}>{value}</Typography>
   </Box>
 );
 
@@ -564,7 +419,7 @@ const UtilizationBar = ({
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: ds.space[1] }}>
         <Typography sx={{ fontSize: ds.text.caption, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>{label} Usage (P99)</Typography>
-        <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], fontFamily: 'monospace' }}>
+        <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], fontFamily: ds.font.mono }}>
           {fmt(usage)} / {fmt(allocated)} {unit} ({pct.toFixed(0)}%)
         </Typography>
       </Box>

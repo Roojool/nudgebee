@@ -7,6 +7,7 @@ import {
   disableIntegration,
   enableIntegration,
   selectAccountFromDropdown,
+  testConnection,
 } from "./util";
 import { IntegrationLocators } from "./IntegrationLocators";
 
@@ -93,6 +94,20 @@ test.describe.serial("MCP Account Integration", () => {
       await locators.mcpLlmInstructionsInput.waitFor({ state: "visible", timeout: 10000 });
       await locators.mcpLlmInstructionsInput.fill(process.env.MCP_LLM_INSTRUCTIONS);
     }
+
+    // MCP's schema is `testable`, so the Save button (id="create-integration-acc",
+    // shared across all integration types) stays disabled until Test Connection
+    // succeeds — see IntegrationDynamicFormModal.jsx's connectionVerified gate.
+    const connected = await testConnection(page, {
+      testConnectionBtn: locators.mcpTestConnectionBtn,
+      successToast: locators.mcpTestConnectionSuccessToast,
+      serviceName: "MCP",
+      saveBtn: locators.saveBtn,
+      operationNames: ["TestIntegrationConnectionConfig"],
+      skipOnBackendError: true,
+      checkDataErrors: true,
+    });
+    if (!connected) return;
 
     await saveAndHandleAlreadyExists(page, {
       saveBtn: locators.saveBtn,

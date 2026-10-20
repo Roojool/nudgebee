@@ -163,3 +163,21 @@ func TestIsEmpty_ResetOnlyConfigIsNotEmpty(t *testing.T) {
 		t.Fatal("a reset-only config must not read as empty")
 	}
 }
+
+func TestMergeFrom_SkipConversationHistoryInheritsWithinTurn(t *testing.T) {
+	// Sub-agent and resume merges of the same turn's stored config must keep
+	// the flag, or a resumed event analysis reloads the prior occurrences.
+	q := NBQueryConfig{Namespace: "nudgebee"}
+	q.MergeFrom(NBQueryConfig{SkipConversationHistory: true})
+	if !q.SkipConversationHistory {
+		t.Fatal("skip-history flag lost on merge")
+	}
+}
+
+func TestIsEmpty_SkipHistoryOnlyConfigIsNotEmpty(t *testing.T) {
+	// An "empty" config is replaced wholesale by the stored one, which would
+	// silently drop the flag.
+	if (NBQueryConfig{SkipConversationHistory: true}).IsEmpty() {
+		t.Fatal("a skip-history-only config must not read as empty")
+	}
+}

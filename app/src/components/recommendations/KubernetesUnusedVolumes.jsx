@@ -28,7 +28,7 @@ import useRecommendationExport from '@hooks/useRecommendationExport';
 
 // DS V2 primitives — phased in alongside the legacy components. Visual swap only;
 // API calls, handlers, and modal forms are untouched.
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Stat } from '@ui/Stat';
 import { CostCallout } from '@ui/CostCallout';
@@ -391,15 +391,15 @@ const KubernetesUnusedVolumes = ({ isOptimisePage = false, resourceIds, groupNam
         mt={2}
         mb={2}
       >
-        <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+        <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
           <Stat
             size='md'
             label='Total Recommendations'
             info={{ tooltip: 'Active unused-volume recommendations across the selected scope' }}
             value={Number.isFinite(totalRecommendationsCount) ? totalRecommendationsCount.toLocaleString() : totalRecommendationsCount ?? '—'}
           />
-        </WidgetCard>
-        <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+        </Card>
+        <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
           <Stat
             size='md'
             label='Total Cost'
@@ -412,15 +412,15 @@ const KubernetesUnusedVolumes = ({ isOptimisePage = false, resourceIds, groupNam
               )
             }
           />
-        </WidgetCard>
-        <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+        </Card>
+        <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
           <Stat
             size='md'
             label='Savings Potential'
             info={{ tooltip: 'Estimated yearly savings if every unused volume is removed' }}
             value={<CostCallout size='lg' tone='high-savings' value={(Number(kubernetesUnusedVolumeEstimatedSaving) || 0) * 12} period='/ yr' />}
           />
-        </WidgetCard>
+        </Card>
       </Box>
 
       <KubernetesUnusedVolumeUpdatePopupForm

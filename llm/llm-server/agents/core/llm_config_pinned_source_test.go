@@ -47,7 +47,7 @@ func TestParseConfigSourceId_Valid(t *testing.T) {
 		{"env:agent:soul_consolidate", parsedConfigSource{Layer: "env", Scope: "agent", Name: "soul_consolidate"}},
 		{"db:6f2c-1a2b", parsedConfigSource{Layer: "db", Scope: "global", IntegrationUuid: "6f2c-1a2b"}},
 		{"db:abc:tier:reasoning", parsedConfigSource{Layer: "db", Scope: "tier", Name: "reasoning", IntegrationUuid: "abc"}},
-		{"db:xyz:agent:memory_compose", parsedConfigSource{Layer: "db", Scope: "agent", Name: "memory_compose", IntegrationUuid: "xyz"}},
+		{"db:xyz:agent:memory_rerank", parsedConfigSource{Layer: "db", Scope: "agent", Name: "memory_rerank", IntegrationUuid: "xyz"}},
 	}
 	for _, c := range cases {
 		got, err := parseConfigSourceId(c.in)
@@ -92,9 +92,9 @@ func TestConfigNameFor(t *testing.T) {
 
 	// db slots are tenant-owned — they read as the integration's own name.
 	dbCases := map[string]string{
-		"db:11111111-2222-3333-4444-555555555555":                      "Acme Azure",
-		"db:11111111-2222-3333-4444-555555555555:tier:reasoning":       "Acme Azure · Reasoning tier",
-		"db:11111111-2222-3333-4444-555555555555:agent:memory_compose": "Acme Azure · Agent: memory_compose",
+		"db:11111111-2222-3333-4444-555555555555":                     "Acme Azure",
+		"db:11111111-2222-3333-4444-555555555555:tier:reasoning":      "Acme Azure · Reasoning tier",
+		"db:11111111-2222-3333-4444-555555555555:agent:memory_rerank": "Acme Azure · Agent: memory_rerank",
 	}
 	for id, want := range dbCases {
 		assert.Equal(t, want, ConfigNameFor(id, "Acme Azure"), "config name for %q", id)
@@ -113,7 +113,7 @@ func TestDeriveConfigSource_Primary(t *testing.T) {
 	// db-scoped sources carry the owning integration's uuid.
 	assert.Equal(t, "db:int-1", deriveConfigSource("db:int-1", false))
 	assert.Equal(t, "db:int-1:tier:reasoning", deriveConfigSource("db:int-1:tier:reasoning", false))
-	assert.Equal(t, "db:int-1:agent:memory_compose", deriveConfigSource("db:int-1:agent:memory_compose", false))
+	assert.Equal(t, "db:int-1:agent:memory_rerank", deriveConfigSource("db:int-1:agent:memory_rerank", false))
 }
 
 func TestDeriveConfigSource_FallbackStripsToParent(t *testing.T) {
@@ -277,18 +277,18 @@ func TestResolveFromPinnedSource_DbSlot(t *testing.T) {
 		Id:   "int-1",
 		Name: "Acme Azure",
 		Config: map[string]string{
-			"llm_provider":                        "azure",
-			"llm_model_name":                      "gpt-4o",
-			"llm_provider_api_endpoint":           "https://acme.openai.azure.com",
-			"llm_provider_api_key":                "azure-key",
-			"llm_provider_api_version":            "2024-06-01",
-			"llm_tier_provider_reasoning":         "azure",
-			"llm_tier_model_reasoning":            "o3-mini",
-			"llm_tier_api_endpoint_reasoning":     "https://acme-reasoning.openai.azure.com",
-			"llm_tier_api_key_reasoning":          "azure-reasoning-key",
-			"llm_provider_memory_compose":         "openai",
-			"llm_model_name_memory_compose":       "gpt-4o-mini",
-			"llm_provider_api_key_memory_compose": "openai-key",
+			"llm_provider":                       "azure",
+			"llm_model_name":                     "gpt-4o",
+			"llm_provider_api_endpoint":          "https://acme.openai.azure.com",
+			"llm_provider_api_key":               "azure-key",
+			"llm_provider_api_version":           "2024-06-01",
+			"llm_tier_provider_reasoning":        "azure",
+			"llm_tier_model_reasoning":           "o3-mini",
+			"llm_tier_api_endpoint_reasoning":    "https://acme-reasoning.openai.azure.com",
+			"llm_tier_api_key_reasoning":         "azure-reasoning-key",
+			"llm_provider_memory_rerank":         "openai",
+			"llm_model_name_memory_rerank":       "gpt-4o-mini",
+			"llm_provider_api_key_memory_rerank": "openai-key",
 		},
 	})
 
@@ -309,7 +309,7 @@ func TestResolveFromPinnedSource_DbSlot(t *testing.T) {
 		"tier slot must use its own endpoint, not the integration's global one")
 	assert.Equal(t, "azure-reasoning-key", tier.PinnedApiKey)
 
-	agent, err := resolveFromPinnedSource(nil, "db:int-1:agent:memory_compose", "acct-1", "memory_compose", "")
+	agent, err := resolveFromPinnedSource(nil, "db:int-1:agent:memory_rerank", "acct-1", "memory_rerank", "")
 	assert.NoError(t, err)
 	assert.Equal(t, "openai", agent.Provider)
 	assert.Equal(t, "gpt-4o-mini", agent.Model)

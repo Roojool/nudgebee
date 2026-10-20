@@ -326,12 +326,12 @@ func TestValidateImages_MIMEMismatch(t *testing.T) {
 
 func TestIsVisionCapableModel_DefaultDenyList(t *testing.T) {
 	// Regex-denied models are never vision-capable, regardless of DB state.
-	assert.False(t, IsVisionCapableModel("openai", "gpt-3.5-turbo"))
-	assert.False(t, IsVisionCapableModel("bedrock", "claude-2.1"))
-	assert.False(t, IsVisionCapableModel("bedrock", "claude-instant-v1"))
-	assert.False(t, IsVisionCapableModel("bedrock", "amazon.titan-text-express-v1"))
-	assert.False(t, IsVisionCapableModel("bedrock", "cohere.command-text-v14"))
-	assert.False(t, IsVisionCapableModel("bedrock", "cohere.command-light-text-v14"))
+	assert.False(t, IsVisionCapableModel("", "openai", "gpt-3.5-turbo"))
+	assert.False(t, IsVisionCapableModel("", "bedrock", "claude-2.1"))
+	assert.False(t, IsVisionCapableModel("", "bedrock", "claude-instant-v1"))
+	assert.False(t, IsVisionCapableModel("", "bedrock", "amazon.titan-text-express-v1"))
+	assert.False(t, IsVisionCapableModel("", "bedrock", "cohere.command-text-v14"))
+	assert.False(t, IsVisionCapableModel("", "bedrock", "cohere.command-light-text-v14"))
 }
 
 // TestIsVisionCapableModel_UnconfirmedModelsDefaultDeny documents the
@@ -339,14 +339,14 @@ func TestIsVisionCapableModel_DefaultDenyList(t *testing.T) {
 // vision-capable absent an explicit llm_model_pricing.supports_image_input
 // row. Absence from the deny-list is not evidence of vision support.
 func TestIsVisionCapableModel_UnconfirmedModelsDefaultDeny(t *testing.T) {
-	assert.False(t, IsVisionCapableModel("bedrock", "anthropic.claude-sonnet-4-20250514-v1:0"))
-	assert.False(t, IsVisionCapableModel("openai", "gpt-4o"))
-	assert.False(t, IsVisionCapableModel("googleai", "gemini-2.0-flash"))
+	assert.False(t, IsVisionCapableModel("", "bedrock", "anthropic.claude-sonnet-4-20250514-v1:0"))
+	assert.False(t, IsVisionCapableModel("", "openai", "gpt-4o"))
+	assert.False(t, IsVisionCapableModel("", "googleai", "gemini-2.0-flash"))
 }
 
 func TestIsVisionCapableModel_CaseInsensitive(t *testing.T) {
-	assert.False(t, IsVisionCapableModel("openai", "GPT-3.5-turbo"))
-	assert.False(t, IsVisionCapableModel("bedrock", "Claude-2"))
+	assert.False(t, IsVisionCapableModel("", "openai", "GPT-3.5-turbo"))
+	assert.False(t, IsVisionCapableModel("", "bedrock", "Claude-2"))
 }
 
 // TestIsVisionCapableModel_AnchoredPatterns ensures the deny-list regexes do

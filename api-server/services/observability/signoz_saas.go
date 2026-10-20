@@ -1,348 +1,189 @@
 package observability
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"math"
-	neturl "net/url"
+	"net/http"
 	"nudgebee/services/common"
 	"nudgebee/services/integrations/core"
+	"nudgebee/services/integrations/signozclient"
 	"nudgebee/services/security"
 	"strconv"
 	"strings"
 )
 
-// SignozSaasSource is a LogSource implementation for Signoz SaaS.
+// SignozSaasSource is a LogSource implementation for a user-configured SigNoz
+// (self-hosted or Cloud), queried directly over HTTP.
 type SignozSaasSource struct{}
-
-type SignozJwtResponse struct {
-	AccessJwt string `json:"accessJwt"`
-}
 
 const (
 	SignozMode     = "signoz_mode"
 	SignozUrl      = "signoz_url"
 	SignozUserName = "signoz_username"
 	SignozPassword = "signoz_password"
-
-	SignozModeSelfHosted = "self_hosted"
-	SignozModeCloud      = "cloud"
+	SignozAuthType = "signoz_auth_type"
+	SignozAPIKey   = "signoz_api_key"
 )
 
-func (s *SignozSaasSource) GetJwtToken(ctx *security.RequestContext, signozUrl, signozUsername, signozPassword string) (string, error) {
-	return s.getJwtTokenForMode(ctx, signozUrl, signozUsername, signozPassword, SignozModeSelfHosted)
-}
-
-func (s *SignozSaasSource) getJwtTokenForMode(ctx *security.RequestContext, signozUrl, signozUsername, signozPassword, mode string) (string, error) {
-	if mode == SignozModeCloud {
-		return s.getCloudJwtToken(ctx, signozUrl, signozUsername, signozPassword)
-	}
-	return s.getSelfHostedJwtToken(ctx, signozUrl, signozUsername, signozPassword)
-}
-
-func (s *SignozSaasSource) getSelfHostedJwtToken(ctx *security.RequestContext, signozUrl, signozUsername, signozPassword string) (string, error) {
-	jwtTokenObject := map[string]string{
-		"email":    signozUsername,
-		"password": signozPassword,
-	}
-
-	res, err := common.HttpPost(fmt.Sprintf("%s/api/v1/login", signozUrl), common.HttpWithJsonBody(jwtTokenObject))
-	if err != nil {
-		return "", fmt.Errorf("failed to post login request: %w", err)
-	}
-	defer func() {
-		err := res.Body.Close()
-		if err != nil {
-			ctx.GetLogger().Error("Error closing response body", "error", err)
-		}
-	}()
-
-	scanner := bufio.NewScanner(res.Body)
-	var obj SignozJwtResponse
-	for scanner.Scan() {
-		if err := json.Unmarshal(scanner.Bytes(), &obj); err != nil {
-			slog.Warn("signoz: JWT response parse error", "error", err)
-			continue
-		}
-	}
-	if obj.AccessJwt != "" {
-		return obj.AccessJwt, nil
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("failed to scan response body: %w", err)
-	}
-
-	return "", fmt.Errorf("empty JWT token received")
-}
-
-// getCloudJwtToken performs the two-step SigNoz Cloud handshake:
-//
-//	GET  /api/v2/sessions/context?email=<email>   → orgID
-//	POST /api/v2/sessions/email_password          → accessToken
-func (s *SignozSaasSource) getCloudJwtToken(ctx *security.RequestContext, signozUrl, signozUsername, signozPassword string) (string, error) {
-	ctxResp, err := common.HttpGet(
-		fmt.Sprintf("%s/api/v2/sessions/context?email=%s", signozUrl, neturl.QueryEscape(signozUsername)),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch signoz cloud sessions/context: %w", err)
-	}
-	defer func() {
-		if err := ctxResp.Body.Close(); err != nil {
-			ctx.GetLogger().Error("Error closing response body", "error", err)
-		}
-	}()
-
-	var ctxParsed struct {
-		Data struct {
-			Exists bool `json:"exists"`
-			Orgs   []struct {
-				ID string `json:"id"`
-			} `json:"orgs"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(ctxResp.Body).Decode(&ctxParsed); err != nil {
-		return "", fmt.Errorf("failed to decode signoz cloud sessions/context: %w", err)
-	}
-	if !ctxParsed.Data.Exists || len(ctxParsed.Data.Orgs) == 0 {
-		return "", fmt.Errorf("signoz cloud: no organization found for email %s", signozUsername)
-	}
-	orgID := ctxParsed.Data.Orgs[0].ID
-	if orgID == "" {
-		return "", fmt.Errorf("tenant identifier orgID is empty")
-	}
-
-	loginResp, err := common.HttpPost(
-		fmt.Sprintf("%s/api/v2/sessions/email_password", signozUrl),
-		common.HttpWithJsonBody(map[string]string{
-			"email":    signozUsername,
-			"password": signozPassword,
-			"orgID":    orgID,
-		}),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to post signoz cloud login: %w", err)
-	}
-	defer func() {
-		if err := loginResp.Body.Close(); err != nil {
-			ctx.GetLogger().Error("Error closing response body", "error", err)
-		}
-	}()
-
-	if loginResp.StatusCode != 200 {
-		return "", fmt.Errorf("signoz cloud login failed with status %d", loginResp.StatusCode)
-	}
-
-	var loginParsed struct {
-		Data struct {
-			AccessToken string `json:"accessToken"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(loginResp.Body).Decode(&loginParsed); err != nil {
-		return "", fmt.Errorf("invalid type or malformed json for signoz cloud login response: %w", err)
-	}
-	if loginParsed.Data.AccessToken == "" {
-		return "", fmt.Errorf("signoz cloud login returned empty accessToken")
-	}
-	return loginParsed.Data.AccessToken, nil
-}
+// Same vocabulary as the agent-mode source: SigNoz Cloud speaks the same attribute
+// names, so both resolve `message` onto `body` from one table.
 func (s *SignozSaasSource) GetLabelMapping() map[string]string {
-	return map[string]string{}
+	return signozLogLabelMapping
 }
 
 func (s *SignozSaasSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_like"}
+	return signozSupportedOperators
 }
 
-func (s *SignozSaasSource) GetSignozAuth(ctx *security.RequestContext, accountId string) (string, string, error) {
+func (s *SignozSaasSource) ExpandedLabelKeys() map[string][]string { return signozExpandedLabelKeys }
+
+// GetSignozAuth loads the account's user-sourced SigNoz integration and returns
+// its credentials. Logging in is left to signozDo, which caches the token and
+// detects the login API of the SigNoz release behind the URL.
+func (s *SignozSaasSource) GetSignozAuth(ctx *security.RequestContext, accountId string) (signozclient.Credentials, error) {
 	integrationDto, err := core.ListIntegrationConfigs(ctx, accountId, "signoz")
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get signoz integration: %w", err)
-	}
-	if len(integrationDto) == 0 {
-		return "", "", errors.New("no signoz integrations found")
+		return signozclient.Credentials{}, fmt.Errorf("failed to get signoz integration: %w", err)
 	}
 
-	integration := integrationDto[0]
-
-	var signozMode, signozUrl, signozUsername, signozPassword string
-	for _, config := range integration.Configs {
-		switch config.Name {
-		case SignozMode:
-			signozMode = config.Value
-		case SignozUrl:
-			signozUrl = config.Value
-		case SignozUserName:
-			signozUsername = config.Value
-		case SignozPassword:
-			// ListIntegrationConfigs returns config values raw — it does not
-			// decrypt. signoz_password is stored with is_encrypted=true (see the
-			// signoz integration schema), so the stored value is ciphertext.
-			// Pass it through Decrypt before using it as the login password;
-			// without this the SigNoz login receives ciphertext and 401s.
-			// (Legacy rows saved with is_encrypted=false are left untouched.)
-			if config.IsEncrypted && config.Value != "" {
-				decrypted, derr := common.Decrypt(config.Value)
-				if derr != nil {
-					return "", "", fmt.Errorf("failed to decrypt signoz password: %w", derr)
-				}
-				signozPassword = decrypted
-			} else {
-				signozPassword = config.Value
-			}
+	// An account can also carry an agent-detected SigNoz row, which has no URL
+	// or credentials, and the list is unordered: take the user-sourced row.
+	var userIntegrations []core.IntegrationDto
+	for _, dto := range integrationDto {
+		if dto.Source == "user" {
+			userIntegrations = append(userIntegrations, dto)
 		}
 	}
-	if signozMode == "" {
-		signozMode = SignozModeSelfHosted
+	if len(userIntegrations) == 0 {
+		return signozclient.Credentials{}, errors.New("no signoz integrations found")
 	}
 
-	if signozUrl == "" || signozUsername == "" || signozPassword == "" {
-		return "", "", fmt.Errorf("missing required signoz configuration values")
-	}
-
-	jwtToken, err := s.getJwtTokenForMode(ctx, signozUrl, signozUsername, signozPassword, signozMode)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get jwt token: %w", err)
-	}
-
-	return signozUrl, jwtToken, nil
+	return signozCredentials(userIntegrations[0].Configs)
 }
 
-func (s *SignozSaasSource) QueryLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) ([]OutputLog, error) {
-	if fetchLogRequest.Query == "" {
-		flattenedClauses, err := FlattenSignozQuery(fetchLogRequest.QueryRequest.Where)
-		if err != nil {
-			return nil, fmt.Errorf("failed to flatten query: %w", err)
-		}
-		queryJSON, err := json.Marshal(flattenedClauses)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal flattened query: %w", err)
-		}
-		fetchLogRequest.Query = string(queryJSON)
+// signozCredentials builds the credentials for one stored SigNoz integration.
+// Only the selected auth type's values are used: a row that switched type keeps
+// the other type's (now hidden) values, and they must never authenticate. A row
+// saved before API-key auth has no auth type and is a password row.
+func signozCredentials(configs []core.IntegrationConfigValue) (signozclient.Credentials, error) {
+	stored := map[string]core.IntegrationConfigValue{}
+	for _, config := range configs {
+		stored[config.Name] = config
 	}
-	signozUrl, jwtToken, err := s.GetSignozAuth(ctx, fetchLogRequest.AccountId)
+	// value reads one stored config value. ListIntegrationConfigs returns
+	// values raw — it does not decrypt — and secrets (signoz_password,
+	// signoz_api_key) are stored with is_encrypted=true, so without this SigNoz
+	// receives ciphertext and answers 401. (Legacy rows saved with
+	// is_encrypted=false are left untouched.) Only the selected type's secret
+	// is read, so an undecryptable leftover of the other type can't break a
+	// working row.
+	value := func(name string) (string, error) {
+		config := stored[name]
+		if !config.IsEncrypted || config.Value == "" {
+			return config.Value, nil
+		}
+		decrypted, err := common.Decrypt(config.Value)
+		if err != nil {
+			return "", fmt.Errorf("failed to decrypt signoz %s: %w", name, err)
+		}
+		return decrypted, nil
+	}
+	values := map[string]string{
+		SignozUrl:      stored[SignozUrl].Value,
+		SignozMode:     stored[SignozMode].Value,
+		SignozAuthType: stored[SignozAuthType].Value,
+		SignozUserName: stored[SignozUserName].Value,
+	}
+
+	creds := signozclient.Credentials{
+		BaseURL:  values[SignozUrl],
+		Mode:     values[SignozMode],
+		AuthType: values[SignozAuthType],
+	}
+	if creds.AuthType == "" {
+		creds.AuthType = signozclient.AuthPassword
+	}
+
+	var err error
+	switch creds.AuthType {
+	case signozclient.AuthAPIKey:
+		if creds.APIKey, err = value(SignozAPIKey); err != nil {
+			return signozclient.Credentials{}, err
+		}
+		if creds.BaseURL == "" || creds.APIKey == "" {
+			return signozclient.Credentials{}, fmt.Errorf("missing required signoz configuration values")
+		}
+	case signozclient.AuthPassword:
+		if creds.Password, err = value(SignozPassword); err != nil {
+			return signozclient.Credentials{}, err
+		}
+		creds.Email = values[SignozUserName]
+		if creds.BaseURL == "" || creds.Email == "" || creds.Password == "" {
+			return signozclient.Credentials{}, fmt.Errorf("missing required signoz configuration values")
+		}
+	default:
+		return signozclient.Credentials{}, fmt.Errorf("unknown signoz auth type %q", creds.AuthType)
+	}
+	return creds, nil
+}
+
+// signozDo sends one authenticated request to the account's SigNoz. The body
+// is marshalled to JSON when non-nil.
+func (s *SignozSaasSource) signozDo(ctx *security.RequestContext, accountId, method, path string, body any) (*http.Response, error) {
+	creds, err := s.GetSignozAuth(ctx, accountId)
 	if err != nil {
 		return nil, err
 	}
-
-	var parsedQuery any
-	if err := common.UnmarshalJson([]byte(fetchLogRequest.Query), &parsedQuery); err != nil {
-		return nil, fmt.Errorf("failed to parse Query JSON for signoz: %w", err)
-	}
-	orderBy := []map[string]any{
-		{"columnName": "timestamp", "order": "desc"},
-	}
-	if len(fetchLogRequest.SortFields) > 0 {
-		orderBy = make([]map[string]any, len(fetchLogRequest.SortFields))
-		for i, sf := range fetchLogRequest.SortFields {
-			orderBy[i] = map[string]any{
-				"columnName": sf.ColumnName,
-				"order":      sf.Order,
-			}
+	var payload []byte
+	if body != nil {
+		if payload, err = json.Marshal(body); err != nil {
+			return nil, fmt.Errorf("failed to marshal signoz request: %w", err)
 		}
 	}
-	limit := 1000
-	if fetchLogRequest.Limit > 0 {
-		limit = fetchLogRequest.Limit
+	reqCtx := ctx.GetContext()
+	if reqCtx == nil {
+		reqCtx = context.Background()
 	}
-	steps := 60
-	if fetchLogRequest.StepInterval > 0 {
-		steps = fetchLogRequest.StepInterval
-	}
-	offset := 0
-	if fetchLogRequest.Offset > 0 {
-		offset = fetchLogRequest.Offset
-	}
-	var op = "AND"
-	if fetchLogRequest.Request != nil {
-		if val, ok := fetchLogRequest.Request["op"]; ok {
-			if opStr, ok := val.(string); ok && opStr != "" {
-				op = opStr
-			}
+	return signozclient.Do(reqCtx, common.HttpClient(), creds, method, path, payload)
+}
+
+func (s *SignozSaasSource) QueryLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) ([]OutputLog, error) {
+	list, err := signozFetchLogRows(fetchLogRequest, func(body map[string]any) ([]any, error) {
+		resp, err := s.signozDo(ctx, fetchLogRequest.AccountId, http.MethodPost, "/api/v4/query_range", body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute signoz log query: %w", err)
 		}
-	}
-	signozLogRequest := map[string]any{
-		"start":     fetchLogRequest.StartTime,
-		"end":       fetchLogRequest.EndTime,
-		"step":      60,
-		"variables": map[string]any{},
-		"compositeQuery": map[string]any{
-			"queryType": "builder",
-			"panelType": "list",
-			"fillGaps":  false,
-			"builderQueries": map[string]any{
-				"A": map[string]any{
-					"dataSource":         "logs",
-					"queryName":          "A",
-					"aggregateOperator":  "noop",
-					"aggregateAttribute": map[string]any{},
-					"timeAggregation":    "rate",
-					"spaceAggregation":   "sum",
-					"functions":          []any{},
-					"filters": map[string]any{
-						"op":    op,
-						"items": parsedQuery,
-					},
-					"expression":   "A",
-					"disabled":     false,
-					"stepInterval": steps,
-					"having":       []any{},
-					"limit":        nil,
-					"orderBy":      orderBy,
-					"groupBy":      []any{},
-					"legend":       "",
-					"reduceTo":     "avg",
-					"offset":       offset,
-					"pageSize":     limit,
-				},
-			},
-		},
-	}
-
-	resp, err := common.HttpPost(fmt.Sprintf("%s/api/v4/query_range", signozUrl), common.HttpWithHeaders(map[string]string{
-		"Authorization": fmt.Sprintf("Bearer %s", jwtToken),
-		"Content-Type":  "application/json",
-	}), common.HttpWithJsonBody(signozLogRequest))
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != 200 {
+			ctx.GetLogger().Error("signoz: log query failed", "status", resp.StatusCode)
+			return nil, fmt.Errorf("failed to get signoz logs, status code: %d", resp.StatusCode)
+		}
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+		var decoded map[string]any
+		if err := common.UnmarshalJson(bodyBytes, &decoded); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal response body: %w", err)
+		}
+		dataSection, ok := decoded["data"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("missing or invalid 'data' field in response")
+		}
+		result, ok := dataSection["result"].([]any)
+		if !ok || result == nil {
+			return nil, fmt.Errorf("'result' field is not an array or is nil from response")
+		}
+		return result, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute signoz log labels: %w", err)
+		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != 200 {
-		ctx.GetLogger().Error("Failed to get signoz labels", "resp", resp)
-		return nil, fmt.Errorf("failed to get signoz labels, status code: %d", resp.StatusCode)
-	}
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-	var data3 map[string]any
-	if err := common.UnmarshalJson(bodyBytes, &data3); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response body: %w", err)
-	}
-
-	dataSection, ok := data3["data"].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("missing or invalid 'data' field in response")
-	}
-
-	result, ok := dataSection["result"].([]any)
-	if !ok || result == nil {
-		return nil, fmt.Errorf("'result' field is not an array or is nil from response")
-	}
-	if len(result) == 0 {
-		return []OutputLog{}, nil
-	}
-	firstMap, ok := result[0].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("first element is not an object")
-	}
-	list, ok := firstMap["list"].([]any)
-	if !ok || list == nil {
+	if len(list) == 0 {
 		return []OutputLog{}, nil
 	}
 
@@ -360,16 +201,8 @@ func (s *SignozSaasSource) QueryLogs(ctx *security.RequestContext, fetchLogReque
 }
 
 func (s *SignozSaasSource) QueryLabels(ctx *security.RequestContext, fetchLogLabelRequest FetchLogLabelRequest) ([]OutputLogLabel, error) {
-	signozUrl, jwtToken, err := s.GetSignozAuth(ctx, fetchLogLabelRequest.AccountId)
-	if err != nil {
-		return nil, err
-	}
-
 	params := fmt.Sprintf("searchText=%s&dataSource=%s&existingFilter=%s&aggregateOperator=noop", "", "logs", "")
-	resp, err := common.HttpGet(fmt.Sprintf("%s/api/v3/autocomplete/attribute_keys?%s", signozUrl, params), common.HttpWithHeaders(map[string]string{
-		"Authorization": fmt.Sprintf("Bearer %s", jwtToken),
-		"Content-Type":  "application/json",
-	}))
+	resp, err := s.signozDo(ctx, fetchLogLabelRequest.AccountId, http.MethodGet, "/api/v3/autocomplete/attribute_keys?"+params, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute signoz log labels: %w", err)
 	}
@@ -419,10 +252,6 @@ func (s *SignozSaasSource) QueryLabels(ctx *security.RequestContext, fetchLogLab
 }
 
 func (s *SignozSaasSource) QueryLabelValues(ctx *security.RequestContext, fetchLogLabelValueRequest FetchLogLabelValuesRequest) ([]OutputLogLabelValue, error) {
-	signozUrl, jwtToken, err := s.GetSignozAuth(ctx, fetchLogLabelValueRequest.AccountId)
-	if err != nil {
-		return nil, err
-	}
 	filterAttributeKeyDataType := "string"
 	if v, ok := fetchLogLabelValueRequest.Request["filterAttributeKeyDataType"].(string); ok && v != "" {
 		filterAttributeKeyDataType = v
@@ -432,6 +261,8 @@ func (s *SignozSaasSource) QueryLabelValues(ctx *security.RequestContext, fetchL
 	if v, ok := fetchLogLabelValueRequest.Request["tagType"].(string); ok && v != "" {
 		tagType = v
 	}
+	attributeKey, resolvedTagType := signozLabelValueParams(fetchLogLabelValueRequest.LabelName, tagType)
+	tagType, _ = resolvedTagType.(string)
 
 	params := fmt.Sprintf(
 		"searchText=%s&dataSource=%s&filterAttributeKeyDataType=%s&aggregateOperator=noop&aggregateAttribute=%s&tagType=%s&attributeKey=%s",
@@ -440,12 +271,9 @@ func (s *SignozSaasSource) QueryLabelValues(ctx *security.RequestContext, fetchL
 		filterAttributeKeyDataType,
 		"",
 		tagType,
-		fetchLogLabelValueRequest.LabelName,
+		attributeKey,
 	)
-	resp, err := common.HttpGet(fmt.Sprintf("%s/api/v3/autocomplete/attribute_values?%s", signozUrl, params), common.HttpWithHeaders(map[string]string{
-		"Authorization": fmt.Sprintf("Bearer %s", jwtToken),
-		"Content-Type":  "application/json",
-	}))
+	resp, err := s.signozDo(ctx, fetchLogLabelValueRequest.AccountId, http.MethodGet, "/api/v3/autocomplete/attribute_values?"+params, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute signoz log labels: %w", err)
 	}
@@ -645,17 +473,12 @@ func (s *SignozSaasSource) GetQuery(ctx *security.RequestContext, fetchLogReques
 // QueryLogGroup implements LogGroupSource for Signoz SaaS.
 // Uses the Signoz /api/v4/query_range endpoint with count aggregation and groupBy.
 func (s *SignozSaasSource) QueryLogGroup(ctx *security.RequestContext, req FetchLogGroupRequest) (LogGroupOutput, error) {
-	signozUrl, jwtToken, err := s.GetSignozAuth(ctx, req.AccountId)
-	if err != nil {
-		return LogGroupOutput{}, fmt.Errorf("signoz_saas.QueryLogGroup: auth failed: %w", err)
-	}
-
 	filters := buildSignozSaasLogGroupFilters(req)
 
 	queryBody := map[string]any{
 		"start":     req.StartTime,
 		"end":       req.EndTime,
-		"step":      3600,
+		"step":      signozLogGroupStepSeconds,
 		"variables": map[string]any{},
 		"compositeQuery": map[string]any{
 			"queryType": "builder",
@@ -676,7 +499,7 @@ func (s *SignozSaasSource) QueryLogGroup(ctx *security.RequestContext, req Fetch
 					},
 					"expression":   "A",
 					"disabled":     false,
-					"stepInterval": 3600,
+					"stepInterval": signozLogGroupStepSeconds,
 					"having":       []any{},
 					"limit":        100,
 					"orderBy": []map[string]any{
@@ -684,8 +507,8 @@ func (s *SignozSaasSource) QueryLogGroup(ctx *security.RequestContext, req Fetch
 					},
 					"groupBy": []map[string]any{
 						{"key": "severity_text", "dataType": "string", "type": "tag", "isColumn": false},
-						{"key": "k8s_namespace_name", "dataType": "string", "type": "resource", "isColumn": false},
-						{"key": "k8s_pod_name", "dataType": "string", "type": "resource", "isColumn": false},
+						{"key": signozNamespaceKey, "dataType": "string", "type": "resource", "isColumn": false},
+						{"key": signozPodKey, "dataType": "string", "type": "resource", "isColumn": false},
 					},
 					"legend":   "",
 					"reduceTo": "avg",
@@ -696,13 +519,7 @@ func (s *SignozSaasSource) QueryLogGroup(ctx *security.RequestContext, req Fetch
 		},
 	}
 
-	headers := map[string]string{
-		"Content-Type":  "application/json",
-		"Authorization": fmt.Sprintf("Bearer %s", jwtToken),
-	}
-
-	apiURL := fmt.Sprintf("%s/api/v4/query_range", signozUrl)
-	resp, err := common.HttpPost(apiURL, common.HttpWithJsonBody(queryBody), common.HttpWithHeaders(headers))
+	resp, err := s.signozDo(ctx, req.AccountId, http.MethodPost, "/api/v4/query_range", queryBody)
 	if err != nil {
 		return LogGroupOutput{}, fmt.Errorf("signoz_saas.QueryLogGroup: HTTP request failed: %w", err)
 	}
@@ -729,7 +546,7 @@ func buildSignozSaasLogGroupFilters(req FetchLogGroupRequest) []map[string]any {
 	filters := []map[string]any{
 		{
 			"key":   map[string]string{"key": "severity_text"},
-			"value": []string{"ERROR", "CRITICAL", "FATAL", "error", "critical", "fatal"},
+			"value": signozErrorSeverities(),
 			"op":    "in",
 		},
 	}
@@ -739,14 +556,14 @@ func buildSignozSaasLogGroupFilters(req FetchLogGroupRequest) []map[string]any {
 
 	if selectedNamespace != "" {
 		filters = append(filters, map[string]any{
-			"key":   map[string]string{"key": "k8s_namespace_name"},
+			"key":   map[string]string{"key": signozNamespaceKey},
 			"value": selectedNamespace,
 			"op":    "=",
 		})
 	}
 	if selectedWorkload != "" {
 		filters = append(filters, map[string]any{
-			"key":   map[string]string{"key": "k8s_pod_name"},
+			"key":   map[string]string{"key": signozPodKey},
 			"value": selectedWorkload,
 			"op":    "contains",
 		})
@@ -755,7 +572,20 @@ func buildSignozSaasLogGroupFilters(req FetchLogGroupRequest) []map[string]any {
 	return filters
 }
 
-func parseSignozSaasLogGroupResponse(respData map[string]any, endTime int64) (LogGroupOutput, error) {
+// SigNoz resource attribute keys for the log-group query. Current SigNoz keeps
+// the OTel names (k8s.namespace.name); grouping by the underscored spelling
+// matches no row there and the whole group query comes back empty. Legacy
+// SigNoz (v0.51) accepts the dotted names too — its own autocomplete reports
+// them — so one spelling serves every release. Series labels echo the groupBy
+// key, so parsing still accepts the underscored form for older responses.
+const (
+	signozNamespaceKey       = "k8s.namespace.name"
+	signozPodKey             = "k8s.pod.name"
+	signozLegacyNamespaceKey = "k8s_namespace_name"
+	signozLegacyPodKey       = "k8s_pod_name"
+)
+
+func parseSignozSaasLogGroupResponse(respData map[string]any, endTimeMs int64) (LogGroupOutput, error) {
 	data, ok := respData["data"].(map[string]any)
 	if !ok {
 		return LogGroupOutput{}, nil
@@ -792,10 +622,10 @@ func parseSignozSaasLogGroupResponse(respData map[string]any, endTime int64) (Lo
 
 		group := LogGroup{}
 
-		if ns := labelMap["k8s_namespace_name"]; ns != "" {
+		if ns := firstNonEmpty(labelMap[signozNamespaceKey], labelMap[signozLegacyNamespaceKey]); ns != "" {
 			group.Namespace = ns
 		}
-		if pod := labelMap["k8s_pod_name"]; pod != "" {
+		if pod := firstNonEmpty(labelMap[signozPodKey], labelMap[signozLegacyPodKey]); pod != "" {
 			group.Workload = extractWorkloadFromPodName(pod)
 			group.Sample = pod // Use pod name as sample since Signoz groups by pod, not message
 		}
@@ -812,21 +642,7 @@ func parseSignozSaasLogGroupResponse(respData map[string]any, endTime int64) (Lo
 			group.PatternHash = generateRawHash(group.Workload)
 		}
 
-		points, _ := seriesMap["points"].([]any)
-		timestamps := make([]int64, 0, len(points))
-		values := make([]float64, 0, len(points))
-		for _, p := range points {
-			point, ok := p.(map[string]any)
-			if !ok {
-				continue
-			}
-			if ts, ok := point["timestamp"].(float64); ok {
-				timestamps = append(timestamps, int64(ts))
-			}
-			if val, ok := point["value"].(float64); ok {
-				values = append(values, val)
-			}
-		}
+		timestamps, values := signozSeriesPoints(seriesMap, endTimeMs)
 
 		group.Timestamps = timestamps
 		group.Values = values

@@ -264,10 +264,10 @@
       "cloud_account_id": "test-account-aws-1",
       "tenant_id": "test-tenant-1",
       "level": "",
-      "source": "aws_lb_k8s_enricher",
+      "source": "aws_lb_k8s",
       "properties": {
         "contributing_sources": [
-          "aws_lb_k8s_enricher"
+          "aws_lb_k8s"
         ],
         "discovered_from": "cross_source_enrichment",
         "k8s_service_name": "my-svc",
@@ -275,7 +275,7 @@
         "match_strategy": "k8s_tags"
       },
       "contributing_sources": [
-        "aws_lb_k8s_enricher"
+        "aws_lb_k8s"
       ]
     },
     {
@@ -305,16 +305,16 @@
       "cloud_account_id": "test-account-aws-1",
       "tenant_id": "test-tenant-1",
       "level": "",
-      "source": "aws_lb_k8s_enricher",
+      "source": "aws_lb_k8s",
       "properties": {
         "cluster_name": "my-eks",
         "connection_type": "eks_cluster_name",
         "contributing_sources": [
-          "aws_lb_k8s_enricher"
+          "aws_lb_k8s"
         ]
       },
       "contributing_sources": [
-        "aws_lb_k8s_enricher"
+        "aws_lb_k8s"
       ]
     },
     {

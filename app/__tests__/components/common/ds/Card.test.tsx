@@ -65,6 +65,54 @@ describe('Card', () => {
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
+  it('emits aria-pressed for an interactive toggle card', () => {
+    const { rerender } = render(
+      <Card interactive pressed onClick={jest.fn()}>
+        Filter
+      </Card>
+    );
+    expect(screen.getByRole('button')).toHaveAttribute('aria-pressed', 'true');
+    rerender(
+      <Card interactive pressed={false} onClick={jest.fn()}>
+        Filter
+      </Card>
+    );
+    expect(screen.getByRole('button')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('keeps a disabled interactive card a button, but inert', () => {
+    const onClick = jest.fn();
+    render(
+      <Card interactive disabled pressed={false} data-testid='muted-card' onClick={onClick}>
+        Muted
+      </Card>
+    );
+    const card = screen.getByTestId('muted-card');
+    expect(card).toHaveAttribute('role', 'button');
+    expect(card).toHaveAttribute('aria-disabled', 'true');
+    expect(card).toHaveAttribute('aria-pressed', 'false');
+    expect(card).toHaveAttribute('tabindex', '-1');
+    fireEvent.click(card);
+    fireEvent.keyDown(card, { key: 'Enter' });
+    fireEvent.keyDown(card, { key: ' ' });
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it('ignores disabled and pressed on a non-interactive card, with a dev warning', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    render(
+      <Card disabled pressed data-testid='plain-card'>
+        Plain
+      </Card>
+    );
+    const card = screen.getByTestId('plain-card');
+    expect(card).not.toHaveAttribute('role');
+    expect(card).not.toHaveAttribute('aria-disabled');
+    expect(card).not.toHaveAttribute('aria-pressed');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('disabled / pressed only apply with interactive'));
+    warn.mockRestore();
+  });
+
   it('renders selected card', () => {
     render(<Card selected>Selected card</Card>);
     expect(screen.getByText('Selected card')).toBeInTheDocument();

@@ -76,14 +76,18 @@ func init() {
 	core.RegisterNBToolFactory(ToolQueryPrometheus, func(accountId string) (core.NBTool, error) {
 		return PrometheusExecuteTool{}, nil
 	})
+	// Provider resolved the same way the agents resolve it. An agent that takes these
+	// from the registry rather than through GetSupportedTools would otherwise fall back
+	// to the literal "prometheus" below, which api-server honours verbatim and routes to
+	// the agent relay — discovery then fails on every non-Prometheus backend.
 	core.RegisterNBToolFactory(ToolMetricsList, func(accountId string) (core.NBTool, error) {
-		return MetricsListTool{}, nil
+		return MetricsListTool{Provider: MetricsDiscoveryProvider(accountId)}, nil
 	})
 	core.RegisterNBToolFactory(ToolMetricsLabelsList, func(accountId string) (core.NBTool, error) {
-		return ListMetricsLabelsTool{}, nil
+		return ListMetricsLabelsTool{Provider: MetricsDiscoveryProvider(accountId)}, nil
 	})
 	core.RegisterNBToolFactory(ToolMetricsLabelValues, func(accountId string) (core.NBTool, error) {
-		return ListMetricsLabelValuesTool{}, nil
+		return ListMetricsLabelValuesTool{Provider: MetricsDiscoveryProvider(accountId)}, nil
 	})
 	core.RegisterNBToolFactory(ToolSearchMetrics, func(accountId string) (core.NBTool, error) {
 		return SearchMetricsTool{}, nil
@@ -1193,15 +1197,23 @@ func (m ListMetricsLabelsTool) Call(nbRequestContext core.NbToolContext, input c
 		provider = m.Provider
 	}
 
-	seriesName := query
-	if strings.EqualFold(provider, "ES") {
-		idxPattern := getESMetricIndexPattern(nbRequestContext, m.DefaultIndex)
-		if idxPattern != "" && !strings.Contains(query, "*") && !strings.Contains(query, "?") {
-			seriesName = idxPattern
+	labelsResponse, err := services_server.ListMetricsSeriesLabels(*nbRequestContext.Ctx, nbRequestContext.AccountId, provider, query)
+
+	// On Elasticsearch the input is an index, but the model sometimes passes a metric
+	// name instead. That used to be detected by "no wildcard in it" and swapped for the
+	// configured index BEFORE asking — which also swapped every exact index name,
+	// including remote-cluster ones (`cluster:index`), and returned the configured
+	// index's fields labelled as the requested index's. Ask for what was requested
+	// first, fall back only when it cannot be read, and say that a fallback happened.
+	var fallbackNote string
+	if err != nil && strings.EqualFold(provider, "ES") {
+		if idxPattern := getESMetricIndexPattern(nbRequestContext, m.DefaultIndex); idxPattern != "" && idxPattern != query {
+			if fallback, fallbackErr := services_server.ListMetricsSeriesLabels(*nbRequestContext.Ctx, nbRequestContext.AccountId, provider, idxPattern); fallbackErr == nil {
+				fallbackNote = fmt.Sprintf("%q could not be read as an index (%v). These are the fields of the configured metrics index %q instead.", query, err, idxPattern)
+				labelsResponse, err = fallback, nil
+			}
 		}
 	}
-
-	labelsResponse, err := services_server.ListMetricsSeriesLabels(*nbRequestContext.Ctx, nbRequestContext.AccountId, provider, seriesName)
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("unable to fetch metrics labels", "error", err.Error())
 		return core.NBToolResponse{
@@ -1210,7 +1222,11 @@ func (m ListMetricsLabelsTool) Call(nbRequestContext core.NbToolContext, input c
 		}, err
 	}
 
-	dataResponse, err := common.MarshalJson(labelsResponse)
+	var payload any = labelsResponse
+	if fallbackNote != "" {
+		payload = map[string]any{"note": fallbackNote, "labels": labelsResponse.Labels}
+	}
+	dataResponse, err := common.MarshalJson(payload)
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("metrics: unable to marshal final data", "error", err.Error())
 		return core.NBToolResponse{
@@ -1599,18 +1615,10 @@ func getESMetricIndexPattern(nbRequestContext core.NbToolContext, defaultIndex s
 	return ""
 }
 
-// metricsProviderNeedsServicesServer reports whether a resolved metrics provider
-// must be queried through the api-server rather than the relay.
-//
-// "agent" is the in-cluster Prometheus (and the cloud-CLI fallbacks, which
-// GetMetricsProvider also labels agent) — those keep the relay path. Anything
-// user-configured is an integration the api-server owns the credentials and the
-// query dialect for; the relay cannot reach it.
-//
-// A user-configured Prometheus is deliberately left on the relay path: it speaks
-// the same PromQL the relay already sends, and moving it would change behaviour
-// for accounts this bug never affected.
-func metricsProviderNeedsServicesServer(provider services_server.ObservabilityProvider) bool {
+// metricsDiscoveryUsesConfiguredProvider selects integration-backed discovery.
+// Agent-backed defaults (including cloud CLI fallbacks) discover Prometheus
+// metrics. EE execution independently uses QueryMetrics for every provider.
+func metricsDiscoveryUsesConfiguredProvider(provider services_server.ObservabilityProvider) bool {
 	if strings.EqualFold(strings.TrimSpace(provider.IntegrationSource), "agent") {
 		return false
 	}
@@ -1634,9 +1642,8 @@ func metricsProviderNeedsServicesServer(provider services_server.ObservabilityPr
 // which match nothing and read as "this service reports no metrics".
 //
 // Returns "prometheus" unchanged for the agent-backed default, the cloud-CLI
-// fallbacks and a user-configured Prometheus — the same boundary
-// metricsProviderNeedsServicesServer draws for execution, so discovery and
-// execution can never disagree about which backend is being talked to.
+// fallbacks and a user-configured Prometheus. This helper only selects discovery;
+// EE execution already resolves the provider through the services-server.
 func MetricsDiscoveryProvider(accountId string) string {
 	provider, err := GetMetricsProvider(accountId)
 	if err != nil {
@@ -1651,7 +1658,7 @@ func MetricsDiscoveryProvider(accountId string) string {
 // the account's provider is known, split out so it can be exercised for backends
 // no test environment has to be wired up to.
 func metricsDiscoveryProviderFor(provider services_server.ObservabilityProvider) string {
-	if metricsProviderNeedsServicesServer(provider) {
+	if metricsDiscoveryUsesConfiguredProvider(provider) {
 		return strings.TrimSpace(provider.Provider)
 	}
 	return "prometheus"

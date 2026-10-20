@@ -42,6 +42,7 @@ var resolveDocumentCategoriesFn = toolcore.ResolveDocumentCategories
 
 var queryAccountKnowledgeFn = toolcore.QueryRAGRerankedContext
 var queryCollectionKnowledgeFn = toolcore.QueryRAGCollectionReranked
+var judgeKBResultsFn = toolcore.JudgeKBResults
 
 // kbPrestepHintKeys are the QueryConfig.Labels keys, in priority order, used to
 // enrich the KB search query with the focused resource / event context.
@@ -210,7 +211,7 @@ func retrieveRelevantKB(ctx *security.RequestContext, request NBAgentRequest, kb
 	defer cancelRetrieval()
 
 	ragStarted := time.Now()
-	docs := retrieveKnowledgeDocs(retrievalCtx, request, query, kbs)
+	docs, traceIDs := retrieveKnowledgeDocs(retrievalCtx, request, query, kbs)
 	ctx.GetLogger().Info("knowledge: RAG complete", "duration", time.Since(ragStarted).String(), "results", len(docs), "deadline_reached", retrievalCtx.Err() != nil)
 	if retrievalCtx.Err() != nil {
 		ctx.GetLogger().Warn("kb_prestep: retrieval timed out", "timeout", timeout, "retained_docs", len(docs))
@@ -240,6 +241,17 @@ func retrieveRelevantKB(ctx *security.RequestContext, request NBAgentRequest, kb
 	// model, so it cannot follow them. Best-scored copy wins; docs stay in
 	// rank order.
 	kept = dedupRAGDocs(kept)
+
+	// Judge the merged set, not each search. The account-wide and mapped searches
+	// run concurrently and their results are concatenated above, so judging inside
+	// the goroutines would cost one LLM call per search and could keep one document
+	// from each — while the pre-step's job is to supply the one page that answers the
+	// question. Runs after dedup so duplicate copies of a page are not judged twice.
+	kept = judgeKBResultsFn(ctx, request.AccountId, request.UserId, request.ConversationId, request.MessageId, query, kept, traceIDs...)
+	if len(kept) == 0 {
+		ctx.GetLogger().Info("kb_prestep: judge found nothing relevant, no knowledge in prompt")
+		return kbDiscoveryResult{}
+	}
 
 	// Log what RAG actually returned, per document, before attribution runs.
 	// Identity lives in these fields alone (there is no kb id on a hit), so when
@@ -308,7 +320,7 @@ func retrieveRelevantKB(ctx *security.RequestContext, request NBAgentRequest, kb
 // retrieveKnowledgeDocs collects each search independently so one slow request
 // cannot discard completed results. Mapped results retain selection order and
 // precede account-wide results, regardless of completion order.
-func retrieveKnowledgeDocs(ctx context.Context, request NBAgentRequest, query string, kbs []toolcore.Knowledgebase) toolcore.RAGSearchResults {
+func retrieveKnowledgeDocs(ctx context.Context, request NBAgentRequest, query string, kbs []toolcore.Knowledgebase) (toolcore.RAGSearchResults, []string) {
 	candidates := make([]toolcore.SkillCandidate, 0, len(kbs))
 	byID := make(map[string]toolcore.Knowledgebase, len(kbs))
 	for _, kb := range kbs {
@@ -321,16 +333,20 @@ func retrieveKnowledgeDocs(ctx context.Context, request NBAgentRequest, query st
 	selectedIDs := toolcore.SelectRelevantSkills(query, candidates, kbMappedCollectionsTopK)
 
 	type result struct {
-		index int
-		docs  toolcore.RAGSearchResults
+		index   int
+		docs    toolcore.RAGSearchResults
+		traceID string
 	}
 	// One slot per producer allows late completions to exit after timeout.
 	results := make(chan result, len(selectedIDs)+1)
 	accountQuery, collectionQuery := queryAccountKnowledgeFn, queryCollectionKnowledgeFn
 	go func() {
-		docs := accountQuery(ctx, request.UserId, request.AccountId, query, "knowledge_base",
+		// One trace id per search, derived inside the goroutine: these run
+		// concurrently, and a shared id would collapse four rows into one.
+		searchCtx, traceID := toolcore.WithRetrievalTraceID(ctx)
+		docs := accountQuery(searchCtx, request.UserId, request.AccountId, query, "knowledge_base",
 			kbPrestepTopK, request.ConversationId, request.MessageId, request.AgentId, true)
-		results <- result{index: len(selectedIDs), docs: docs}
+		results <- result{index: len(selectedIDs), docs: docs, traceID: traceID}
 	}()
 	launched := 1
 	for i, id := range selectedIDs {
@@ -340,24 +356,28 @@ func retrieveKnowledgeDocs(ctx context.Context, request NBAgentRequest, query st
 		}
 		launched++
 		go func(index int, collection string) {
-			docs := collectionQuery(ctx, request.UserId, request.AccountId, query, "knowledge_base", collection,
+			searchCtx, traceID := toolcore.WithRetrievalTraceID(ctx)
+			docs := collectionQuery(searchCtx, request.UserId, request.AccountId, query, "knowledge_base", collection,
 				kbMappedDocsPerCollection, request.ConversationId, request.MessageId, request.AgentId, true)
-			results <- result{index: index, docs: docs}
+			results <- result{index: index, docs: docs, traceID: traceID}
 		}(i, toolcore.KnowledgebaseCollectionName(kb))
 	}
 
 	ordered := make([]toolcore.RAGSearchResults, len(selectedIDs)+1)
+	var traceIDs []string
 collect:
 	for range launched {
 		select {
 		case r := <-results:
 			ordered[r.index] = r.docs
+			traceIDs = append(traceIDs, r.traceID)
 		case <-ctx.Done():
 			// Include results already buffered when cancellation won the select.
 			for {
 				select {
 				case r := <-results:
 					ordered[r.index] = r.docs
+					traceIDs = append(traceIDs, r.traceID)
 				default:
 					break collect
 				}
@@ -368,7 +388,7 @@ collect:
 	for _, docs := range ordered {
 		out = append(out, docs...)
 	}
-	return out
+	return out, traceIDs
 }
 
 // buildKnowledgeCandidateMenu stores bounded excerpts and handles for on-demand

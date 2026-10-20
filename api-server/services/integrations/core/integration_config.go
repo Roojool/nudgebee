@@ -60,9 +60,10 @@ const (
 	DefaultMetricsProvider = "default_metrics_provider"
 	// DefaultLLMProvider marks which LLM integration an account resolves to
 	// when several are enabled. Like the other default_* flags it lives on the
-	// integrations_cloud_accounts link row, not in integration_config_values —
-	// llm-server reads that table as the credential itself, so a stray
-	// default_llm_provider row there would be merged into the credential map.
+	// integrations_cloud_accounts link row. The same name also has one
+	// integration_config_values row per LLM integration recording whether it is
+	// the tenant's default provider (see applyLLMTenantDefault); llm-server
+	// reads that map by key only, so the row never reaches a credential.
 	DefaultLLMProvider    = "default_llm_provider"
 	AccountId             = "account_id"
 	IntegrationConfigName = "integration_config_name"
@@ -773,6 +774,15 @@ func CreateIntegrationConfig(
 		case DefaultLLMProvider:
 			column = "default_llm_provider"
 		}
+		if column == "default_llm_provider" {
+			skipAccountFlags, err := applyLLMTenantDefault(dbms, ctx.GetSecurityContext().GetTenantId(), ctx.GetSecurityContext().GetUserId(), configId, value)
+			if err != nil {
+				return IntegrationDto{}, err
+			}
+			if skipAccountFlags {
+				continue
+			}
+		}
 		if column != "" {
 
 			// Check if value is a per-account JSON map (e.g. {"acc-id-1":"true","acc-id-2":"false"})
@@ -978,6 +988,62 @@ func CreateIntegrationConfig(
 		Schema:  integrationConfigSchema,
 		Id:      configId,
 	}, nil
+}
+
+// applyLLMTenantDefault records the "Default LLM provider" checkbox on the
+// integration itself, as its default_llm_provider row in
+// integration_config_values: the tenant has at most one integration with value
+// 'true', and llm.AttachTenantDefaultLLMProvider links it to accounts created
+// later. llm-server only reads that map by key, so the extra row never reaches
+// a provider credential.
+//
+// Marking an integration sets 'false' on the tenant's other LLM integrations
+// but leaves their per-account default_llm_provider flags alone, so changing
+// the tenant default never re-routes accounts that already have a provider.
+//
+// It returns skipAccountFlags=true for a "false" save on an integration that
+// was not the tenant default: that save is not an un-marking, so the
+// per-account flags it would otherwise clear are kept. A per-account JSON map
+// is the API-only form and leaves the tenant default untouched.
+func applyLLMTenantDefault(dbms *database.DatabaseManager, tenantId, userId, integrationId, value string) (skipAccountFlags bool, err error) {
+	if strings.HasPrefix(strings.TrimSpace(value), "{") {
+		return false, nil
+	}
+	if value == "true" {
+		if _, err := dbms.Exec(`
+			UPDATE integration_config_values icv
+			SET value = 'false', updated_at = now(), updated_by = $3
+			FROM integrations i
+			WHERE i.id = icv.integration_id
+			  AND i.tenant_id = $1 AND i.type = 'llm' AND i.id != $2
+			  AND icv.name = $4 AND icv.value = 'true'`,
+			tenantId, integrationId, userId, DefaultLLMProvider); err != nil {
+			return false, fmt.Errorf("failed to unmark the previous tenant default LLM provider: %w", err)
+		}
+		if _, err := dbms.Exec(`
+			INSERT INTO integration_config_values(
+				id, integration_id, name, value, is_encrypted, created_at, updated_at, created_by, updated_by
+			) VALUES ($1, $2, $3, 'true', false, now(), now(), $4, $4)
+			ON CONFLICT(integration_id, name)
+			DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+			uuid.NewString(), integrationId, DefaultLLMProvider, userId); err != nil {
+			return false, fmt.Errorf("failed to set tenant default LLM provider: %w", err)
+		}
+		return false, nil
+	}
+	res, err := dbms.Exec(`
+		UPDATE integration_config_values
+		SET value = 'false', updated_at = now(), updated_by = $3
+		WHERE integration_id = $1 AND name = $2 AND value = 'true'`,
+		integrationId, DefaultLLMProvider, userId)
+	if err != nil {
+		return false, fmt.Errorf("failed to clear tenant default LLM provider: %w", err)
+	}
+	cleared, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to read tenant default LLM provider update: %w", err)
+	}
+	return cleared == 0, nil
 }
 
 func ListIntegrationConfigs(context *security.RequestContext, accountId string, integrationName string) ([]IntegrationDto, error) {
@@ -1845,6 +1911,34 @@ func applySchemaDefaults(integration Integration, configValues []IntegrationConf
 	return configValues
 }
 
+// ConnectionNotesForIntegration returns advisory notes for a SAVED integration —
+// the by-id counterpart to what TestIntegrationConnectionByConfig collects for an
+// unsaved form. It does not probe connectivity: the caller has already done that,
+// and a note must never influence whether a signal reads as connected.
+func ConnectionNotesForIntegration(ctx *security.RequestContext, integrationType, source, accountID string) []string {
+	integration, found := GetIntegrationBySource(integrationType, source)
+	if !found {
+		return nil
+	}
+	noter, ok := integration.(ConnectionNoter)
+	if !ok {
+		return nil
+	}
+
+	rows, err := ListIntegrationConfigs(ctx, accountID, integrationType)
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+	values, err := DecryptConfigValues(rows[0].Configs)
+	if err != nil {
+		// Advisory: failing to read a note must not surface as a fault.
+		ctx.GetLogger().Warn("integrations: could not decrypt config for connection notes",
+			"type", integrationType, "account_id", accountID, "error", err)
+		return nil
+	}
+	return noter.ConnectionNotes(ctx, values, accountID)
+}
+
 // DecryptConfigValues returns a copy of the config values with encrypted fields
 // decrypted (is_encrypted cleared). For values read from the database ONLY. Never
 // pass it values from a request: decrypting client-supplied ciphertext is the
@@ -1868,6 +1962,13 @@ func DecryptConfigValues(values []IntegrationConfigValue) ([]IntegrationConfigVa
 
 // TestIntegrationConnectionByConfig tests connectivity using raw config values
 // (before the integration is saved). Used by the "Test Connection" button in the add/edit form.
+//
+// The returned notes are ADVISORY: the connection passed, but something about it
+// is worth telling the operator. They are deliberately not errors, because this
+// probe's pass/fail is also what decides whether a signal reads as connected on
+// the provider-status view (see observability/provider_status.go). Turning an
+// advisory finding into a failure there would report working logs, metrics and
+// traces as broken.
 func TestIntegrationConnectionByConfig(
 	ctx *security.RequestContext,
 	integrationType string,
@@ -1875,20 +1976,21 @@ func TestIntegrationConnectionByConfig(
 	accountIds []string,
 	source string,
 	integrationID string,
-) error {
+) ([]string, error) {
+	var notes []string
 	if integrationType == "" {
-		return errors.New("integration_name is required")
+		return nil, errors.New("integration_name is required")
 	}
 
 	integration, found := GetIntegrationBySource(integrationType, source)
 	if !found {
-		return fmt.Errorf("integration type '%s' not registered", integrationType)
+		return nil, fmt.Errorf("integration type '%s' not registered", integrationType)
 	}
 
 	// Secrets the user left masked arrive flagged is_encrypted; swap in the saved values.
 	configValues, err := ResolveKeptSecrets(ctx, integrationID, configValues)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Edit-flow augmentation: when the user clicks Test Connection on an edit
@@ -1916,7 +2018,7 @@ func TestIntegrationConnectionByConfig(
 			if configValues[i].IsEncrypted && configValues[i].Value != "" {
 				decrypted, decErr := common.Decrypt(configValues[i].Value)
 				if decErr != nil {
-					return fmt.Errorf("failed to decrypt stored secret %s: %w", configValues[i].Name, decErr)
+					return nil, fmt.Errorf("failed to decrypt stored secret %s: %w", configValues[i].Name, decErr)
 				}
 				configValues[i].Value = decrypted
 				configValues[i].IsEncrypted = false
@@ -1931,7 +2033,7 @@ func TestIntegrationConnectionByConfig(
 		accountID = accountIds[0]
 	}
 	if !isTenantScoped(integration) && accountID == "" {
-		return errors.New("at least one account_id is required for connection test")
+		return nil, errors.New("at least one account_id is required for connection test")
 	}
 
 	// Apply schema defaults so hidden fields like connection_mode are always present
@@ -1941,12 +2043,12 @@ func TestIntegrationConnectionByConfig(
 	if IsProxyIntegration(integrationType, configValues) {
 		dsConfig, buildErr := BuildSingleDatasourceConfig(integrationType, configValues)
 		if buildErr != nil {
-			return fmt.Errorf("failed to build datasource config: %w", buildErr)
+			return nil, fmt.Errorf("failed to build datasource config: %w", buildErr)
 		}
 		if testErr := relay.TestProxyDatasourceConfig(accountID, dsConfig); testErr != nil {
-			return fmt.Errorf("connection test failed: %w", testErr)
+			return nil, fmt.Errorf("connection test failed: %w", testErr)
 		}
-		return nil
+		return notes, nil
 	}
 
 	// For K8s mode, use the integration's ValidateConfig.
@@ -1958,7 +2060,7 @@ func TestIntegrationConnectionByConfig(
 	}
 	validationErrors := integration.ValidateConfig(ctx.GetSecurityContext(), configValues, accountID)
 	if len(validationErrors) > 0 {
-		return validationErrors[0]
+		return nil, validationErrors[0]
 	}
 
 	// If the integration opts into a real connectivity probe (via the
@@ -1967,11 +2069,18 @@ func TestIntegrationConnectionByConfig(
 	// we keep the prior "validation == success" behaviour.
 	if testable, ok := integration.(TestableIntegration); ok {
 		if testErr := testable.TestConnection(ctx, configValues, accountID); testErr != nil {
-			return testErr
+			return nil, testErr
 		}
 	}
 
-	return nil
+	// Collected only after the probe passes, and only from configValues — which by
+	// this point carry the stored secrets an edit-time test leaves masked. Reading
+	// the raw request instead would report a blanked-out field as unset.
+	if noter, ok := integration.(ConnectionNoter); ok {
+		notes = append(notes, noter.ConnectionNotes(ctx, configValues, accountID)...)
+	}
+
+	return notes, nil
 }
 
 // TestIntegrationConnection tests connectivity for an existing integration by ID.

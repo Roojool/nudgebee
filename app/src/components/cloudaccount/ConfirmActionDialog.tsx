@@ -1,7 +1,7 @@
 import React from 'react';
 import { Typography, Box } from '@mui/material';
 import { Input } from '@ui/Input';
-import NDialog from '@shared/modal/NDialog';
+import { Modal } from '@ui/Modal';
 import { ds } from '@utils/colors';
 import type { ResourceAction } from './resourceActions';
 
@@ -41,7 +41,7 @@ const ConfirmActionDialog: React.FC<ConfirmActionDialogProps> = ({
     <Box>
       {isStrict ? (
         <>
-          <Typography sx={{ mb: ds.space[4], mt: ds.space[3] }}>
+          <Typography sx={{ mb: ds.space[4] }}>
             You are about to <strong>{action.label.toLowerCase()}</strong> resource <strong>{resourceName}</strong>. This is a destructive action.
           </Typography>
           <Typography sx={{ mb: ds.space[2] }}>
@@ -52,7 +52,7 @@ const ConfirmActionDialog: React.FC<ConfirmActionDialogProps> = ({
           </Box>
         </>
       ) : (
-        <Typography sx={{ mt: ds.space[3] }}>{action.confirmationMessage}</Typography>
+        <Typography>{action.confirmationMessage}</Typography>
       )}
 
       {action.requiresArgs &&
@@ -77,18 +77,19 @@ const ConfirmActionDialog: React.FC<ConfirmActionDialogProps> = ({
   );
 
   return (
-    <NDialog
+    <Modal
       open={open}
-      dialogTitle={action.label}
-      dialogContent={null}
-      additionalComponent={dialogContent}
-      buttonText={action.destructive ? action.label : 'Confirm'}
-      handleSubmit={onConfirm}
+      title={action.label}
+      confirmText={action.destructive ? action.label : 'Confirm'}
+      confirmTone={action.destructive ? 'danger' : 'primary'}
+      onConfirm={onConfirm}
       handleClose={onCancel}
-      disabled={isStrict && !isStrictConfirmValid}
-      loading={loading}
+      confirmDisabled={isStrict && !isStrictConfirmValid}
+      loader={loading}
       width='sm'
-    />
+    >
+      {dialogContent}
+    </Modal>
   );
 };
 
