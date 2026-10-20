@@ -161,9 +161,8 @@ adminEmailSecret: ''
 
 # -- Brand IMAGE files (logo, favicon, assistant icons) mounted at runtime.
 # Branding itself — title, which image URLs to use, colours, fonts — is
-# configured only in the database: one `tenant_branding_override` row per
-# hostname, managed with the super-admin `branding_upsert_override` action.
-# A host with no row renders the house brand.
+# configured in the database, one row per hostname, which is an Enterprise
+# feature. The open-source build always renders the default brand.
 #
 # Brand assets are deliberately NOT baked into the image: only
 # `app/public/branding/default/` is committed (see `app/.gitignore`), so a

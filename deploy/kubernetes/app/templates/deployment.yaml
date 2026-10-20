@@ -1,15 +1,14 @@
 {{- /*
-Branding is configured only through the tenant_branding_override table now. The
-app no longer reads a theme file per host or per deployment, so these values
-would be silently ignored and the host would render the house brand. Refuse to
-render instead, so the change is noticed at deploy time rather than on a
-partner's own domain.
+The app no longer reads a theme file per host or per deployment, and per-host
+branding is not part of the open-source build, so these values would be
+silently ignored. Refuse to render instead, so the change is noticed at deploy
+time.
 */}}
 {{- if .Values.branding.hostMap }}
-{{- fail "branding.hostMap is no longer supported: branding comes from the database. Save a tenant_branding_override row for each hostname (super-admin branding_upsert_override action), then remove branding.hostMap. Keep branding.tenants to serve the image files the row points at." }}
+{{- fail "branding.hostMap is no longer supported. Per-host branding is not part of the open-source build, so remove branding.hostMap; the app renders the default brand." }}
 {{- end }}
 {{- if .Values.branding.defaultTenant }}
-{{- fail "branding.defaultTenant is no longer supported: branding comes from the database. Save a tenant_branding_override row for each hostname (super-admin branding_upsert_override action), then remove branding.defaultTenant. Keep branding.tenants to serve the image files the row points at." }}
+{{- fail "branding.defaultTenant is no longer supported. Per-host branding is not part of the open-source build, so remove branding.defaultTenant; the app renders the default brand." }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
