@@ -31,7 +31,7 @@ import (
 // Links used to hang off each alert's first-ever event instead, which made a
 // group a permanent association rather than an incident. It never ended: any
 // member firing held it open while the alert that named it could have stopped
-// days ago. Measured on the Rackspace tenant over 14 days — 1,337 of 1,445 links
+// days ago. Measured on an anonymized production tenant over 14 days — 1,337 of 1,445 links
 // (93%) named a headline whose alert had not fired in the preceding 15 minutes,
 // average 38.8 hours quiet; one group had collected 17 members, one headline was
 // 158 days old, and none of it was visible in a time-scoped view because the
@@ -114,7 +114,7 @@ const (
 	// started the group. One hop misses a calling c through b, which is the shape
 	// of the reported case (payment and inventory both call order, and all three
 	// call database). More than two swallows an estate: node degree on the
-	// Rackspace tenant is median 1 but one node has 1,047 edges.
+	// anonymized production tenant is median 1 but one node has 1,047 edges.
 	maxIncidentHops = 2
 	// incidentGroupSubjectCap bounds how many machines one incident can span.
 	// Across 14 days the number of subjects alerting at once in a 15-minute window

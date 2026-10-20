@@ -1840,7 +1840,7 @@ func structuredEvidenceNote(file string) string {
 
 // Padding applied when an event's own window has no width. Collectors stamp
 // ends_at = starts_at for point events (ECS task stopped, EC2 state change) and for
-// alarms at ingest — 74% of Rackspace EventBridge events — so the investigation was
+// alarms at ingest — 74% of one production tenant's EventBridge events — so the investigation was
 // told the incident lasted zero seconds. With the "post-window evidence cannot be the
 // cause" rule that excluded a termination 4 minutes after a state change, and an
 // alarm's own evaluation periods before it fired.

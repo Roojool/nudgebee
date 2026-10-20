@@ -253,7 +253,7 @@ const (
 // markAlertOrigin records where the alert came from on its labels. Every alert that
 // a rule evaluation produces (Prometheus, vmalert, Grafana, Thanos ruler) carries a
 // generatorURL pointing back at the rule; an alert posted straight to the
-// Alertmanager API does not. On Rackspace all 5 such alerts in 30 days were delivery
+// Alertmanager API does not. On one production tenant all 5 such alerts in 30 days were delivery
 // tests ("probe", "RouteTestCritical", "verify nudgebee delivery"), which
 // investigations then treated as real outages. The label gives the investigation a
 // structural signal instead of guessing from the alert name.

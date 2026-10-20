@@ -235,7 +235,7 @@ const (
 // account whose service map has no edge between the pieces of one outage (an EC2
 // host terminated a second before its ALB and service alarms, a dependency that
 // failed a minute earlier) every one of them was dropped and the investigation was
-// told nothing else was going on (Rackspace R0083, R0158, R0074, R0106). These are
+// told nothing else was going on (four production incidents). These are
 // the weakest candidates the assembly offers: they share a window and an account,
 // nothing more. Chronic and derived (SLO/anomaly) signals stay excluded, as they are
 // from the causal tiers.
