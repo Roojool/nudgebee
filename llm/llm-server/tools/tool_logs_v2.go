@@ -95,7 +95,8 @@ func (t *NBLogToolV2) InputSchema() core.ToolSchema {
 // an empty Query (executeFetchLogsCanonical). One path serves every provider;
 // services-server owns the canonical→provider resolution and native query build.
 func (t *NBLogToolV2) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	// Local, never written back to the receiver — see NBLogTool.Call.
+	// Local, never written back to the receiver: this tool instance is cached and
+	// shared across requests, so a write would pin one request's override for all.
 	logProvider := EffectiveLogProvider(t.logProvider, nbRequestContext.QueryConfig.LogProviderOverride)
 
 	nbRequestContext.Ctx.GetLogger().Info("logs_v2: executing canonical getLogs tool call", "query", input.Command, "provider", logProvider.Provider)
