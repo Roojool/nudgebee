@@ -449,7 +449,6 @@ var accountRowDeletePlan = []deleteGroup{
 		{name: "llm_budget_config", whereSubclause: "entity_type = 'account' AND entity_id = $1"},
 		{name: "configs"},
 		{name: "llm_prompt_configuration"},
-		{name: "llm_memory_preferences", accountColumnName: "cloud_account_id"},
 		{name: "event_triage_rule_overrides"},
 		{name: "event_triage_rules"},
 	}},
