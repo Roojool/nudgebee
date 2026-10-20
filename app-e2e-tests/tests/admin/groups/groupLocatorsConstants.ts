@@ -556,6 +556,9 @@ export class GroupLocators extends CommonLocators {
   // whenever the environment was slow. Waiting for the tab separately gives the page room without loosening
   // the action timeout for every other click in the suite.
   async openGroupsTab(): Promise<void> {
+    // Admin now defaults to the Overview tab; Groups is a sub-tab of Access &
+    // Users, so land on that tab before its sub-tabs are reachable.
+    await this.page.goto("/user-management#access-users");
     await this.groupsTab.waitFor({ state: "visible", timeout: 20000 });
     await this.groupsTab.click();
     await this.newUserGroupIdentifier.waitFor({ state: "visible", timeout: 15000 });
