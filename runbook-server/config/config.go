@@ -146,6 +146,10 @@ type appConfig struct {
 
 	NudgebeeNamespace string `mapstructure:"nudgebee_namespace"`
 
+	// TaskAllowedCIDRs is a comma-separated list of private CIDRs that network
+	// tasks may reach despite the SSRF guard (on-prem installs). Empty = none.
+	TaskAllowedCIDRs string `mapstructure:"runbook_server_task_allowed_cidrs"`
+
 	OptimizationEnabled                           bool `mapstructure:"runbook_server_optimization_enabled"`
 	OptimizationRecommendationPollIntervalSeconds int  `mapstructure:"runbook_server_optimization_poll_interval_seconds"`
 	WebhookMaxBodySizeMB                          int  `mapstructure:"webhook_max_body_size_mb"`
@@ -276,6 +280,7 @@ func init() {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	viper.SetDefault("nudgebee_namespace", "nudgebee")
+	viper.SetDefault("runbook_server_task_allowed_cidrs", "")
 
 	err := viper.ReadInConfig()
 	if err != nil {

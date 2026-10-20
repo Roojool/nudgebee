@@ -52,3 +52,11 @@ func TestSslTask_Execute(t *testing.T) {
 		assert.Contains(t, err.Error(), "host parameter is required")
 	})
 }
+
+func TestSslTask_BlankPortDefaultsTo443(t *testing.T) {
+	taskCtx := testutils.NewTestTaskContext("tenant", "account", "user", &TestLogger{})
+	for _, port := range []any{"", nil} {
+		_, err := (&SslTask{}).Execute(taskCtx, map[string]any{"host": "10.0.5.12", "port": port})
+		assert.ErrorContains(t, err, "dial tcp 10.0.5.12:443:")
+	}
+}
