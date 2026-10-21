@@ -463,6 +463,15 @@ var accountRowDeletePlan = []deleteGroup{
 	}},
 }
 
+// eeAccountRowTables are cleared with the account row but exist only in EE
+// schema, so OSS never names them; EE code adds them via RegisterEEAccountRowTable.
+var eeAccountRowTables []tableDetails
+
+// RegisterEEAccountRowTable adds an EE-only table that removing an account clears.
+func RegisterEEAccountRowTable(name, accountColumnName string) {
+	eeAccountRowTables = append(eeAccountRowTables, tableDetails{name: name, accountColumnName: accountColumnName})
+}
+
 type accountDeleteBlocker struct {
 	table             string
 	accountColumnName string
@@ -620,7 +629,11 @@ func DeleteAccount(context *security.RequestContext, query AccountDeleteRequest)
 	}
 	plan := accountDataDeletePlan
 	if removeAccount {
-		plan = append(slices.Clone(plan), accountRowDeletePlan...)
+		plan = slices.Clone(plan)
+		if len(eeAccountRowTables) > 0 {
+			plan = append(plan, deleteGroup{defaultAccountIdColumn: "account_id", tables: eeAccountRowTables})
+		}
+		plan = append(plan, accountRowDeletePlan...)
 	}
 	for _, group := range plan {
 		err = deleteTables(context, tx, group.tables, query.Id, group.defaultAccountIdColumn)

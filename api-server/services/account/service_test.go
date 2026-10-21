@@ -96,3 +96,10 @@ func TestExtractAwsAccountIdFromRoleArn(t *testing.T) {
 		})
 	}
 }
+
+// Memory-v2 tables are EE-only; OSS's delete plans must not name them or every account delete fails there.
+func TestAccountDeletePlans_NameNoMemoryV2Table(t *testing.T) {
+	for _, step := range flattenDeletePlan(accountDataDeletePlan, accountRowDeletePlan) {
+		assert.False(t, strings.HasPrefix(step.table, "llm_memory_"), "delete plan names EE-only table %s", step.table)
+	}
+}

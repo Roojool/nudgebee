@@ -604,33 +604,10 @@ func GetClassAnalysisText(ctx *security.RequestContext, p DigestPeriod, accountI
 }
 
 // CountLearningsCaptured returns how many collective memories this period's
-// event analyses produced across the tenant.
-//
-// The link is derivable rather than stored: a memory carries its source
-// conversation on metadata._conversation_id, and an event-analysis conversation
-// carries the event fingerprint in its session_id.
-func CountLearningsCaptured(ctx *security.RequestContext, p DigestPeriod) (int, error) {
-	dbms, err := common.GetDatabaseManager(common.Metastore)
-	if err != nil {
-		return 0, fmt.Errorf("CountLearningsCaptured: db manager: %w", err)
-	}
-
-	query := `
-		SELECT count(*)
-		FROM llm_memory_collective m
-		JOIN llm_conversations c
-		  ON c.id::text = m.metadata->>'_conversation_id'
-		JOIN cloud_accounts ca ON ca.id = c.account_id
-		WHERE m.created_at >= $1 AND m.created_at < $2
-		  AND ca.tenant = $3::uuid
-		  AND (c.session_id LIKE $4 || '%' OR c.session_id LIKE $5 || '%')`
-
-	var n int
-	if err := dbms.Db.GetContext(ctx.GetContext(), &n, query, p.PeriodStart, p.PeriodEnd, p.TenantID,
-		SessionIdPrefixEvent, SessionIdPrefixEventRCA); err != nil {
-		return 0, fmt.Errorf("CountLearningsCaptured: query: %w", err)
-	}
-	return n, nil
+// event analyses produced across the tenant. Collective memory is EE-only, so
+// OSS counts none; ee/memory/corebridge sets the query.
+var CountLearningsCaptured = func(ctx *security.RequestContext, p DigestPeriod) (int, error) {
+	return 0, nil
 }
 
 // UpsertDigest writes the digest for one tenant-week, replacing any prior

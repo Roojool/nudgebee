@@ -416,6 +416,20 @@ const (
 	AgentReferenceTypeMemorySession     AgentReferenceType = "memory_session"
 )
 
+// MemoryReferenceSQL is the SQL ListAgentReferences uses to show memory-v2
+// reference rows: CASE arms over r.reference_type, and the LEFT JOINs they read.
+type MemoryReferenceSQL struct {
+	ContentCases string
+	Joins        string
+}
+
+// MemoryV2ReferenceHydration defaults to the subject saved on the reference row
+// because the memory-v2 layer tables are EE-only; ee/memory/corebridge sets the
+// version that joins them.
+var MemoryV2ReferenceHydration = MemoryReferenceSQL{
+	ContentCases: `WHEN r.reference_type IN ('memory_patterns','memory_decisions','memory_collective','memory_preferences') THEN COALESCE(r.metadata->>'subject', '')`,
+}
+
 type AgentReference struct {
 	Type        AgentReferenceType `json:"type"`
 	ReferenceID string             `json:"reference_id"`
@@ -499,10 +513,9 @@ type TokenUsageRecord struct {
 
 func (chat *ConversationDao) ListAgentReferences(accountId, conversationId string, messageIds []string, agentId string, limit int) ([]ConversationReference, error) {
 	// Memory-v2 hydration notes:
-	//   * patterns/decisions/collective/preferences JOIN their own layer table
-	//     by UUID and project a subject-first display string so the UI's
-	//     Additional Contexts panel shows something meaningful, not just a
-	//     reference_id.
+	//   * patterns/decisions/collective/preferences are hydrated by
+	//     MemoryV2ReferenceHydration: EE joins their layer tables, OSS (which
+	//     has none of them) shows the subject saved on the reference row.
 	//   * soul and session don't have UUID PKs (soul = (tenant,scope,user);
 	//     session = session_id), so their reference_id is a composite string
 	//     and we fall back to r.metadata->>'subject' — populated by the memory
@@ -532,14 +545,7 @@ func (chat *ConversationDao) ListAgentReferences(accountId, conversationId strin
 					-- Contexts panel (#34779). A PDF KB's data is base64 of the
 					-- document, never a displayable body, so it takes the fallback too.
 					WHEN r.reference_type = 'knowledge_base' THEN COALESCE(NULLIF(CASE WHEN k.data_format = 'pdf' THEN '' ELSE k.data END,''), NULLIF(r.metadata->>'content',''), NULLIF(r.metadata->>'description',''), r.metadata->>'name')
-					-- COALESCE(joined-projection, metadata->>'subject', '') so a
-					-- memory row deleted/decayed between injection and read still
-					-- surfaces its historical subject (from the metadata stamped
-					-- at write time) instead of vanishing from the audit trail.
-					WHEN r.reference_type = 'memory_patterns' THEN COALESCE(mp.subject || CASE WHEN COALESCE(mp.description,'') <> '' THEN ': ' || mp.description ELSE '' END, r.metadata->>'subject', '')
-					WHEN r.reference_type = 'memory_decisions' THEN COALESCE(md.subject || CASE WHEN COALESCE(md.rationale,'') <> '' THEN ': ' || md.rationale ELSE '' END, r.metadata->>'subject', '')
-					WHEN r.reference_type = 'memory_collective' THEN COALESCE(mc.subject || CASE WHEN COALESCE(mc.body,'') <> '' THEN ': ' || mc.body ELSE '' END, r.metadata->>'subject', '')
-					WHEN r.reference_type = 'memory_preferences' THEN COALESCE(mpr.key || CASE WHEN mpr.value IS NOT NULL THEN ': ' || mpr.value::text ELSE '' END, r.metadata->>'subject', '')
+					` + MemoryV2ReferenceHydration.ContentCases + `
 					WHEN r.reference_type IN ('memory_soul','memory_session') THEN COALESCE(NULLIF(r.metadata->>'content',''), r.metadata->>'subject', '')
 				END AS content,
 				-- used = point 7 audit signal. Only meaningful for memory_* rows:
@@ -597,10 +603,7 @@ func (chat *ConversationDao) ListAgentReferences(accountId, conversationId strin
 			  ) r
 			  LEFT JOIN llm_conversation_memory m ON (r.reference_type = 'memory' AND m.id = r.reference_uuid)
 			  LEFT JOIN llm_knowledgebases k ON (r.reference_type = 'knowledge_base' AND k.id = r.reference_uuid)
-			  LEFT JOIN llm_memory_patterns mp ON (r.reference_type = 'memory_patterns' AND mp.id = r.reference_uuid)
-			  LEFT JOIN llm_memory_decisions md ON (r.reference_type = 'memory_decisions' AND md.id = r.reference_uuid)
-			  LEFT JOIN llm_memory_collective mc ON (r.reference_type = 'memory_collective' AND mc.id = r.reference_uuid)
-			  LEFT JOIN llm_memory_preferences mpr ON (r.reference_type = 'memory_preferences' AND mpr.id = r.reference_uuid)
+			  ` + MemoryV2ReferenceHydration.Joins + `
 			  LEFT JOIN llm_conversation_agent a ON a.id = r.agent_id
 			  WHERE 1=1`
 	args := []any{accountId}
