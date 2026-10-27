@@ -7,7 +7,11 @@
 # clean. EE deploys still override PYTHON_BASE via --build-arg.
 ARG PYTHON_BASE=ghcr.io/nudgebee/nudgebee-python:3.12
 FROM ${PYTHON_BASE} AS python-base
-RUN apk update && \
+# Bumping OS_PKG_EPOCH changes this layer's cache key so the registry cache
+# can't serve a stale package layer (same convention as api-server/services).
+ARG OS_PKG_EPOCH=2026-W44
+RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && \
+    apk update && \
     apk upgrade --no-cache && \
     apk add --no-cache graphviz && \
     rm -rf /var/cache/apk/*
