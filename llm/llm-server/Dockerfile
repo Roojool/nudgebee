@@ -44,6 +44,16 @@ FROM ${RUNTIME_BASE}
 
 WORKDIR /app
 
+# Refresh OS packages here, not only in Dockerfile_base: the base image is built
+# by hand, so its packages (and CA bundle) go stale between rebuilds. Bumping
+# OS_PKG_EPOCH changes this layer's cache key so the registry cache can't serve a
+# stale package layer (same convention as Dockerfile_base).
+# W44 pulls the ca-certificates update that drops the distrusted emSign ECC Root CA - G3.
+ARG OS_PKG_EPOCH=2026-W44
+RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" \
+    && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the compiled Go application from the build stage
 COPY --from=build-stage /app/services /app/services
 

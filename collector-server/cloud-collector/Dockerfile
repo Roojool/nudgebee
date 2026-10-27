@@ -44,6 +44,14 @@ FROM ${RUNTIME_BASE}
 
 WORKDIR /app
 
+# Refresh OS packages here, not only in the base: the GHCR base tag is pushed by
+# hand, so its packages (and CA bundle) go stale between rebuilds. Bumping
+# OS_PKG_EPOCH changes this layer's cache key so the registry cache can't serve a
+# stale package layer (same convention as api-server/services).
+# W44 pulls ca-certificates 20261020, which drops the distrusted emSign ECC Root CA - G3.
+ARG OS_PKG_EPOCH=2026-W44
+RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && apk upgrade --no-cache
+
 # tini as PID 1: CLI tools invoked by this server (az, gcloud, ...) can spawn
 # background subprocesses they never wait on. Once their parent exits, those
 # subprocesses are reparented to PID 1. Without a real init there, they become
