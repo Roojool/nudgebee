@@ -46,9 +46,9 @@ metric or trace and compare the result with the same organization, stream and
 time range in OpenObserve. Metrics use PromQL; logs and traces use OpenObserve's
 search API. A successful connection test alone is not a query test.
 
-OpenObserve alert **webhook ingestion** is configured separately: create an
-OpenObserve webhook integration in Nudgebee, then follow the form's destination
-URL and alert-template instructions. A webhook destination sends notifications;
+OpenObserve alert **webhook ingestion** is configured separately. Use global page
+search to open **OpenObserve Webhook**, create the integration, then follow the
+form's destination URL and alert-template instructions. A webhook destination sends notifications;
 it does not create a rule in OpenObserve. Nudgebee's OpenObserve alert-rule
 management and broader service-map support are tracked in
 [#499](https://github.com/nudgebee/nudgebee/issues/499).
