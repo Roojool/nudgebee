@@ -115,6 +115,7 @@ var eventAnalysisSources = map[string]bool{
 	"splunk_webhook":                  true,
 	"elasticsearch_webhook":           true,
 	"prometheus_alertmanager_webhook": true,
+	"openobserve_webhook":             true,
 	"workflow_webhook":                true,
 	"cubeapm_webhook":                 true,
 	"signoz_webhook":                  true,
