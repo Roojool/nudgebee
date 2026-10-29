@@ -19,6 +19,14 @@ permissions:
   contents: read
   packages: write
 
+# One edge run at a time. Every run writes the shared `:edge-<arch>` and
+# `:edge` tags, so two runs interleaving (merges landing seconds apart) could
+# leave `:edge` pointing at the older commit. Queued, not cancelled, so every
+# merged commit still gets its `:edge-<date>-<sha7>` snapshot.
+concurrency:
+  group: edge
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
 
@@ -202,11 +210,12 @@ jobs:
           # immutable :edge-<date>-<sha7> snapshot tag. The snapshot lets
           # callers pin a specific main commit; the date prefix is for
           # human-scannability so you can tell when a snapshot was published
-          # without an extra GitHub lookup. Sources also include the per-arch
-          # snapshot tags so the snapshot manifest is self-contained.
+          # without an extra GitHub lookup. Sources are this commit's own
+          # per-arch snapshot tags, never the rolling `:edge-<arch>`: another
+          # run can overwrite those between our build and this merge.
           SOURCES=()
           for arch in ${{ matrix.archs }}; do
-            SOURCES+=("${REPO}:edge-${arch}")
+            SOURCES+=("${REPO}:edge-${BUILD_DATE}-${SHA_SHORT}-${arch}")
           done
 
           echo "Merging into ${REPO}:edge and ${REPO}:edge-${BUILD_DATE}-${SHA_SHORT} from: ${SOURCES[*]}"
