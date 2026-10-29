@@ -8,7 +8,7 @@
    "conclusion": "failure",
    "started_at": "2026-09-22T10:00:00Z",
    "completed_at": "2026-09-22T10:05:00Z",
-   "details_url": "https://github.com/nudgebee/nudgebee-enterprise/actions/runs/4/job/4001",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/4/job/4001",
    "app": {
     "id": 15368
    },
@@ -23,7 +23,7 @@
    "conclusion": "in_progress",
    "started_at": "2026-09-22T10:00:00Z",
    "completed_at": null,
-   "details_url": "https://github.com/nudgebee/nudgebee-enterprise/actions/runs/4/job/4002",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/4/job/4002",
    "app": {
     "id": 15368
    },

@@ -3,7 +3,7 @@
 2026-09-30T07:00:00.0000041Z Image: ubuntu-24.04
 2026-09-30T07:00:00.0000042Z ##[endgroup]
 2026-09-30T07:00:00.0000043Z ##[group]Run actions/checkout@v4
-2026-09-30T07:00:00.0000044Z syncing repository: nudgebee/nudgebee-enterprise
+2026-09-30T07:00:00.0000044Z syncing repository: nudgebee/nudgebee
 2026-09-30T07:00:00.0000045Z ##[endgroup]
 2026-09-30T07:00:00.0000046Z ##[group]Run go test -race -p 4 ./...
 2026-09-30T07:00:00.0000047Z ##[endgroup]

@@ -72,7 +72,7 @@ Run:
 ```bash
 cd api-server/migrations && atlas migrate apply -c file://atlas.hcl --env default \
   --url 'postgres://postgres:postgrespassword@localhost:5432/nudgebee?sslmode=disable' --tx-mode file
-docker exec nudgebee-enterprise-postgres-1 psql -U postgres -d nudgebee -At -c "select name, category from integration_types where name='grafana_tempo'"
+docker compose exec postgres psql -U postgres -d nudgebee -At -c "select name, category from integration_types where name='grafana_tempo'"
 ```
 Expected: `grafana_tempo|observability_platform`.
 

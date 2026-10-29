@@ -90,7 +90,7 @@ func TestCallNbTool_IntegrationOnAnotherAccount(t *testing.T) {
 		requireDeployedProxy(t, resp)
 		require.Equal(t, toolcore.NBToolResponseStatusSuccess, resp.Status)
 		assert.Equal(t, only["name"], ranOn(resp))
-		assert.Equal(t, envOr("TEST_SINGLE_PG_NAME", "rackspace-pg"), resp.AdditionalDetails[toolcore.MetadataResolvedTarget], "the step names the integration it used")
+		assert.Equal(t, envOr("TEST_SINGLE_PG_NAME", "e2e-single-pg"), resp.AdditionalDetails[toolcore.MetadataResolvedTarget], "the step names the integration it used")
 	})
 
 	t.Run("redis", func(t *testing.T) {

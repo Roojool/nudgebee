@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	ciRepo = "nudgebee/nudgebee-enterprise"
+	ciRepo = "nudgebee/nudgebee"
 	ciSHA  = "e2e5b1963d"
 )
 
@@ -346,7 +346,7 @@ func TestCINotReadyMixedWithWorkIsListedInIndex(t *testing.T) {
 // A job id containing "410" must not be mistaken for an HTTP 410.
 func TestCIJobIDContaining410IsNotExpired(t *testing.T) {
 	cr := `{"check_runs":[{"id":4104,"name":"a","conclusion":"failure","details_url":"https://github.com/o/r/actions/runs/1/job/4104","app":{"id":1},"check_suite":{"id":1}}]}`
-	got, _ := collectGitHub(t, cr, map[int64]ciReply{4104: {err: errors.New("gh api repos/nudgebee/nudgebee-enterprise/actions/jobs/4104/logs failed: exit status 1\nstderr: gh: Not Found (HTTP 404)")}})
+	got, _ := collectGitHub(t, cr, map[int64]ciReply{4104: {err: errors.New("gh api repos/nudgebee/nudgebee/actions/jobs/4104/logs failed: exit status 1\nstderr: gh: Not Found (HTTP 404)")}})
 	if got != "" {
 		t.Errorf("404 is not_ready (no work), got:\n%s", got)
 	}

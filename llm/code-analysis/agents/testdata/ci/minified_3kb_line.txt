@@ -3,7 +3,7 @@
 2026-09-30T07:00:00.0000585Z Image: ubuntu-24.04
 2026-09-30T07:00:00.0000586Z ##[endgroup]
 2026-09-30T07:00:00.0000587Z ##[group]Run actions/checkout@v4
-2026-09-30T07:00:00.0000588Z syncing repository: nudgebee/nudgebee-enterprise
+2026-09-30T07:00:00.0000588Z syncing repository: nudgebee/nudgebee
 2026-09-30T07:00:00.0000589Z ##[endgroup]
 2026-09-30T07:00:00.0000590Z ##[group]Run npm run build
 2026-09-30T07:00:00.0000591Z ##[endgroup]
