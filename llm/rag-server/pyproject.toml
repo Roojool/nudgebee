@@ -68,7 +68,7 @@ dependencies = [
     # Pulled transitively (msal->PyJWT, rsa->pyasn1, sentence-transformers->onnx/
     # transformers, unstructured->pypdf, fastapi->starlette). Pinned here to force
     # the patched versions. setuptools>=83 clears CVE-2026-59890 (old <81 cap no longer needed).
-    "PyJWT>=2.13.0",
+    "PyJWT>=2.15.0",
     "pyasn1>=0.6.3",
     "onnx>=1.22.0",
     "pypdf>=6.13.3",
@@ -224,7 +224,7 @@ constraint-dependencies = [
     "pydantic-core==2.33.1",
     "pyflakes==3.1.0",
     "pygments==2.20.0",
-    "pyjwt==2.13.0",
+    "pyjwt==2.15.0",
     "pypdf==6.14.2",
     "pypdfium2==5.11.0",
     "pysnow==0.7.17",
