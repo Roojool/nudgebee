@@ -2591,6 +2591,9 @@ class CommonService:
             sender.send(team.service_url, channel_id, card_activity(adaptive_card))
         except TeamsBotError as e:
             return {"success": False, "platform": "ms_teams", "error": str(e)}
+        except Exception:
+            LOG.exception("MS Teams test notification error")
+            return {"success": False, "platform": "ms_teams", "error": "Unexpected error; see server logs"}
         return {"success": True, "platform": "ms_teams"}
 
     def _send_test_discord(self, messaging_platform, channel_id, message):
