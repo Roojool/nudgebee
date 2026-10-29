@@ -25,7 +25,7 @@ CMD [ "./nudgebee-relay-server" ]
 
 
 FROM ghcr.io/nudgebee/alpine:3.22 AS release-stage
-ARG OS_PKG_EPOCH=2026-W36
+ARG OS_PKG_EPOCH=2026-W44
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" \
     && apk upgrade --no-cache \
     && apk add --no-cache ca-certificates \

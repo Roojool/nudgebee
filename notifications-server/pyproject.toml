@@ -58,11 +58,11 @@ nh3 = "^0.3.4"
 # only a transitive dep via msal/pyjwt) so the crypto boundary can't break under a
 # resolution change.
 cryptography = "50.0.1"
-opentelemetry-api = "^1.40.0"
-opentelemetry-sdk = "^1.40.0"
-opentelemetry-instrumentation-fastapi = "^0.61b0"
-opentelemetry-instrumentation-requests = "^0.61b0"
-opentelemetry-instrumentation-aiohttp-client = "^0.61b0"
+opentelemetry-api = "^1.45.1"
+opentelemetry-sdk = "^1.45.1"
+opentelemetry-instrumentation-fastapi = "^0.66b1"
+opentelemetry-instrumentation-requests = "^0.66b1"
+opentelemetry-instrumentation-aiohttp-client = "^0.66b1"
 reportlab = "^5.0.0"
 # mermaid_graph.py's flowchart Image tier: a thin binding over the local
 # `dot` CLI (installed via the Dockerfile's `apk add graphviz`) - no

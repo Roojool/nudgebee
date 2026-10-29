@@ -28,8 +28,8 @@ ENV TZ=Etc/UTC
 # cache key so BuildKit re-runs the apk upgrade and pulls current Alpine security
 # patches — a registry cache otherwise serves a stale package layer forever.
 # Committed (not a build-arg) so each refresh is a reviewable, revertable diff.
-# W36 pulls patched Alpine 3.22 packages including OpenSSL 3.5.8-r0 and PostgreSQL client 17.11-r0.
-ARG OS_PKG_EPOCH=2026-W36
+# W44 pulls ca-certificates 20261020, which drops the distrusted emSign ECC Root CA - G3.
+ARG OS_PKG_EPOCH=2026-W44
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && \
     apk upgrade --no-cache && \
     apk add --no-cache bash postgresql-client curl ca-certificates tzdata libc6-compat

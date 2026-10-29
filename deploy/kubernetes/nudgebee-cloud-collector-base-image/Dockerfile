@@ -7,8 +7,9 @@ FROM ghcr.io/nudgebee/alpine:3.22
 # patches — its registry cache (mode=max) otherwise serves a stale package layer
 # forever. Committed (not a build-arg) so each refresh is a reviewable, revertable
 # diff; bump when the Trivy scan flags a stale package (e.g. c-ares CVE-2026-33630);
-# currently W36 pulls patched packages (libcrypto3 3.5.8-r0).
-ARG OS_PKG_EPOCH=2026-W36
+# currently W44 pulls ca-certificates 20261020, which drops the distrusted
+# emSign ECC Root CA - G3.
+ARG OS_PKG_EPOCH=2026-W44
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && apk upgrade --no-cache
 
 # Install system deps + AWS CLI

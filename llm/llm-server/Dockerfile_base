@@ -74,7 +74,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # (e.g. gzip CVE-2026-41991, tar CVE-2025-45582).
 # W29 pulls the freshly-published Ubuntu fixes for wget (CVE-2026-58469..72) and
 # libasound2 (CVE-2026-56109) — 6 MEDIUMs that moved from NOFIX to fixable.
-ARG OS_PKG_EPOCH=2026-W36
+ARG OS_PKG_EPOCH=2026-W44
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" \
     && apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \

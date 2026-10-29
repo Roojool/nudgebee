@@ -166,7 +166,11 @@
     "@opentelemetry/core": "^2.8.0",
     "@opentelemetry/propagator-jaeger": "2.9.0",
     "sharp": "$sharp",
-    "postcss": "$postcss"
+    "postcss": "$postcss",
+    "cosmiconfig": {
+      "js-yaml": "^4.3.2"
+    },
+    "zod": "^4.6.6"
   },
   "browserslist": {
     "production": [
