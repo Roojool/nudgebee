@@ -10,6 +10,7 @@ func init() {
 		"clarification",
 		"llm",
 	)
-	// memory_read / memory_write are declared next to their implementation in
-	// ee/memory (Enterprise only); OSS registers neither tool.
+	// memory_read / memory_write are Enterprise-only (ee/memory); OSS registers
+	// neither tool, so declaring their scope here would fail
+	// TestEveryToolDeclaresAnAccountScope.
 }
