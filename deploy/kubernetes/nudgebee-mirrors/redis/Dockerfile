@@ -20,8 +20,8 @@
 #     migration, not this change).
 
 # Stage 1: rebuild wait-for-port on a patched Go toolchain.
-FROM golang:1.26.6-alpine AS wait-for-port
-# Use the builder's bundled Go (1.26.6), never an auto-downloaded one, so the
+FROM ghcr.io/nudgebee/golang:1.26.10-alpine AS wait-for-port
+# Use the builder's bundled Go (1.26.10), never an auto-downloaded one, so the
 # helper picks up the stdlib fixes (e.g. CVE-2026-39822 / -42505 are fixed in
 # 1.26.5) instead of a stale toolchain. CGO_ENABLED=0 forces a fully static
 # binary — the builder is musl (alpine) but the runtime is glibc (debian-11), so
@@ -39,8 +39,15 @@ ARG OS_PKG_EPOCH
 
 # Bitnami images run as non-root (uid 1001); switch to root to patch, then back.
 USER root
+# Debian 11 (bullseye) LTS ended Aug 2026 and its final point/security updates
+# moved to archive.debian.org. security.debian.org still serves the
+# bullseye-security index but its package pool is gone (every .deb 404s), so
+# point every bullseye source at the archive, which holds the same final release
+# plus the packages. The sources are frozen now, so this is the last OS refresh
+# these debian-11 images can get.
 RUN export DEBIAN_FRONTEND=noninteractive \
     && echo "os-pkg-epoch: ${OS_PKG_EPOCH}" \
+    && find /etc/apt/ -name '*.list' -exec sed -i -E 's#https?://(deb|security)\.debian\.org#http://archive.debian.org#g' {} + \
     && apt-get update \
     && apt-get upgrade -y \
     && apt-get clean \
