@@ -6,7 +6,7 @@
    "name": "label-prs",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681992949/job/109779247422",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/1/job/109779247422",
    "started_at": "2026-09-30T07:08:14Z",
    "completed_at": "2026-09-30T07:08:19Z",
    "app": {
@@ -22,7 +22,7 @@
    "name": "label-prs",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681970466/job/109779176538",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/2/job/109779176538",
    "started_at": "2026-09-30T07:08:00Z",
    "completed_at": "2026-09-30T07:08:07Z",
    "app": {
@@ -38,7 +38,7 @@
    "name": "label-prs",
    "status": "completed",
    "conclusion": "failure",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681821227/job/109778715279",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/3/job/109778715279",
    "started_at": "2026-09-30T07:06:24Z",
    "completed_at": "2026-09-30T07:06:30Z",
    "app": {
@@ -54,7 +54,7 @@
    "name": "lint",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547845/job/109777874401",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/4/job/109777874401",
    "started_at": "2026-09-30T07:03:44Z",
    "completed_at": "2026-09-30T07:09:37Z",
    "app": {
@@ -70,7 +70,7 @@
    "name": "Go Lint",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547897/job/109777873683",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/5/job/109777873683",
    "started_at": "2026-09-30T07:03:37Z",
    "completed_at": "2026-09-30T07:12:36Z",
    "app": {
@@ -86,7 +86,7 @@
    "name": "oss-boundary",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547836/job/109777873668",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/6/job/109777873668",
    "started_at": "2026-09-30T07:03:39Z",
    "completed_at": "2026-09-30T07:03:54Z",
    "app": {
@@ -102,7 +102,7 @@
    "name": "Reject CONCURRENTLY in migrations",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547905/job/109777873587",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/7/job/109777873587",
    "started_at": "2026-09-30T07:03:40Z",
    "completed_at": "2026-09-30T07:03:51Z",
    "app": {
@@ -118,7 +118,7 @@
    "name": "gitleaks (internal-leaks)",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547933/job/109777873489",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/8/job/109777873489",
    "started_at": "2026-09-30T07:03:37Z",
    "completed_at": "2026-09-30T07:04:12Z",
    "app": {
@@ -134,7 +134,7 @@
    "name": "oss-snapshot",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547836/job/109777873481",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/9/job/109777873481",
    "started_at": "2026-09-30T07:03:38Z",
    "completed_at": "2026-09-30T07:06:34Z",
    "app": {
@@ -150,7 +150,7 @@
    "name": "PR lifecycle sweeps (real Postgres)",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547897/job/109777873421",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/10/job/109777873421",
    "started_at": "2026-09-30T07:03:37Z",
    "completed_at": "2026-09-30T07:05:50Z",
    "app": {
@@ -166,7 +166,7 @@
    "name": "gitleaks (secrets)",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547933/job/109777873334",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/11/job/109777873334",
    "started_at": "2026-09-30T07:03:37Z",
    "completed_at": "2026-09-30T07:04:12Z",
    "app": {
@@ -182,7 +182,7 @@
    "name": "validate",
    "status": "completed",
    "conclusion": "success",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547858/job/109777873015",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/12/job/109777873015",
    "started_at": "2026-09-30T07:03:44Z",
    "completed_at": "2026-09-30T07:06:13Z",
    "app": {
@@ -198,7 +198,7 @@
    "name": "label-prs",
    "status": "completed",
    "conclusion": "failure",
-   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/36681547778/job/109777872286",
+   "details_url": "https://github.com/nudgebee/nudgebee/actions/runs/13/job/109777872286",
    "started_at": "2026-09-30T07:03:28Z",
    "completed_at": "2026-09-30T07:03:34Z",
    "app": {

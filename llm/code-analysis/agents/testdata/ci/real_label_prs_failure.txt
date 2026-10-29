@@ -28,8 +28,8 @@
 2026-09-30T07:06:25.6978164Z Prepare workflow directory
 2026-09-30T07:06:25.7253829Z Prepare all required actions
 2026-09-30T07:06:25.7360842Z Complete job name: label-prs
-2026-09-30T07:06:25.8055638Z ##[group]Run curl https://api.github.com/repos/nudgebee/nudgebee-ops/releases/assets/424866946 -L \
-2026-09-30T07:06:25.8057609Z [36;1mcurl https://api.github.com/repos/nudgebee/nudgebee-ops/releases/assets/424866946 -L \[0m
+2026-09-30T07:06:25.8055638Z ##[group]Run curl https://api.github.com/repos/nudgebee/github-labeler/releases/assets/1 -L \
+2026-09-30T07:06:25.8057609Z [36;1mcurl https://api.github.com/repos/nudgebee/github-labeler/releases/assets/1 -L \[0m
 2026-09-30T07:06:25.8059055Z [36;1m  -H 'Accept: application/octet-stream' \[0m
 2026-09-30T07:06:25.8060836Z [36;1m  -H "Authorization: ***" \[0m
 2026-09-30T07:06:25.8061855Z [36;1m  -o github-labeler-0.0.5[0m
@@ -54,8 +54,8 @@
 2026-09-30T07:06:26.5336164Z ##[endgroup]
 2026-09-30T07:06:26.5700363Z time="2026-09-30T07:06:26Z" level=info msg="Processing event" data="{\"action\": \"edited\"}"
 2026-09-30T07:06:26.5827457Z time="2026-09-30T07:06:26Z" level=info msg="executing with owner=nudgebee repo=nudgebee event=pull_request_target"
-2026-09-30T07:06:27.2668535Z time="2026-09-30T07:06:27Z" level=info msg="Parsed \".github/labeler.yml\"" .github/labeler.yml="&{👍 Thanks for this!\n🏷 I have applied any labels matching special text in your issue.\n\nPlease review the labels and make any necessary changes.\n map[bug:[^fix\\(.+\\): .+] feat:[^feat\\(.+\\): .+] infra:[^ci\\(.+\\): .+]] map[API:[^api-server/services/.*] Ai:[^llm/gateway/.* ^llm/llm-server/.* ^llm/rag-server/.* ^llm/code-analysis/.* ^llm/benchmark/.* ^ml-k8s-server/.*] AutoRunbook:[^auto-pilot/.*] Cloud:[^collector-server/cloud-collector/.*] Database:[^api-server/migrations/.* ^migrations/.*] K8s:[^collector-server/k8s-collector/.* ^deploy/kubernetes/.*] Notifications:[^notifications-server/.*] Testing:[^app-e2e-tests/.* ^api-server/test_servicemap/.*] Tickets:[^ticket-server/.*] UI/UX:[^app/src/.* ^app/public/.* ^app/__tests__/.*] Workflow:[^runbook-server/.*] infra:[^deploy/.* ^ops/.* ^\\.github/.*]]}"
-2026-09-30T07:06:27.6237190Z time="2026-09-30T07:06:27Z" level=info msg="Found ([api-server/migrations/migrations/app/1790676373957_V976_notification_channel_account_mappings_scope_unique_constraint_per_tenant.down.sql api-server/migrations/migrations/app/1790676373957_V976_notification_channel_account_mappings_scope_unique_constraint_per_tenant.up.sql api-server/migrations/migrations/app/atlas.sum api-server/services/tenant/service.go app/src/api1/notification/index.ts app/src/components/notifications/ChannelAccountMapping.tsx]) updated files"
+2026-09-30T07:06:27.2668535Z time="2026-09-30T07:06:27Z" level=info msg="Parsed \".github/labeler.yml\"" .github/labeler.yml="&{...}"
+2026-09-30T07:06:27.6237190Z time="2026-09-30T07:06:27Z" level=info msg="Found ([app/src/x.tsx]) updated files"
 2026-09-30T07:06:28.2213599Z time="2026-09-30T07:06:28Z" level=fatal msg="Failed to execute please add screenshots for UI changes in PR Template"
 2026-09-30T07:06:28.2238076Z ##[error]Process completed with exit code 1.
 2026-09-30T07:06:28.2320033Z Cleaning up orphan processes
