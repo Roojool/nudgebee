@@ -267,7 +267,7 @@ func TestGetGithubIssueWithClient_MapsMetadata(t *testing.T) {
 // A deleted GitHub issue (410 Gone) or one that never existed (404) must
 // surface as ticket.ErrNotFound, not a generic error — the ticket-status
 // sync job relies on that to skip it without aborting the rest of the run
-// (nudgebee-enterprise#39092 follow-up: a stale backlog with deleted issues
+// (a stale backlog with deleted issues
 // was tripping the sync's consecutive-failure abort guard before it ever
 // reached healthy tickets).
 func TestGetGithubIssueWithClient_NotFoundAndGoneAreErrNotFound(t *testing.T) {

@@ -46,7 +46,7 @@ func (m *stubTicketManager) Get(_ *gin.Context, _ models.TicketConfigurations, t
 }
 
 // A ServiceNow (or any non-Jira) ticket resolved upstream must produce an
-// update once synced — this is the nudgebee-enterprise#39092 bug: SyncTickets
+// update once synced — this was a bug: SyncTickets
 // used to hard-skip every tool but Jira, so a ServiceNow incident closed
 // upstream stayed "open" in Nudgebee forever.
 func TestCollectManagerUpdates_NonJiraToolProducesUpdate(t *testing.T) {
@@ -158,7 +158,7 @@ func TestCollectManagerUpdates_SuccessResetsFailureStreak(t *testing.T) {
 // condition, not a transient one — it must never count toward the
 // consecutive-failure abort guard, or a backlog containing a few deleted
 // tickets would stop sync from ever reaching healthy ones after them
-// (nudgebee-enterprise#39092 follow-up: this is exactly why GitHub's 407-ticket
+// (this is exactly why GitHub's 407-ticket
 // backlog, which has deleted issues scattered through it, never synced a
 // single ticket, while ServiceNow's much smaller backlog did).
 func TestCollectManagerUpdates_NotFoundDoesNotCountTowardFailureLimit(t *testing.T) {
@@ -281,7 +281,7 @@ func TestNewSafeGinContext_HasNonNilRequest(t *testing.T) {
 
 // isAuthFailure is what SyncConfigurations relies on to tell a real
 // credential rejection (which should disable the integration) apart from a
-// transient failure (which should not — nudgebee-enterprise#39091: a brief
+// transient failure (which should not — a brief
 // upstream outage used to disable the integration permanently since any
 // error, transient or not, was treated as fatal). Every tool's SDK formats
 // its error differently, so each one is exercised with its actual wording.

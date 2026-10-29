@@ -164,8 +164,7 @@ func (c nbCustomContainerTool) Call(nbRequestContext NbToolContext, input NBTool
 // normalizeContainerCallRequest unpacks a Command that is itself the tool's
 // JSON input. The planner leaves the raw input in Command whenever it has no
 // string "command" key — `{}`, or `{"command":["df","-h"]}` — so running
-// Command as-is executed the literal "{}" instead of the configured command
-// (nudgebee-enterprise#39565).
+// Command as-is executed the literal "{}" instead of the configured command.
 func normalizeContainerCallRequest(input NBToolCallRequest) NBToolCallRequest {
 	normalized := ParseNBToolCallRequestFromInput(strings.TrimSpace(input.Command))
 	if normalized.Arguments == nil {

@@ -9,8 +9,7 @@ import (
 )
 
 // The planner hands the container tool the raw JSON input as Command when it
-// has no string "command" key; that JSON must not be run as a shell command
-// (nudgebee-enterprise#39565).
+// has no string "command" key; that JSON must not be run as a shell command.
 func TestResolveContainerCommand(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := map[string]any{"image": "alpine:latest", "command": []any{`/bin/sh -c "df -h | awk '$5+0 > 85 {print}'"`}}
