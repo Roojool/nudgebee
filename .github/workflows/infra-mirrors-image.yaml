@@ -43,7 +43,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -81,6 +80,9 @@ jobs:
   # that arch.
   build:
     needs: prepare
+    permissions:
+      contents: read
+      packages: write
     runs-on: ${{ matrix.plat.runner }}
     timeout-minutes: 30
     strategy:
@@ -110,6 +112,8 @@ jobs:
           # CVEs in the postgres image's prebuilt gosu); needs a Go build stage.
           - { image: postgres,          context: deploy/kubernetes/nudgebee-mirrors/postgres,          tag: 16.10-alpine-nb2 }
           - { image: nginx,             context: deploy/kubernetes/nudgebee-mirrors/nginx,             tag: stable-alpine3.20-slim-nb1 }
+          - { image: trivy,             context: deploy/kubernetes/nudgebee-mirrors/trivy,             tag: 0.76.1-nb1 }
+          - { image: kube-bench,        context: deploy/kubernetes/nudgebee-mirrors/kube-bench,        tag: v0.16.0-nb1 }
         plat:
           - { arch: amd64, platform: linux/amd64, runner: ubuntu-latest }
           - { arch: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm }
@@ -151,6 +155,9 @@ jobs:
   merge:
     needs: [prepare, build]
     if: needs.prepare.outputs.push == 'true'
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -164,6 +171,8 @@ jobs:
           - { image: postgres-exporter, tag: v0.20.1-nb1 }
           - { image: postgres,          tag: 16.10-alpine-nb2 }
           - { image: nginx,             tag: stable-alpine3.20-slim-nb1 }
+          - { image: trivy,             tag: 0.76.1-nb1 }
+          - { image: kube-bench,        tag: v0.16.0-nb1 }
     steps:
       - uses: docker/setup-buildx-action@v3
 
