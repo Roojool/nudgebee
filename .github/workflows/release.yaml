@@ -41,8 +41,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   REGISTRY: ghcr.io
@@ -85,6 +84,9 @@ jobs:
   # arm64 cell.
   build-images:
     needs: prepare
+    permissions:
+      contents: read
+      packages: write
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -211,6 +213,9 @@ jobs:
   # produced for that image — a missing per-arch tag fails the merge.
   merge-manifests:
     needs: [prepare, build-images]
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
