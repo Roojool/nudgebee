@@ -44,6 +44,9 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: read
+
 jobs:
   e2e:
     name: E2E PW Automation Tests (OSS)
