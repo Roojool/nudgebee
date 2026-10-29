@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/python:3.12-alpine AS python-base
+FROM ghcr.io/nudgebee/python:3.12-alpine AS python-base
 LABEL maintainer="nudgebee"
 LABEL version="3.12-alpine"
 
