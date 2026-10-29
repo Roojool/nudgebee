@@ -1,10 +1,11 @@
 import logging
 import secrets
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from notifications_server import engine, sync_engine, slack_app, teams_app
 from notifications_server.configs.settings import settings
@@ -20,6 +21,16 @@ from notifications_server.services.message import MessageService
 from notifications_server.services.rules import NotificationRulesService
 from notifications_server.services.route_check import RouteCheckService
 from notifications_server.clients.google_chat_app_client import GoogleChatAppClient
+
+
+class PlatformInput(BaseModel):
+    platform: Literal["slack", "ms_teams", "google_chat", "discord"] = Field(..., description="Target platform")
+
+
+class HasuraActionPayload(BaseModel):
+    input: PlatformInput
+    session_variables: Dict[str, Any] = Field(default_factory=dict)
+
 
 LOG = logging.getLogger(__name__)
 
