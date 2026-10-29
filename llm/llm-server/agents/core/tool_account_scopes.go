@@ -10,8 +10,6 @@ func init() {
 		"clarification",
 		"llm",
 	)
-	toolcore.DeclareOriginBound(toolcore.OriginBoundConversationState,
-		"memory_read",
-		"memory_write",
-	)
+	// memory_read / memory_write are declared next to their implementation in
+	// ee/memory (Enterprise only); OSS registers neither tool.
 }
