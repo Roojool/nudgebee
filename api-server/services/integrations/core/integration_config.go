@@ -1054,6 +1054,9 @@ func ListIntegrationConfigs(context *security.RequestContext, accountId string, 
 }
 
 // ListActiveIntegrationConfigs returns non-disabled integrations for an account.
+// Keep it patchable by tests that replace its DB lookup.
+//
+//go:noinline
 func ListActiveIntegrationConfigs(context *security.RequestContext, accountId string, integrationName string) ([]IntegrationDto, error) {
 	if accountId == "" {
 		return nil, errors.New("integrations: accountId is required")
