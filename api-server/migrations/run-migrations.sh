@@ -307,7 +307,7 @@ else
 
         if [ "$playbook_ready" = "1" ]; then
             echo "Loading Agent Playbook..."
-            curl -X POST "$SERVICE_API_SERVER_URL/rpc-cron" -d '{
+            curl -f -X POST "$SERVICE_API_SERVER_URL/rpc-cron" -d '{
                     "comment": "Load Agent Playbook",
                     "name": "Load Agent Playbook",
                     "payload": {}
