@@ -215,7 +215,7 @@ jobs:
           # global.initImages.curl, global.testImage, and rag-server's
           # .Values.migrationHookImage. Small, but they run in-cluster and were
           # never measured.
-          - ghcr.io/nudgebee/curl:8.10.1
+          - ghcr.io/nudgebee/curl:8.23.0
           - ghcr.io/nudgebee/busybox:1.37.0
           - ghcr.io/nudgebee/alpine-k8s:1.32.13
           # --- first-party agents / sidecars built in sibling repos ---

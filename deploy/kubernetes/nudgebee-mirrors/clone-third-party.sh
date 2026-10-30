@@ -32,7 +32,7 @@ IMAGES=(
   # resolved to :latest.
   "docker.io/library/busybox:1.37.0 busybox:1.37.0"
   # Init container for the service pods (global.initImages.curl).
-  "docker.io/curlimages/curl:8.10.1 curl:8.10.1"
+  "docker.io/curlimages/curl:8.23.0 curl:8.23.0"
   # Consumed by the nudgebee-agent chart (k8s-agent repo), not the chart in this
   # repo — listed here so the mirror has one documented, reproducible source
   # instead of an ad-hoc push. 0.157.0 is built on Go 1.26.5 with grpc v1.82.1

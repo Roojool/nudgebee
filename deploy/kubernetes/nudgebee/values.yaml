@@ -5,7 +5,7 @@ global:
   initImages:
     # -nb2 rebuilds gosu on Go 1.26.5 (clears 1C/14H Go-stdlib CVEs); fully clean.
     postgres: 'ghcr.io/nudgebee/postgres:16.10-alpine-nb2'
-    curl: 'ghcr.io/nudgebee/curl:8.10.1'
+    curl: 'ghcr.io/nudgebee/curl:8.23.0'
   # `helm test` connection pods only (each service chart's
   # templates/tests/test-connection.yaml). A full ref, like initImages above,
   # rather than a repository composed onto global.image.registry: this is a
