@@ -348,6 +348,10 @@ func normaliseGeneratedMetricsQuery(provider, raw string) (metricsQueryResult, e
 			var promql string
 			promql, promqlErr = firstPromqlQuery(envelope.Promql)
 			if promqlErr == nil {
+				// A JSON envelope can still carry prose instead of runnable PromQL.
+				if _, perr := promQLParser.ParseExpr(strings.ReplaceAll(promql, "__CLUSTER__", "")); perr != nil {
+					return metricsQueryResult{}, fmt.Errorf("metrics query generation: response is not a runnable query (%s)", truncateString(promql, 200))
+				}
 				result.Query = promql
 				return result, nil
 			}

@@ -126,6 +126,19 @@ func TestNormaliseGeneratedMetricsQueryRejectsUnusableAnswers(t *testing.T) {
 	}
 }
 
+// The {"promql": ...} envelope is a transport, not a trust boundary: prose
+// smuggled into it must fail the same single-expression parse as bare text, while
+// a valid JSON-wrapped query still fills the editor.
+func TestNormaliseGeneratedMetricsQueryRejectsProseInPromqlEnvelope(t *testing.T) {
+	_, err := normaliseGeneratedMetricsQuery("prometheus", `{"promql":"Here is the query: up"}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a runnable query", "prose in the promql envelope must fail with the same error shape as bare prose")
+
+	got, err := normaliseGeneratedMetricsQuery("prometheus", `{"promql":"up"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "up", got.Query)
+}
+
 // Issue #293: on an ambiguous ask, promql_query answered with a markdown menu of
 // example queries. That must never land in the editor — for a PromQL provider the
 // markdown fails the single-expression parse and surfaces as an error, and a
