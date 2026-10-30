@@ -7,6 +7,7 @@ Open-source SRE copilot — observability, FinOps, runbook automation, and incid
 [![Node](https://img.shields.io/badge/Node-25+-339933?logo=node.js&logoColor=white)](https://nodejs.org/en/download)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 [![Discord](https://img.shields.io/discord/1514262994152980622?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/C5d27ceTEv)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/nudgebee/nudgebee/badge)](https://securityscorecards.dev/viewer/?uri=github.com/nudgebee/nudgebee)
 
 ## What is Nudgebee?
 
