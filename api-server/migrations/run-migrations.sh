@@ -311,7 +311,7 @@ else
                     "comment": "Load Agent Playbook",
                     "name": "Load Agent Playbook",
                     "payload": {}
-                }' -v -H "X-ACTION-TOKEN: $ACTION_API_SERVER_TOKEN" \
+                }' -H "X-ACTION-TOKEN: $ACTION_API_SERVER_TOKEN" \
                 || echo "WARN: Agent Playbook trigger failed; cron self-registers on services-server boot, continuing."
         else
             echo "WARN: services-server not healthy after $((max_attempts * interval))s; skipping Agent Playbook trigger (cron self-registers on services-server boot)."
