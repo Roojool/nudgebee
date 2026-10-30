@@ -139,6 +139,20 @@ func TestNormaliseGeneratedMetricsQueryRejectsProseInPromqlEnvelope(t *testing.T
 	assert.Equal(t, "up", got.Query)
 }
 
+func TestNormaliseGeneratedMetricsQueryValidatesQueryEnvelope(t *testing.T) {
+	_, err := normaliseGeneratedMetricsQuery("prometheus", `{"query":"Here is the query: up"}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a runnable query")
+
+	got, err := normaliseGeneratedMetricsQuery("prometheus", `{"query":"up"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "up", got.Query)
+
+	got, err = normaliseGeneratedMetricsQuery("datadog", `{"query":"avg:system.cpu.user{*}"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "avg:system.cpu.user{*}", got.Query)
+}
+
 // Issue #293: on an ambiguous ask, promql_query answered with a markdown menu of
 // example queries. That must never land in the editor — for a PromQL provider the
 // markdown fails the single-expression parse and surfaces as an error, and a

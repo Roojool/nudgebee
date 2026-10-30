@@ -340,6 +340,13 @@ func normaliseGeneratedMetricsQuery(provider, raw string) (metricsQueryResult, e
 		result.Index = envelope.Index
 
 		if strings.TrimSpace(envelope.Query) != "" {
+			providerName := strings.ToLower(strings.TrimSpace(provider))
+			// ES DSL and Datadog queries do not use PromQL.
+			if providerName != "elasticsearch" && providerName != "opensearch" && providerName != "es" && providerName != "datadog" {
+				if _, perr := promQLParser.ParseExpr(strings.ReplaceAll(envelope.Query, "__CLUSTER__", "")); perr != nil {
+					return metricsQueryResult{}, fmt.Errorf("metrics query generation: response is not a runnable query (%s)", truncateString(envelope.Query, 200))
+				}
+			}
 			result.Query = envelope.Query
 			return result, nil
 		}
