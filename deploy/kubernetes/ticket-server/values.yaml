@@ -54,6 +54,15 @@ service:
   type: ClusterIP
   port: 8080
 
+# Delays SIGTERM so kube-proxy has time to stop routing new traffic here first.
+lifecycle:
+  preStop:
+    exec:
+      command: ['sleep', '10']
+
+# Must cover the preStop sleep (10s) + shutdownTimeout in main.go (35s).
+terminationGracePeriodSeconds: 45
+
 ingress:
   enabled: false
   className: ""
