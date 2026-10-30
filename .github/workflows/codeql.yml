@@ -55,8 +55,22 @@ jobs:
           - runbook-server
           - ticket-server
           - vulnerability-server
+    env:
+      # The Go extractor processes up to 32 files concurrently by default;
+      # with the AWS/Azure/GCP SDK types loaded that exhausts the runner's
+      # 16 GB and the runner is killed mid-build (cloud-collector).
+      CODEQL_EXTRACTOR_GO_MAX_GOROUTINES: 4
     steps:
       - uses: actions/checkout@v4
+
+      - name: Add swap
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 16G /mnt/codeql-swap
+          sudo chmod 600 /mnt/codeql-swap
+          sudo mkswap /mnt/codeql-swap
+          sudo swapon /mnt/codeql-swap
+          free -h
 
       - uses: actions/setup-go@v5
         with:
@@ -72,7 +86,9 @@ jobs:
 
       - name: Build
         working-directory: ${{ matrix.module }}
-        run: go build ./...
+        run: |
+          go build ./...
+          free -h
 
       - uses: github/codeql-action/analyze@v4
         with:
