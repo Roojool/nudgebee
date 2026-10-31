@@ -117,6 +117,10 @@ jobs:
           # kubectl + /bin/sh only, for the rag-server migration hook. Replaces the
           # alpine/k8s toolbox clone; same kubectl source tag, rebuilt on a patched Go.
           - { image: kubectl,           context: deploy/kubernetes/nudgebee-mirrors/kubectl,           tag: 1.32.13-nb1 }
+          # Upstream 1.31.4 images with their Go binaries rebuilt from the same tags on
+          # a patched Go. Drop both once an upstream release carries the fixes.
+          - { image: temporal-server,      context: deploy/kubernetes/nudgebee-mirrors/temporal-server,      tag: 1.31.4-nb1 }
+          - { image: temporal-admin-tools, context: deploy/kubernetes/nudgebee-mirrors/temporal-admin-tools, tag: 1.31.4-nb1 }
         plat:
           - { arch: amd64, platform: linux/amd64, runner: ubuntu-latest }
           - { arch: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm }
@@ -157,7 +161,9 @@ jobs:
   # per-arch tag rather than publishing anything wrong.
   merge:
     needs: [prepare, build]
-    if: needs.prepare.outputs.push == 'true'
+    # Runs when a build leg failed, so one failed image cannot hold back the others.
+    # Its own merge row fails loudly on the missing per-arch tag.
+    if: ${{ !cancelled() && needs.prepare.outputs.push == 'true' }}
     permissions:
       contents: read
       packages: write
@@ -177,6 +183,8 @@ jobs:
           - { image: trivy,             tag: 0.76.1-nb1 }
           - { image: kube-bench,        tag: v0.16.0-nb1 }
           - { image: kubectl,           tag: 1.32.13-nb1 }
+          - { image: temporal-server,      tag: 1.31.4-nb1 }
+          - { image: temporal-admin-tools, tag: 1.31.4-nb1 }
     steps:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
