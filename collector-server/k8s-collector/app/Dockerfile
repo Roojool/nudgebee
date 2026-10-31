@@ -30,7 +30,15 @@ FROM python-base AS production
 # packages drift behind security patches (openssl/libcrypto3/libssl3, musl,
 # zlib, nghttp2 CVEs). Refresh them at build time. The proper root-cause fix is
 # a base-image rebuild + tag bump (publish workflow lives in nudgebee-infra).
-RUN apk upgrade --no-cache
+# Bumping OS_PKG_EPOCH changes this layer's cache key so the registry cache
+# can't serve a stale package layer (same convention as api-server/services).
+ARG OS_PKG_EPOCH=2026-W44
+RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && apk upgrade --no-cache
+
+# Drop pip from the runtime image. Dependencies are installed with uv and
+# nothing calls pip at runtime, but pip vendors its own msgpack, urllib3 and
+# setuptools copies that Trivy flags (still unpatched in pip 26.2.2).
+RUN if python -m pip --version >/dev/null 2>&1; then python -m pip uninstall -y pip; fi
 
 WORKDIR /app
 ENV PYTHONPATH=/app

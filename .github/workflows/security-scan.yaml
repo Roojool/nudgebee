@@ -79,7 +79,7 @@ jobs:
         id: ns
         run: echo "namespace=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -165,7 +165,7 @@ jobs:
       # (parallel, reliable) instead of scanning large images locally.
       - name: Upload scan JSON
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           # Tag suffix only for the pinned-tag entries, so the `edge` artifacts
           # keep their existing `scan-<image>` names. Without it the two
@@ -193,7 +193,7 @@ jobs:
         ref:
           # --- ghcr.io/nudgebee infra mirrors (current values.yaml pins) ---
           - ghcr.io/nudgebee/postgresql:16.1.0-debian-11-r16-nb1
-          - ghcr.io/nudgebee/postgres:16.10-alpine-nb2
+          - ghcr.io/nudgebee/postgres:16.15-alpine-nb1
           - ghcr.io/nudgebee/redis:7.0.12-debian-11-r0-nb2
           - ghcr.io/nudgebee/rabbitmq:3.13.7-debian-12-r5-nb1
           - ghcr.io/nudgebee/postgres-exporter:v0.20.1-nb1
@@ -208,16 +208,16 @@ jobs:
           # silently keep reporting on whatever it was pinned to here.
           # temporal-ui not scanned: the Web UI is disabled in the chart (cloned
           # so re-enabling needs no Docker Hub pull, but nothing deploys it).
-          - ghcr.io/nudgebee/qdrant:v1.19.0
-          - ghcr.io/nudgebee/temporal-server:1.31.2
-          - ghcr.io/nudgebee/temporal-admin-tools:1.31.2
+          - ghcr.io/nudgebee/qdrant:v1.19.2
+          - ghcr.io/nudgebee/temporal-server:1.31.4
+          - ghcr.io/nudgebee/temporal-admin-tools:1.31.4
           # --- init / helper images the service charts mount ---
           # global.initImages.curl, global.testImage, and rag-server's
           # .Values.migrationHookImage. Small, but they run in-cluster and were
           # never measured.
-          - ghcr.io/nudgebee/curl:8.10.1
+          - ghcr.io/nudgebee/curl:8.23.0
           - ghcr.io/nudgebee/busybox:1.37.0
-          - ghcr.io/nudgebee/alpine-k8s:1.32.13
+          - ghcr.io/nudgebee/kubectl:1.32.13-nb1
           # --- first-party agents / sidecars built in sibling repos ---
           # Measured here so the daily scan covers the whole deployed surface;
           # fixes land in the k8s-agent / node-agent / forager repos and these
@@ -230,7 +230,7 @@ jobs:
           - ghcr.io/nudgebee/clickhouse:24.12.4-debian-12-r0-nb-3
           - ghcr.io/nudgebee/opentelemetry-collector-contrib:0.157.0
     steps:
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -292,7 +292,7 @@ jobs:
 
       - name: Upload scan JSON
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: scan-deployed-${{ steps.an.outputs.name }}
           path: result.json
