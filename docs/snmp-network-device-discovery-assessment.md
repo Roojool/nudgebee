@@ -22,14 +22,14 @@ Native polling is technically viable in Go: GoSNMP supports SNMP v1/v2c/v3, walk
 
 ## Fit with Nudgebee
 
-Nudgebee already has account-scoped integration configuration in [`integration_config.go`](../api-server/services/integrations/core/integration_config.go) and registered graph sources in [`sources/registry.go`](../api-server/services/knowledge_graph/sources/registry.go). Graph nodes and edges record tenant and source provenance; their current account field is named `CloudAccountID` in [`types.go`](../api-server/services/knowledge_graph/core/types.go). A LibreNMS connector should use that source/provenance path and keep device/interface identities stable. It should not model network devices as cloud resource types. A generic monitoring-account identity may be needed if the existing cloud-account scope cannot represent a LibreNMS instance cleanly.
+Nudgebee already has account-scoped integration configuration in [`integration_config.go`](../api-server/services/integrations/core/integration_config.go) and registered graph sources in [`sources/registry.go`](../api-server/services/knowledge_graph/sources/registry.go). Graph nodes and edges record tenant and source provenance; their current account field is named `CloudAccountID` in [`types.go`](../api-server/services/knowledge_graph/core/types.go). A LibreNMS connector should use that source/provenance path and keep device/interface identities stable. It should not model network devices as cloud resource types. If topology is added later, define dedicated graph node types for physical devices (such as switches and routers) rather than overloading compute or cloud-resource types; reserve the existing NodeTypeNetworkInterface constant for interface entities. A generic monitoring-account identity may be needed if the existing cloud-account scope cannot represent a LibreNMS instance cleanly.
 
 ## Follow-up scope
 
 Before implementation, confirm:
 
 - First-release entities: devices, interfaces, active alerts, metrics, and/or topology.
-- Whether the LibreNMS deployment is reachable from the Nudgebee service or requires an in-network agent.
+- Whether the LibreNMS deployment is reachable from the Nudgebee service or requires an in-network agent. If private-network reachability is required, evaluate whether the existing account-scoped vm_agent/proxy path can route the read-only HTTPS API calls; confirm the deployment model rather than assuming compatibility.
 - Supported LibreNMS versions, expected inventory/alert refresh cadence, and whether alert acknowledgement is read-only or in scope.
 - Whether neighbor data is available through the deployed API and has stable identifiers suitable for graph edges.
 
