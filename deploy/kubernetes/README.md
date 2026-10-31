@@ -257,8 +257,11 @@ Set `global.imagePullSecrets` and provide credentials via `nudgebee_registry_sec
 Dummy credentials are disabled by default. For a temporary local bootstrap login, enable them explicitly during install:
 ```bash
 helm install nudgebee ./nudgebee \
-  --set nudgebee_secret.NEXTAUTH_DUMMY_CREDS_ENABLED=true
+  --set nudgebee_secret.NEXTAUTH_DUMMY_CREDS_ENABLED=true \
+  --set-string "nudgebee_secret.NUDGEBEE_ENCRYPTION_KEY=$(openssl rand -hex 32)" \
+  --set-string 'admin.email=you@example.com'
 ```
+Preserve the generated encryption key for future upgrades; regenerating it makes encrypted rows unreadable.
 Retrieve the generated password with:
 ```bash
 kubectl -n nudgebee get secret nudgebee \
