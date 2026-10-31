@@ -751,6 +751,10 @@ func FetchTracesWithFocusedStrategy(requestContext *security.RequestContext, par
 }
 
 func fetchTracesWithFocusedStrategy(requestContext *security.RequestContext, params TraceQueryParams, builder *TraceServiceMapBuilder, fetch func(*security.RequestContext, TraceQueryParams, FocusedQueryParams) ([]common.OpenTelemetryTrace, error)) (*ServiceMap, error) {
+	if params.AccountID == "" {
+		return nil, fmt.Errorf("account ID is required")
+	}
+
 	strategyStartTime := time.Now()
 
 	// Generate focused queries using different filtering strategies

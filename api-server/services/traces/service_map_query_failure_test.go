@@ -51,11 +51,23 @@ func TestFocusedTraceQueriesCanceled(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
 	ctx := security.NewRequestContext(parent, security.NewSecurityContextForTenantAdmin("tenant"), slog.Default(), nil, nil)
-	result, err := fetchTracesWithFocusedStrategy(ctx, TraceQueryParams{}, NewTraceServiceMapBuilder(), func(*security.RequestContext, TraceQueryParams, FocusedQueryParams) ([]common.OpenTelemetryTrace, error) {
+	result, err := fetchTracesWithFocusedStrategy(ctx, TraceQueryParams{AccountID: "account"}, NewTraceServiceMapBuilder(), func(*security.RequestContext, TraceQueryParams, FocusedQueryParams) ([]common.OpenTelemetryTrace, error) {
 		return nil, context.Canceled
 	})
 	if result != nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("got map=%v error=%v", result, err)
+	}
+}
+
+func TestFocusedTraceQueriesRequireAccountID(t *testing.T) {
+	ctx := security.NewRequestContextForTenantAdmin("tenant", slog.Default(), nil, nil)
+	called := false
+	result, err := fetchTracesWithFocusedStrategy(ctx, TraceQueryParams{}, NewTraceServiceMapBuilder(), func(*security.RequestContext, TraceQueryParams, FocusedQueryParams) ([]common.OpenTelemetryTrace, error) {
+		called = true
+		return nil, nil
+	})
+	if result != nil || err == nil || err.Error() != "account ID is required" || called {
+		t.Fatalf("got map=%v error=%v fetchCalled=%v, want account ID validation before querying", result, err, called)
 	}
 }
 
