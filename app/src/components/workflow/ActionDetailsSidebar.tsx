@@ -4248,14 +4248,15 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
       const hiddenFields = isSwitchTask ? new Set(['default_next', 'default']) : new Set<string>();
 
       // Sort fields based on order and required status
+      const isMcpCall = selectedActionType === 'llm.mcp_call';
       const fields = Object.entries(inputSchema)
         .filter(([fieldName, fieldSchema]) => !hiddenFields.has(fieldName) && !(fieldSchema as SchemaProperty).hidden)
         .sort(([fieldNameA, schemaA], [fieldNameB, schemaB]) => {
           const sA = schemaA as SchemaProperty;
           const sB = schemaB as SchemaProperty;
 
-          const mcpToolNameA = selectedActionType === 'llm.mcp_call' && fieldNameA === 'tool_name';
-          const mcpToolNameB = selectedActionType === 'llm.mcp_call' && fieldNameB === 'tool_name';
+          const mcpToolNameA = isMcpCall && fieldNameA === 'tool_name';
+          const mcpToolNameB = isMcpCall && fieldNameB === 'tool_name';
           if (mcpToolNameA !== mcpToolNameB) {
             return mcpToolNameA ? 1 : -1;
           }
