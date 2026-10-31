@@ -67,7 +67,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go install github.com/cli/cli/v2/cmd/gh@v2.103.3
 
 # Final stage
-FROM ghcr.io/nudgebee/alpine:3.22
+FROM ghcr.io/nudgebee/alpine:3.23
 
 
 WORKDIR /app
@@ -195,7 +195,11 @@ RUN apk add --no-cache \
 # Install common linters and package managers
 # Python tools are installed in a venv to avoid polluting system site-packages
 # (e.g. poetry pulls in urllib3 2.x which breaks apk-installed aws-cli)
-RUN npm install -g yarn pnpm && \
+# Alpine's npm package lags npm's own dependency fixes (tar, minimatch, pacote), so
+# replace it with a pinned npm from the same major. A global install lands in
+# /usr/local, so the apk copy has to go or scanners keep reporting it.
+RUN npm install -g npm@11.21.1 yarn pnpm && \
+    apk del --no-cache npm && \
     python3 -m venv /opt/python-tools && \
     /opt/python-tools/bin/pip install --no-cache-dir --upgrade pip && \
     /opt/python-tools/bin/pip install --no-cache-dir poetry black flake8 mypy && \
