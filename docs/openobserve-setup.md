@@ -38,6 +38,20 @@ telemetry collection in OpenObserve.
    test checks the organization's streams endpoint; a successful test does not
    guarantee that every query or stream contains data.
 
+## Supported signals
+
+Nudgebee can query logs, metrics and traces from OpenObserve, Datadog and New
+Relic. The available streams and query formats differ by provider.
+
+| Signal  | OpenObserve                                                          | Datadog   | New Relic |
+| ------- | -------------------------------------------------------------------- | --------- | --------- |
+| Logs    | Supported; uses the configured log stream and OpenObserve search API | Supported | Supported |
+| Metrics | Supported through PromQL; expression compatibility varies            | Supported | Supported |
+| Traces  | Supported; uses the configured trace stream                          | Supported | Supported |
+
+Choose the default provider separately for each signal. Queries are provider-
+specific and may need translation when you switch sources.
+
 ## Verify queries
 
 For the associated account, open its logs, metrics or traces view and choose a
