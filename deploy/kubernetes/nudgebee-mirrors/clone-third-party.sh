@@ -15,18 +15,15 @@ NS="${GHCR_NAMESPACE:-ghcr.io/nudgebee}"
 
 # src -> dst:tag
 IMAGES=(
-  "docker.io/qdrant/qdrant:v1.19.0 qdrant:v1.19.0"
+  "docker.io/qdrant/qdrant:v1.19.2 qdrant:v1.19.2"
   # Temporal. The upstream chart defaults these to docker.io/temporalio/*; the
   # chart's temporal.{server,admintools,web}.image.repository values point at
   # these clones. web/ui is disabled in values.yaml but cloned anyway so
   # re-enabling it does not reintroduce a Docker Hub pull. Bump all three with
   # the chart version — admin-tools runs the schema jobs and must match server.
-  "docker.io/temporalio/server:1.31.2 temporal-server:1.31.2"
-  "docker.io/temporalio/admin-tools:1.31.2 temporal-admin-tools:1.31.2"
+  "docker.io/temporalio/server:1.31.4 temporal-server:1.31.4"
+  "docker.io/temporalio/admin-tools:1.31.4 temporal-admin-tools:1.31.4"
   "docker.io/temporalio/ui:2.52.0 temporal-ui:2.52.0"
-  # kubectl toolbox for the rag-server StatefulSet migration hook
-  # (rag-server/templates/migration-sts-hooks.yaml, .Values.migrationHookImage).
-  "docker.io/alpine/k8s:1.32.13 alpine-k8s:1.32.13"
   # `helm test` connection pods only (templates/tests/test-connection.yaml in the
   # service charts). Pinned rather than the previous untagged `busybox`, which
   # resolved to :latest.
