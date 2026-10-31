@@ -7928,6 +7928,7 @@ custom_types:
     - name: MonitoringResponse
     - name: MonitoringRowResponse
     - name: ticket_create_meta_response
+    - name: ticket_transition_meta_response
     - name: ticket_field_values_response
     - name: recommendation_job_create_output
     - name: MonitoringEventsResponse
