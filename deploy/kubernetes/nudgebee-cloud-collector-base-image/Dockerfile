@@ -1,7 +1,7 @@
-FROM ghcr.io/nudgebee/alpine:3.22
+FROM ghcr.io/nudgebee/alpine:3.23
 
 # Refresh OS packages to the latest patch level (alpine:3.19 was EOL — no more
-# security updates; 3.22 is current). apk upgrade keeps subsequent rebuilds fresh.
+# security updates; 3.23 is current). apk upgrade keeps subsequent rebuilds fresh.
 # OS-package cache-bust: bumping OS_PKG_EPOCH (ISO week) changes this layer's
 # cache key so BuildKit re-runs apk upgrade and pulls current Alpine security
 # patches — its registry cache (mode=max) otherwise serves a stale package layer
@@ -67,3 +67,7 @@ RUN apk add --no-cache --virtual .gcloud-build-deps git && \
     apk del .gcloud-build-deps
 ENV CLOUDSDK_PYTHON=/usr/bin/python3
 ENV PATH="/usr/local/google-cloud-sdk/bin:$PATH"
+
+# The compilers above only exist to build wheels. Drop them so they don't ship in
+# the runtime image, where binutils alone carries scanner findings.
+RUN apk del gcc musl-dev python3-dev libffi-dev openssl-dev cargo make
