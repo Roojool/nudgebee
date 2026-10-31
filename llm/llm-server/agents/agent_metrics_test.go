@@ -153,6 +153,23 @@ func TestNormaliseGeneratedMetricsQueryValidatesQueryEnvelope(t *testing.T) {
 	assert.Equal(t, "avg:system.cpu.user{*}", got.Query)
 }
 
+func TestNormaliseGeneratedMetricsQueryValidatesDatadogQueries(t *testing.T) {
+	valid := "avg:kubernetes.cpu.usage.total{pod_name:my-pod,kube_namespace:default} by {pod_name}"
+	got, err := normaliseGeneratedMetricsQuery("datadog", valid)
+	require.NoError(t, err)
+	assert.Equal(t, valid, got.Query)
+
+	for _, raw := range []string{
+		"Here is the query: " + valid,
+		"Here are some queries:\n\n### CPU\n```text\n" + valid + "\n```\n\n### Memory\n```text\navg:kubernetes.memory.usage{*}\n```",
+		`{"query":"Here is the query: ` + valid + `"}`,
+	} {
+		_, err := normaliseGeneratedMetricsQuery("datadog", raw)
+		require.Error(t, err, "raw response should not reach the query editor: %q", raw)
+		assert.Contains(t, err.Error(), "not a runnable query")
+	}
+}
+
 // Issue #293: on an ambiguous ask, promql_query answered with a markdown menu of
 // example queries. That must never land in the editor — for a PromQL provider the
 // markdown fails the single-expression parse and surfaces as an error, and a

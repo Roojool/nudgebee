@@ -346,8 +346,12 @@ func normaliseGeneratedMetricsQuery(provider, raw string) (metricsQueryResult, e
 
 		if strings.TrimSpace(envelope.Query) != "" {
 			providerName := strings.ToLower(strings.TrimSpace(provider))
-			// ES DSL and Datadog queries do not use PromQL.
-			if providerName != "elasticsearch" && providerName != "opensearch" && providerName != "es" && providerName != "datadog" {
+			if providerName == "datadog" {
+				if !isSingleDatadogMetricsQuery(envelope.Query) {
+					return metricsQueryResult{}, fmt.Errorf("metrics query generation: response is not a runnable query (%s)", truncateString(envelope.Query, 200))
+				}
+			} else if providerName != "elasticsearch" && providerName != "opensearch" && providerName != "es" {
+				// ES DSL does not use PromQL.
 				if _, perr := promQLParser.ParseExpr(strings.ReplaceAll(envelope.Query, "__CLUSTER__", "")); perr != nil {
 					return metricsQueryResult{}, fmt.Errorf("metrics query generation: response is not a runnable query (%s)", truncateString(envelope.Query, 200))
 				}
@@ -383,9 +387,11 @@ func normaliseGeneratedMetricsQuery(provider, raw string) (metricsQueryResult, e
 	}
 
 	// Bare query text. datadog_metrics_query's contract is a bare query and there
-	// is no Go parser for Datadog syntax, so for that provider the string is
-	// trusted as-is.
+	// is no Go parser for Datadog syntax, so validate its metric shape here.
 	if strings.EqualFold(strings.TrimSpace(provider), "datadog") {
+		if !isSingleDatadogMetricsQuery(trimmed) {
+			return metricsQueryResult{}, fmt.Errorf("metrics query generation: response is not a runnable query (%s)", truncateString(trimmed, 200))
+		}
 		result.Query = trimmed
 		return result, nil
 	}
@@ -401,6 +407,12 @@ func normaliseGeneratedMetricsQuery(provider, raw string) (metricsQueryResult, e
 	}
 	result.Query = trimmed
 	return result, nil
+}
+
+func isSingleDatadogMetricsQuery(query string) bool {
+	query = strings.TrimSpace(query)
+	match := datadogMetricQueryRE.FindStringIndex(query)
+	return match != nil && match[0] == 0 && !strings.ContainsAny(query, "\r\n`") && validateDatadogQuery(query) == ""
 }
 
 // firstPromqlQuery reads promql_query's value, which is a string for the single-query
