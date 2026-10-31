@@ -196,9 +196,9 @@ RUN apk add --no-cache \
 # Python tools are installed in a venv to avoid polluting system site-packages
 # (e.g. poetry pulls in urllib3 2.x which breaks apk-installed aws-cli)
 # Alpine's npm package lags npm's own dependency fixes (tar, minimatch, pacote), so
-# replace it with a pinned npm from the same major. A global install lands in
-# /usr/local, so the apk copy has to go or scanners keep reporting it.
-RUN npm install -g npm@11.21.1 yarn pnpm && \
+# replace it with a pinned npm from the same major. The prefix keeps it out of the
+# paths `apk del` removes, and the apk copy has to go or scanners keep reporting it.
+RUN npm install -g --prefix=/usr/local npm@11.21.1 yarn pnpm && \
     apk del --no-cache npm && \
     python3 -m venv /opt/python-tools && \
     /opt/python-tools/bin/pip install --no-cache-dir --upgrade pip && \
