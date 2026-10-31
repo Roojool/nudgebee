@@ -7,6 +7,7 @@ Open-source SRE copilot — observability, FinOps, runbook automation, and incid
 [![Node](https://img.shields.io/badge/Node-25+-339933?logo=node.js&logoColor=white)](https://nodejs.org/en/download)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 [![Discord](https://img.shields.io/discord/1514262994152980622?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/C5d27ceTEv)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/nudgebee/nudgebee/badge)](https://securityscorecards.dev/viewer/?uri=github.com/nudgebee/nudgebee)
 
 ## What is Nudgebee?
 
@@ -138,7 +139,7 @@ non-local deployment, generate fresh values and review the notes below.
 | `APP_DATABASE_URL`                                     | services-server             | —                         | Compose default: `postgres://postgres:postgrespassword@localhost:5432/nudgebee?sslmode=disable`. Use `localhost` from the host, `postgres` hostname from inside the compose network.                                  |
 | `NUDGEBEE_ENCRYPTION_KEY`                              | services-server **and** app | `openssl rand -hex 32`    | Encrypts integration credentials and other sensitive columns. **Must match between services-server and app.** Rotating it makes previously-encrypted rows unreadable — there is no automatic re-encryption migration. |
 | `ACTION_API_SERVER_TOKEN`                              | services-server **and** app | `openssl rand -hex 32`    | **Optional.** Shared secret for internal app↔services-server action calls. Defaults to empty on both sides, which disables the check (fine for local dev). If you set it, the value must match in both files.         |
-| `NEXTAUTH_SECRET`                                      | app                         | `openssl rand -base64 32` | Signs both NextAuth session cookies and the inner HS256 session JWT (used by nbctl / Bearer-flow callers). Rotating it logs everyone out and invalidates outstanding bearer tokens.                                   |
+| `NEXTAUTH_SECRET`                                      | app                         | `openssl rand -base64 32` | Signs both NextAuth session cookies and the inner HS256 session JWT the gateway mints for API-token callers and forwards upstream. Rotating it logs everyone out.                                   |
 | `NEXTAUTH_DUMMY_CREDS_ENABLED` / `_PASSWORD`           | app                         | —                         | Enables the any-email/password provider. Use for local development only; turn it off in any deployment exposed beyond your laptop.                                                                                    |
 | `RABBIT_MQ_USERNAME` / `_PASSWORD` / `_HOST` / `_PORT` | services-server             | —                         | Compose defaults: `guest` / `guest` / `localhost` / `5672`.                                                                                                                                                           |
 

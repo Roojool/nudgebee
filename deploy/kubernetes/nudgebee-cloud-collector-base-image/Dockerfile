@@ -7,8 +7,9 @@ FROM ghcr.io/nudgebee/alpine:3.22
 # patches — its registry cache (mode=max) otherwise serves a stale package layer
 # forever. Committed (not a build-arg) so each refresh is a reviewable, revertable
 # diff; bump when the Trivy scan flags a stale package (e.g. c-ares CVE-2026-33630);
-# currently W36 pulls patched packages (libcrypto3 3.5.8-r0).
-ARG OS_PKG_EPOCH=2026-W36
+# currently W44 pulls ca-certificates 20261020, which drops the distrusted
+# emSign ECC Root CA - G3.
+ARG OS_PKG_EPOCH=2026-W44
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && apk upgrade --no-cache
 
 # Install system deps + AWS CLI
@@ -36,16 +37,17 @@ RUN apk add --no-cache \
 # env; the gcc/cargo/openssl-dev build deps above let the 48 wheel compile.
 RUN pip install --no-cache-dir --break-system-packages --upgrade "cryptography>=48.0.1"
 
-# Azure CLI. Install azure-cli and cryptography>=48.0.1 in one resolver pass so
-# pip satisfies both constraints simultaneously (azure-cli-core declares a bare
-# `cryptography` requirement with no ceiling, so >=48 resolves cleanly). This
-# clears the cryptography HIGH that cloud-collector-server inherits from this
-# venv. Single-pass is deliberate: if a future azure-cli ever pins
-# cryptography<48, this fails loudly at build instead of silently shipping an
-# unsupported combo.
+# Azure CLI. Install azure-cli and the patched floors in one resolver pass so
+# pip satisfies all constraints simultaneously (azure-cli-core declares a bare
+# `cryptography` requirement with no ceiling, so >=50 resolves cleanly). This
+# clears the cryptography, PyJWT, urllib3, oauthlib and certifi HIGHs that
+# cloud-collector-server inherits from this venv. Single-pass is deliberate: if
+# a future azure-cli ever pins below a floor, this fails loudly at build
+# instead of silently shipping an unsupported combo.
 RUN python3 -m venv /opt/azure-cli-venv && \
     /opt/azure-cli-venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/azure-cli-venv/bin/pip install --no-cache-dir azure-cli "cryptography>=48.0.1" && \
+    /opt/azure-cli-venv/bin/pip install --no-cache-dir azure-cli "cryptography>=50.0.0" \
+      "PyJWT>=2.14.0" "urllib3>=2.8.0" "oauthlib>=4.0.0" "certifi>=2026.10.18" && \
     ln -s /opt/azure-cli-venv/bin/az /usr/local/bin/az && \
     az extension add --name costmanagement
 

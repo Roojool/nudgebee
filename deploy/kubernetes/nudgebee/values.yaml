@@ -5,7 +5,7 @@ global:
   initImages:
     # -nb2 rebuilds gosu on Go 1.26.5 (clears 1C/14H Go-stdlib CVEs); fully clean.
     postgres: 'ghcr.io/nudgebee/postgres:16.10-alpine-nb2'
-    curl: 'ghcr.io/nudgebee/curl:8.10.1'
+    curl: 'ghcr.io/nudgebee/curl:8.23.0'
   # `helm test` connection pods only (each service chart's
   # templates/tests/test-connection.yaml). A full ref, like initImages above,
   # rather than a repository composed onto global.image.registry: this is a
@@ -522,9 +522,9 @@ services-server:
   extraEnvFromSecret: 'nudgebee-bootstrap'
   env:
     NOVA_IMAGE: 'ghcr.io/nudgebee/nova:2026-05-22T07-15-34_decaacbbf56e1789c3299a89f790b8e824ab741c'
-    TRIVY_IMAGE: 'ghcr.io/nudgebee/trivy:0.58.0'
+    TRIVY_IMAGE: 'ghcr.io/nudgebee/trivy:0.76.1-nb1'
     POPEYE_IMAGE: 'ghcr.io/nudgebee/popeye:v0.11.1-nudgebee.1'
-    KUBE_BENCH_IMAGE: 'ghcr.io/nudgebee/kube-bench:v0.10.4'
+    KUBE_BENCH_IMAGE: 'ghcr.io/nudgebee/kube-bench:v0.16.0-nb1'
 k8s-collector:
   fullnameOverride: k8s-collector
 relay-server:

@@ -4,7 +4,7 @@ global:
   imagePullSecrets: []
   initImages:
     postgres: 'ghcr.io/nudgebee/postgres:16.10-alpine'
-    curl: 'ghcr.io/nudgebee/curl:8.10.1'
+    curl: 'ghcr.io/nudgebee/curl:8.23.0'
 
 image:
   repository: migrations
