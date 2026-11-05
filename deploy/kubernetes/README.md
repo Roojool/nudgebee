@@ -263,13 +263,15 @@ Set `global.imagePullSecrets` and provide credentials via `nudgebee_registry_sec
 **App shows wrong OAuth redirect / email links**
 `nudgebee_secret.BASE_URL` doesn't match the ingress host. Update + re-run `helm upgrade`.
 
-**Temporary bootstrap login**
+**Temporary bootstrap admin login**
+During install, the chart creates the configured `admin.email` account and its organization. The temporary shared-password login is pinned to that address; other email addresses cannot use it. The password is generated per installation and preserved across upgrades.
+
 Dummy-credential sign-in is disabled on fresh installs. For a private bootstrap, set `admin.email` and explicitly enable it during install with `--set nudgebee_secret.NEXTAUTH_DUMMY_CREDS_ENABLED=true`. Retrieve its shared password with:
 ```bash
 kubectl -n nudgebee get secret nudgebee \
   -o jsonpath='{.data.NEXTAUTH_DUMMY_CREDS_PASSWORD}' | base64 -d
 ```
-Disable the provider after setup with `--set nudgebee_secret.NEXTAUTH_DUMMY_CREDS_ENABLED=false` on a Helm upgrade. Online upgrades preserve the existing Secret value when this setting is omitted; offline upgrades must set it explicitly.
+After configuring and verifying SSO, LDAP, or magic-link authentication, disable the bootstrap login with `--set nudgebee_secret.NEXTAUTH_DUMMY_CREDS_ENABLED=false` on a Helm upgrade. Online upgrades preserve the existing Secret value when this setting is omitted; offline upgrades must set it explicitly.
 
 If you use `nudgebee_secret.existingSecretName` for an externally managed Secret, update `NEXTAUTH_DUMMY_CREDS_ENABLED` in that Secret directly; Helm does not rewrite it.
 
